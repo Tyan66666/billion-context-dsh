@@ -1,10 +1,83 @@
 # billion-context-dsh
 
-**One billion, not one million.** [Active Context Pruning (ACP)](https://github.com/ranxianglei/acp-kernel) for the [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) — model-driven context management as a `CompactionEngine` backend.
+[English](./README.md) | [中文](./README.zh-CN.md)
 
-The model decides *when* and *what* to compress — not a hard limit. Long conversations stay lean while critical details (paths, decisions, errors) survive in high-fidelity summaries you can search and decompress.
+<p align="center">
+<strong>Billion-Context</strong> for <a href="https://github.com/deepseek-ai/deepseek-harness">DeepSeek Harness</a>
+<br />
+The model decides <em>when</em> and <em>what</em> to compress — not a hard limit.
+</p>
 
-This is the DSH port of [billion-context-pi](https://github.com/ranxianglei/billion-context-pi) (the Pi coding-agent adapter). The compression kernel (`acp-kernel`) is reused verbatim; the adapter layer was rewritten against DSH's durable-surface model — see [docs/dsh-porting-verification.md](docs/dsh-porting-verification.md) for the verified mapping.
+---
+
+<p align="center">
+<a href="https://www.npmjs.com/package/billion-context-dsh"><img src="https://img.shields.io/npm/v/billion-context-dsh.svg?style=flat-square" alt="npm"></a>
+<a href="https://github.com/Tyan66666/billion-context-dsh/blob/main/LICENSE"><img src="https://img.shields.io/npm/l/billion-context-dsh.svg?style=flat-square" alt="license"></a>
+<a href="https://github.com/Tyan66666/billion-context-dsh"><img src="https://img.shields.io/badge/GitHub-Tyan66666%2Fbillion--context--dsh-181717?style=flat-square&logo=github" alt="GitHub"></a>
+<a href="https://github.com/topics/dsh-plugin"><img src="https://img.shields.io/badge/topic-dsh--plugin-blue?style=flat-square" alt="dsh-plugin"></a>
+</p>
+
+<p align="center">
+<code>npm install billion-context-dsh</code>
+</p>
+
+---
+
+## Why?
+
+When conversations get long, the model runs out of context. Most tools hard-truncate — silently dropping earlier messages. **billion-context-dsh** gives the model a `compress` tool: the LLM decides **when** and **what** to compress into high-fidelity summaries, preserving critical details (file paths, decisions, error strings) while reclaiming context space.
+
+Unlike DSH's built-in auto-compaction (which replaces a range with an automatically generated summary), billion-context-dsh:
+
+- **Model-driven** — the model writes the summary itself; there is no second LLM summarization call (the ACP cost win)
+- **Advisory, never imperative** — automatic policy only *nudges*; the model decides whether and when to compress
+- **Durable & recoverable** — a compressed range becomes a checkpoint node, the originals stay in the append-only session log; `decompress` restores them, `search_context` finds information inside blocks
+- **Seq-based refs** — no message tags; surface seqs are carried by the nudge's range table, with auto-balanced range edges and `#callId` tolerance
+
+This is the DeepSeek Harness port of [billion-context-pi](https://github.com/ranxianglei/billion-context-pi) (the Pi coding-agent adapter): the compression core ([acp-kernel](https://github.com/ranxianglei/acp-kernel)) is reused verbatim, and the adapter layer was rewritten against DSH's durable-surface model — see [docs](https://github.com/Tyan66666/billion-context-dsh/tree/main/docs) for the verified mapping.
+
+## Install
+
+```bash
+npm install billion-context-dsh
+```
+
+That's it. Add one composition row where a compaction backend is expected (host composition or an agent preset's `compaction` realm):
+
+```yaml
+- id: compaction-billion-context
+  name: 'billion-context-dsh'
+  config:
+    modelContextLimit: 128000   # default; the pressure window
+```
+
+> **One context manager per agent.** The preset's `compaction` isolate realm should mount this engine *instead of* `dsh-compaction-basic` — two backends providing `ctx.compaction` would collide (see README mount examples in the [full docs](https://github.com/Tyan66666/billion-context-dsh/tree/main/docs)).
+
+## How it works
+
+DSH derives every model request from its append-only session log (the *surface*). ACP semantics map onto that model directly:
+
+| ACP concept | DSH implementation |
+|---|---|
+| `compress` tool shadows a range | durable `surfaceOp: { op: 'replace' }` — the model-written summary becomes a checkpoint node; the originals stay in the log |
+| refs (`m00001` tags) | surface seqs, carried by the nudge's compressible-range table |
+| nudge ("consider compressing") | injected at `agent/pre-step` by the kernel's pressure decision — a short advisory, never an order |
+| `decompress` | read-only recovery of shadowed originals from the log |
+| `search_context` | scores block summaries + originals rebuilt from the log |
+| `acp_status` | block ledger + context pressure |
+| block state | in-memory kernel state + **log-rebuilt ledger** (no sidecar files) |
+
+The load-bearing compression guidance (tools, philosophy, summary rules) is registered as a one-time system-prompt section, so nudges stay short. There is deliberately **no automatic summarization**: automatic policy only nudges the model (`compactIfNeeded` returns null).
+
+## Model-facing tools
+
+| Tool | What it does |
+| --- | --- |
+| `compress` | Replace a seq range with a dense summary you write (edges auto-balanced to tool-pair boundaries) |
+| `decompress` | Restore a previously compressed block's original content (read-only) |
+| `search_context` | Search compressed block summaries and originals by keyword |
+| `acp_status` | Context usage, compressed blocks, compressible ranges |
+| `/acp` | status / compress / decompress from the command bar |
 
 ## Upstream & credits
 
@@ -18,58 +91,6 @@ This project is a **port/derivation** and stands on the shoulders of the followi
 | **[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)** | DeepSeek AI | The host platform this project extends (compaction capability seam, agent presets, durable session log) |
 
 This project reuses `acp-kernel`'s compression core and `billion-context-pi`'s default behavior unchanged; the DSH adapter layer (session-event projection, durable surface transaction, model tools, nudge, config) is original work in this repository. Upstream copyright and licenses remain with their respective authors; see [LICENSE](LICENSE) for this project's terms.
-
-## How it works
-
-DSH derives every model request from its append-only session log (the *surface*). ACP semantics map onto that model directly:
-
-| ACP concept | DSH implementation |
-|---|---|
-| `compress` tool shadows a range | durable `surfaceOp: { op: 'replace' }` — the model-written summary becomes a checkpoint node; the originals stay in the log |
-| refs (`m00001` tags) | surface seqs, carried by the nudge's compressible-range table |
-| nudge ("you should compress") | injected at `agent/pre-step` by the kernel's pressure decision |
-| `decompress` | read-only recovery of shadowed originals from the log |
-| `search_context` | scores block summaries + originals rebuilt from the log |
-| `acp_status` | block ledger + context pressure |
-| block state | in-memory kernel state + **log-rebuilt ledger** (no sidecar files) |
-
-There is deliberately **no automatic summarization**: automatic policy only nudges the model (`compactIfNeeded` returns null). That is the ACP cost win — the model writes one dense summary instead of paying for a second LLM summarization call.
-
-## Install / mount
-
-The package is a drop-in compaction backend. Add one row to the host composition (or an agent preset's compaction realm):
-
-```yaml
-# host composition (e.g. profile cordis.patch.yml)
-- insert:
-    - id: compaction-billion-context
-      name: 'billion-context-dsh'
-      config:
-        modelContextLimit: 128000   # default; the pressure window
-```
-
-To replace `dsh-compaction-basic` for one agent, mount it inside the preset's `compaction` isolate realm instead:
-
-```yaml
-- id: compaction
-  name: cordis:group
-  group: true
-  isolate:
-    compaction: true
-  config:
-    - id: compaction-acp
-      name: 'billion-context-dsh'
-      config:
-        modelContextLimit: 128000
-```
-
-When the hosting context provides `ctx.tools` / `ctx.commands`, the engine also registers:
-
-- `compress` — replace ranges with dense summaries you write
-- `decompress` — recover a block's original content (read-only)
-- `search_context` — find information inside compressed blocks
-- `acp_status` — block ledger and pressure
-- `/acp` — status / compress / decompress from the command bar
 
 ## Configuration
 
@@ -99,13 +120,15 @@ npm run build       # tsup bundle (inlines acp-kernel) + .d.ts
 
 ```
 src/
-├── index.ts      # AcpCompactionEngine (CompactionEngine backend) + wiring
-├── messages.ts   # M1: session events ↔ acp-kernel CoreMessage projection
-├── state.ts      # M2: per-session kernel state
-├── region.ts     # M5: durable region transaction + log-rebuilt block ledger
-├── tools.ts      # M3: compress / decompress / search_context / acp_status
-├── nudge.ts      # M4: kernel pressure decision → injected nudge message
-└── commands.ts   # M4: /acp slash command
+├── index.ts        # AcpCompactionEngine (CompactionEngine backend) + wiring
+├── messages.ts     # M1: session events ↔ acp-kernel CoreMessage projection
+├── state.ts        # M2: per-session kernel state
+├── region.ts       # M5: durable region transaction + log-rebuilt block ledger
+├── tools.ts        # M3: compress / decompress / search_context / acp_status
+├── nudge.ts        # M4: kernel pressure decision → injected advisory nudge
+├── system-prompt.ts# M4: one-time ACP guidance section (keeps nudges short)
+├── config.ts       # kernel config assembly (thresholds + coreOverrides)
+└── commands.ts     # M4: /acp slash command
 ```
 
 ## License

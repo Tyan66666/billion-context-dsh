@@ -2,11 +2,82 @@
 
 [English](./README.md) | [中文](./README.zh-CN.md)
 
-**One billion, not one million（十亿，而非百万）。** 面向 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 的 [Active Context Pruning（ACP，主动上下文裁剪）](https://github.com/ranxianglei/acp-kernel)——以 `CompactionEngine` 后端形式提供的模型驱动上下文管理。
+<p align="center">
+<strong>Billion-Context</strong> for <a href="https://github.com/deepseek-ai/deepseek-harness">DeepSeek Harness</a>
+<br />
+由模型决定<em>何时</em>压缩、<em>压缩什么</em>——而不是一个硬性上限。
+</p>
 
-由**模型自己决定何时压缩、压缩什么**——而不是一个硬性上限。长对话保持精简，关键细节（路径、决策、错误信息）以高保真摘要保留，且可搜索、可解压。
+---
 
-这是 [billion-context-pi](https://github.com/ranxianglei/billion-context-pi)（Pi 编码代理适配器）在 DSH 上的移植。压缩内核（`acp-kernel`）原样复用；适配层针对 DSH 的 durable-surface（持久化表面）模型重写——验证过的映射关系见 [docs/dsh-porting-verification.md](docs/dsh-porting-verification.md)。
+<p align="center">
+<a href="https://www.npmjs.com/package/billion-context-dsh"><img src="https://img.shields.io/npm/v/billion-context-dsh.svg?style=flat-square" alt="npm"></a>
+<a href="https://github.com/Tyan66666/billion-context-dsh/blob/main/LICENSE"><img src="https://img.shields.io/npm/l/billion-context-dsh.svg?style=flat-square" alt="license"></a>
+<a href="https://github.com/Tyan66666/billion-context-dsh"><img src="https://img.shields.io/badge/GitHub-Tyan66666%2Fbillion--context--dsh-181717?style=flat-square&logo=github" alt="GitHub"></a>
+<a href="https://github.com/topics/dsh-plugin"><img src="https://img.shields.io/badge/topic-dsh--plugin-blue?style=flat-square" alt="dsh-plugin"></a>
+</p>
+
+<p align="center">
+<code>npm install billion-context-dsh</code>
+</p>
+
+---
+
+## 为什么？
+
+当对话变长，模型会耗尽上下文。多数工具直接硬截断——悄悄丢弃早期消息。**billion-context-dsh** 给模型一个 `compress` 工具：由 LLM 决定**何时**、**压缩什么**，写成高保真摘要，保留关键细节（文件路径、决策、错误信息）的同时回收上下文空间。
+
+与 DSH 内置的自动压缩（用自动生成的摘要替换一段范围）不同，billion-context-dsh：
+
+- **模型驱动** —— 摘要由模型自己书写，没有第二次 LLM 摘要调用（ACP 的成本优势）
+- **只建议、不强令** —— 自动策略只 *nudge*（提醒），是否压缩、何时压缩由模型决定
+- **持久且可恢复** —— 压缩范围成为 checkpoint 节点，原文保留在 append-only 会话日志中；`decompress` 可恢复，`search_context` 可在块内查找
+- **基于 seq 引用** —— 不需要消息标签；surface seq 由 nudge 的范围表携带，范围边界自动平衡、容忍 `#callId` 片段
+
+这是 [billion-context-pi](https://github.com/ranxianglei/billion-context-pi)（Pi 编码代理适配器）在 DeepSeek Harness 上的移植：压缩内核（[acp-kernel](https://github.com/ranxianglei/acp-kernel)）原样复用，适配层针对 DSH 的 durable-surface 模型重写——经过验证的映射关系见 [docs](https://github.com/Tyan66666/billion-context-dsh/tree/main/docs)。
+
+## 安装
+
+```bash
+npm install billion-context-dsh
+```
+
+就这样。在需要压缩后端的位置加一行组合配置（宿主组合或 agent preset 的 `compaction` realm）：
+
+```yaml
+- id: compaction-billion-context
+  name: 'billion-context-dsh'
+  config:
+    modelContextLimit: 128000   # 默认；压力窗口
+```
+
+> **每个 agent 只留一个上下文管理器。** preset 的 `compaction` isolate realm 应该用本引擎*替换* `dsh-compaction-basic`——两个后端同时 provide `ctx.compaction` 会冲突（完整文档见 [docs](https://github.com/Tyan66666/billion-context-dsh/tree/main/docs)）。
+
+## 工作原理
+
+DSH 的每个模型请求都派生自其 append-only 会话日志（*surface*）。ACP 语义直接映射到这一模型：
+
+| ACP 概念 | DSH 实现 |
+|---|---|
+| `compress` 工具遮蔽一段范围 | 持久化 `surfaceOp: { op: 'replace' }`——模型书写的摘要成为 checkpoint 节点；原文保留在日志中 |
+| refs（`m00001` 标签） | surface seq，由 nudge 的可压缩范围表携带 |
+| nudge（"考虑压缩一下"） | 由内核的压力决策在 `agent/pre-step` 注入——简短建议，绝非命令 |
+| `decompress` | 从日志只读恢复被遮蔽的原文 |
+| `search_context` | 对从日志重建的块摘要与原文打分 |
+| `acp_status` | 块账本与上下文压力 |
+| 块状态 | 内存内核状态 + **日志重建账本**（无旁车文件） |
+
+承载性的压缩指引（工具、哲学、摘要规则）注册为一次性系统提示段，因此 nudge 保持简短。刻意**不做自动摘要**：自动策略只 nudge 模型（`compactIfNeeded` 返回 null）。
+
+## 模型工具
+
+| 工具 | 作用 |
+| --- | --- |
+| `compress` | 用你书写的紧凑摘要替换 seq 范围（边界自动平衡到 tool-call/result 配对点） |
+| `decompress` | 恢复已压缩块的原始内容（只读） |
+| `search_context` | 按关键词搜索压缩块摘要与原文 |
+| `acp_status` | 上下文占用、压缩块、可压缩范围 |
+| `/acp` | 从命令栏执行 status / compress / decompress |
 
 ## 上游项目与致谢
 
@@ -20,58 +91,6 @@
 | **[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)** | DeepSeek AI | 本项目所扩展的宿主平台（compaction 能力接缝、agent preset、持久化会话日志） |
 
 本项目原样复用 `acp-kernel` 的压缩内核与 `billion-context-pi` 的默认行为；DSH 适配层（会话事件投影、持久化表面事务、模型工具、nudge、配置）为本仓库原创。上游版权与许可归其各自作者所有；本项目的许可条款见 [LICENSE](LICENSE)。
-
-## 工作原理
-
-DSH 的每个模型请求都派生自其 append-only 会话日志（*surface*）。ACP 语义直接映射到这一模型：
-
-| ACP 概念 | DSH 实现 |
-|---|---|
-| `compress` 工具遮蔽一段范围 | 持久化 `surfaceOp: { op: 'replace' }`——模型书写的摘要成为 checkpoint 节点；原文保留在日志中 |
-| refs（`m00001` 标签） | 表面 seq，由 nudge 的可压缩范围表携带 |
-| nudge（"你也许该压缩了"） | 由内核的压力决策在 `agent/pre-step` 注入 |
-| `decompress` | 从日志只读恢复被遮蔽的原文 |
-| `search_context` | 对从日志重建的块摘要与原文打分 |
-| `acp_status` | 块账本与上下文压力 |
-| 块状态 | 内存内核状态 + **日志重建账本**（无旁车文件） |
-
-刻意**不做自动摘要**：自动策略只 nudge 模型（`compactIfNeeded` 返回 null）。这正是 ACP 的成本优势——模型书写一份紧凑摘要，而不是为第二次 LLM 摘要调用付费。
-
-## 安装 / 挂载
-
-本包是即插即用的压缩后端。在宿主组合（或 agent preset 的 compaction realm）中添加一行：
-
-```yaml
-# 宿主组合（例如 profile 的 cordis.patch.yml）
-- insert:
-    - id: compaction-billion-context
-      name: 'billion-context-dsh'
-      config:
-        modelContextLimit: 128000   # 默认；压力窗口
-```
-
-要为某个 agent 替换 `dsh-compaction-basic`，改为挂载在 preset 的 `compaction` isolate realm 中：
-
-```yaml
-- id: compaction
-  name: cordis:group
-  group: true
-  isolate:
-    compaction: true
-  config:
-    - id: compaction-acp
-      name: 'billion-context-dsh'
-      config:
-        modelContextLimit: 128000
-```
-
-当宿主上下文提供 `ctx.tools` / `ctx.commands` 时，引擎还会注册：
-
-- `compress` — 用你书写的紧凑摘要替换范围
-- `decompress` — 恢复某块的原始内容（只读）
-- `search_context` — 在压缩块内查找信息
-- `acp_status` — 块账本与压力
-- `/acp` — 从命令栏执行 status / compress / decompress
 
 ## 配置
 
@@ -101,14 +120,15 @@ npm run build       # tsup 打包（内联 acp-kernel）+ .d.ts
 
 ```
 src/
-├── index.ts      # AcpCompactionEngine（CompactionEngine 后端）+ 接线
-├── messages.ts   # M1: 会话事件 ↔ acp-kernel CoreMessage 投影
-├── state.ts      # M2: 每会话内核状态
-├── region.ts     # M5: 持久化区域事务 + 日志重建块账本
-├── tools.ts      # M3: compress / decompress / search_context / acp_status
-├── nudge.ts      # M4: 内核压力决策 → 注入的建议式 nudge 消息
-├── system-prompt.ts # M4: ACP 指引系统提示段（一次性，不进 nudge）
-└── commands.ts   # M4: /acp 斜杠命令
+├── index.ts        # AcpCompactionEngine（CompactionEngine 后端）+ 接线
+├── messages.ts     # M1: 会话事件 ↔ acp-kernel CoreMessage 投影
+├── state.ts        # M2: 每会话内核状态
+├── region.ts       # M5: 持久化区域事务 + 日志重建块账本
+├── tools.ts        # M3: compress / decompress / search_context / acp_status
+├── nudge.ts        # M4: 内核压力决策 → 注入的建议式 nudge
+├── system-prompt.ts# M4: 一次性 ACP 指引段（让 nudge 保持简短）
+├── config.ts       # 内核配置组装（阈值 + coreOverrides）
+└── commands.ts     # M4: /acp 斜杠命令
 ```
 
 ## License
