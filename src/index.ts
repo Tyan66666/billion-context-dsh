@@ -41,9 +41,11 @@ import { AcpStateStore } from './state.ts'
 import { makeTools, type ToolEnvironment } from './tools.ts'
 import { acpCommand } from './commands.ts'
 import { buildNudge } from './nudge.ts'
+import { ACP_SYSTEM_PROMPT, ACP_SYSTEM_PROMPT_ORDER } from './system-prompt.ts'
 
 export { AcpStateStore } from './state.ts'
 export { kernelConfigFor, type KernelConfigInput } from './config.ts'
+export { ACP_SYSTEM_PROMPT, ACP_SYSTEM_PROMPT_ORDER } from './system-prompt.ts'
 export { makeTools, type ToolEnvironment } from './tools.ts'
 export { acpCommand } from './commands.ts'
 export { buildNudge, type NudgeEnvironment, type NudgeOutcome } from './nudge.ts'
@@ -137,6 +139,16 @@ export class AcpCompactionEngine extends CompactionEngine {
         const outcome = buildNudge(payload.agent, env, this.lastNudgeTurn)
         if (outcome === null) return decision
         return { kind: 'enter', messages: [...decision.messages, outcome.message] }
+      })
+    }
+    // The load-bearing ACP guidance lives in the system prompt ONCE; nudges
+    // stay short and advisory (model-driven: the model decides).
+    const systemPrompt = ctx.get('systemPrompt')
+    if (systemPrompt !== undefined) {
+      systemPrompt.section({
+        name: 'billion-context-dsh',
+        order: ACP_SYSTEM_PROMPT_ORDER,
+        text: ACP_SYSTEM_PROMPT,
       })
     }
   }

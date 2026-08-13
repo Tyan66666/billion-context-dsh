@@ -8,7 +8,6 @@
 
 import {
   estimateTokensFast,
-  renderNudgeText,
   type CompressionCore,
   type NudgeDecision,
 } from 'acp-kernel'
@@ -78,11 +77,28 @@ export function buildNudge(
   if (alreadyShown) return null
   lastNudgeTurn.set(session.id, turnNumber)
 
-  const rendered = renderNudgeText(nudge)
-  const text = `${rendered.text}${rangeTable(nudge, turn.state)}`
+  const text = buildNudgeText(nudge, emergency, turn.state)
   const message = createUserMessage({
     content: [{ type: 'text', text }],
     source: { kind: 'plugin', plugin: 'acp-nudge' },
   })
   return { message, emergency }
+}
+
+/**
+ * A short ADVISORY nudge — ACP is model-driven, the model decides whether and
+ * when to compress. Full guidance (tools, philosophy, summary rules) lives in
+ * the system prompt once, not in every nudge.
+ */
+function buildNudgeText(
+  nudge: NudgeDecision,
+  emergency: boolean,
+  state: { messageRefs: { byRef: Record<string, string> } },
+): string {
+  const pct = Math.round(nudge.contextUsage * 100)
+  const frame = emergency
+    ? `⚠️ Context usage is at ${pct}% of the window — nearly full. Consider compressing consumed ranges soon so working context stays available; the choice and timing are yours.`
+    : `Context usage is at ${pct}%. This is a suggestion, not a requirement — you decide whether and when to compress.`
+  const guidance = 'Compress by need, not by percentage: replace only ranges you have genuinely consumed, with dense self-contained summaries.'
+  return [frame, '', guidance, rangeTable(nudge, state)].join('\n')
 }
