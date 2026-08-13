@@ -81,6 +81,12 @@ DSH derives every model request from its append-only session log (the *surface*)
 
 The load-bearing compression guidance (tools, philosophy, summary rules) is registered as a one-time system-prompt section, so nudges stay short. There is deliberately **no automatic summarization**: automatic policy only nudges the model (`compactIfNeeded` returns null).
 
+## Video
+
+A walkthrough of the ACP philosophy this project inherits — how active context compression keeps a session lean at ~200K tokens (opencode-acp & billion-context-pi):
+
+[![Watch on Bilibili](https://i1.hdslb.com/bfs/archive/083a77fede77502cbd6b2e206f8aadcc4dacc7ea.jpg)](https://www.bilibili.com/video/BV1qAMR6MEA4/)
+
 ## Model-facing tools
 
 | Tool | What it does |

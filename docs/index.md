@@ -6,6 +6,14 @@
 
 The model decides *when* and *what* to compress — not a hard limit. This project ports [billion-context-pi](https://github.com/ranxianglei/billion-context-pi) (by [ranxianglei](https://github.com/ranxianglei), MIT) to DSH as a `CompactionEngine` backend; the compression core [acp-kernel](https://github.com/ranxianglei/acp-kernel) is reused verbatim.
 
+
+
+## Video — ACP 原理与哲学
+
+<iframe src="//player.bilibili.com/player.html?isOutside=true&aid=117032389444915&bvid=BV1qAMR6MEA4&cid=40568295167&p=1" scrolling="no" border="0" frameborder="no" framespacing="0" allowfullscreen="true" style="width:100%;aspect-ratio:16/9;border:0"></iframe>
+
+[在 B 站打开原视频](https://www.bilibili.com/video/BV1qAMR6MEA4/) — 主动上下文压缩插件 opencode-acp 与 billion-context-pi（本项目理念的源头）。
+
 ## Guides
 
 | Document | What it covers |

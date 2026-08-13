@@ -81,6 +81,12 @@ DSH 的每个模型请求都派生自其 append-only 会话日志（*surface*）
 
 承载性的压缩指引（工具、哲学、摘要规则）注册为一次性系统提示段，因此 nudge 保持简短。刻意**不做自动摘要**：自动策略只 nudge 模型（`compactIfNeeded` 返回 null）。
 
+## 视频讲解
+
+本项目继承的 ACP 哲学讲解——主动上下文压缩如何在约 20 万 token 内保持会话精简（opencode-acp 与 billion-context-pi）：
+
+[![在 B 站观看](https://i1.hdslb.com/bfs/archive/083a77fede77502cbd6b2e206f8aadcc4dacc7ea.jpg)](https://www.bilibili.com/video/BV1qAMR6MEA4/)
+
 ## 模型工具
 
 | 工具 | 作用 |
