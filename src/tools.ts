@@ -151,12 +151,20 @@ async function handleCompress(env: ToolEnvironment, args: CompressArgs, exec: To
     // shadow exactly what resolveSurfaceRange approved.
     const { start, end } = resolveSurfaceRange(session, range.startSeq, range.endSeq)
     const shadowed = shadowedSeqsOf(session, start, end)
+    // Estimate the reclaimed tokens from the actual shadowed messages so the
+    // durable ledger (compaction/summary.shadowedTokenCount) reports a real
+    // number instead of 0.
+    let shadowedTokens = 0
+    for (const seq of shadowed) {
+      const event = session.events[seq]
+      if (event !== undefined) shadowedTokens += estimateTokensFast(extractEventText(event))
+    }
     const { compactionId } = runCompactionTransaction(session, {
       start,
       end,
       shadowedSeqs: shadowed,
       summary: [{ type: 'text', text: original.summary }],
-      shadowedTokenCount: 0,
+      shadowedTokenCount: shadowedTokens,
       provider: agent.options.provider ?? '',
       model: agent.options.model ?? '',
     })

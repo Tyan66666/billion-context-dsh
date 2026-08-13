@@ -67,6 +67,7 @@ test('M3: compress lands a durable block and shrinks the surface', async () => {
   const ledger = rebuildBlockLedger(session.events)
   assert.equal(ledger.length, 1)
   assert.deepEqual(ledger[0]!.shadowedSeqs, [1, 2, 3, 4, 5])
+  assert.ok(ledger[0]!.shadowedTokenCount > 0, 'the ledger records real reclaimed tokens, not 0')
 })
 
 test('M3: decompress recovers the shadowed originals read-only', async () => {

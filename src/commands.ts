@@ -48,12 +48,17 @@ function compressText(env: ToolEnvironment, agent: Agent, args: string[]): strin
   const session = agent.session
   const { start, end } = resolveSurfaceRange(session, startSeq, endSeq)
   const shadowed = shadowedSeqsOf(session, startSeq, endSeq)
+  let shadowedTokens = 0
+  for (const seq of shadowed) {
+    const event = session.events[seq]
+    if (event !== undefined) shadowedTokens += estimateTokensFast(extractEventText(event))
+  }
   const { compactionId } = runCompactionTransaction(session, {
     start,
     end,
     shadowedSeqs: shadowed,
     summary: [{ type: 'text', text: summary }],
-    shadowedTokenCount: 0,
+    shadowedTokenCount: shadowedTokens,
     provider: agent.options.provider ?? '',
     model: agent.options.model ?? '',
   })
