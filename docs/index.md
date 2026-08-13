@@ -10,6 +10,8 @@ The model decides *when* and *what* to compress — not a hard limit. This proje
 
 ## Video — ACP 原理与哲学
 
+*视频原作者：[裘香莲](https://space.bilibili.com/)（B 站 UP 主），非本项目制作。*
+
 <iframe src="//player.bilibili.com/player.html?isOutside=true&aid=117032389444915&bvid=BV1qAMR6MEA4&cid=40568295167&p=1" scrolling="no" border="0" frameborder="no" framespacing="0" allowfullscreen="true" style="width:100%;aspect-ratio:16/9;border:0"></iframe>
 
 [在 B 站打开原视频](https://www.bilibili.com/video/BV1qAMR6MEA4/) — 主动上下文压缩插件 opencode-acp 与 billion-context-pi（本项目理念的源头）。
