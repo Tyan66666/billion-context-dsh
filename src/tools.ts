@@ -62,8 +62,18 @@ const compressParameters = {
     items: {
       type: 'object' as const,
       properties: {
-        startSeq: { type: 'integer' as const, description: 'First surface seq of the range.' },
-        endSeq: { type: 'integer' as const, description: 'Inclusive last surface seq of the range.' },
+        startSeq: {
+          oneOf: [
+            { type: 'integer' as const, description: 'First surface seq of the range.' },
+            { type: 'string' as const, description: 'Seq as text; a trailing #callId fragment is ignored.' },
+          ],
+        },
+        endSeq: {
+          oneOf: [
+            { type: 'integer' as const, description: 'Inclusive last surface seq of the range.' },
+            { type: 'string' as const, description: 'Seq as text; a trailing #callId fragment is ignored.' },
+          ],
+        },
         summary: { type: 'string' as const, description: 'Complete technical summary replacing the range; keep paths, decisions, values verbatim. Minimum 50 characters.' },
         topic: { type: 'string' as const, description: 'Short label (3-5 words) for this range.' },
       },
@@ -72,9 +82,19 @@ const compressParameters = {
   },
 } as const
 
+/** Normalize a seq arg: number, "295", or "295#call_00_xxx" → 295. */
+function parseSeq(value: number | string): number {
+  const text = String(value).split('#')[0]!.trim()
+  const seq = Number(text)
+  if (!Number.isInteger(seq) || seq < 0) {
+    throw new Error(`billion-context-dsh: invalid seq "${String(value)}" — use a surface seq like 295`)
+  }
+  return seq
+}
+
 interface CompressArgs {
   topic?: string
-  content: Array<{ startSeq: number; endSeq: number; summary: string; topic?: string }>
+  content: Array<{ startSeq: number | string; endSeq: number | string; summary: string; topic?: string }>
 }
 
 /** Resolve seq → kernel ref, then applyCompression and land the transaction. */
@@ -92,15 +112,19 @@ async function handleCompress(env: ToolEnvironment, args: CompressArgs, exec: To
   const byRaw = turn.state.messageRefs.byRaw
 
   const ranges = args.content.map((range) => {
-    const startRef = byRaw[String(range.startSeq)]
-    const endRef = byRaw[String(range.endSeq)]
+    const startSeq = parseSeq(range.startSeq)
+    const endSeq = parseSeq(range.endSeq)
+    const startRef = byRaw[String(startSeq)]
+    const endRef = byRaw[String(endSeq)]
     if (startRef === undefined || endRef === undefined) {
       throw new Error(
-        `billion-context-dsh: seq ${range.startSeq}..${range.endSeq} has no assigned ref — `
-        + 'the range must be on the current surface',
+        `billion-context-dsh: seq ${startSeq}..${endSeq} has no assigned ref — `
+        + 'the range must be on the current surface (run acp_status for the live seq list)',
       )
     }
     return {
+      startSeq,
+      endSeq,
       startRef,
       endRef,
       summary: range.summary,
@@ -109,7 +133,7 @@ async function handleCompress(env: ToolEnvironment, args: CompressArgs, exec: To
   })
 
   const applied = env.kernel.applyCompression({
-    ranges,
+    ranges: ranges.map(({ startRef, endRef, summary, topic }) => ({ startRef, endRef, summary, topic })),
     messages: coreMessages,
     state: turn.state,
     config,
@@ -121,19 +145,26 @@ async function handleCompress(env: ToolEnvironment, args: CompressArgs, exec: To
 
   const lines: string[] = []
   for (let index = 0; index < ranges.length; index += 1) {
-    const range = args.content[index]!
+    const range = ranges[index]!
+    const original = args.content[index]!
+    // The edges may have been nudged to the nearest tool-pairing-balanced cut;
+    // shadow exactly what resolveSurfaceRange approved.
     const { start, end } = resolveSurfaceRange(session, range.startSeq, range.endSeq)
-    const shadowed = shadowedSeqsOf(session, range.startSeq, range.endSeq)
+    const shadowed = shadowedSeqsOf(session, start, end)
     const { compactionId } = runCompactionTransaction(session, {
       start,
       end,
       shadowedSeqs: shadowed,
-      summary: [{ type: 'text', text: range.summary }],
+      summary: [{ type: 'text', text: original.summary }],
       shadowedTokenCount: 0,
       provider: agent.options.provider ?? '',
       model: agent.options.model ?? '',
     })
-    lines.push(`  block ${compactionId.slice(0, 8)}: seqs ${start}..${end}, ${shadowed.length} messages shadowed`)
+    const adjusted = start !== range.startSeq || end !== range.endSeq
+    lines.push(
+      `  block ${compactionId.slice(0, 8)}: seqs ${start}..${end}, ${shadowed.length} messages shadowed`
+      + (adjusted ? ` (adjusted from ${range.startSeq}..${range.endSeq} to balanced edges)` : ''),
+    )
   }
 
   return {

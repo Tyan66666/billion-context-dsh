@@ -149,6 +149,21 @@ test('M3: compress rejects ranges outside the assigned surface', async () => {
   assert.match((result as { text: string }).text, /Compressed 1 block/)
 })
 
+test('M3: compress accepts seq args with a trailing #callId fragment', async () => {
+  const env = makeEnv()
+  const session = buildTextSession(12)
+  const compress = toolOf(env, 'compress')
+  const result = await compress.execute({
+    content: [{
+      startSeq: '1#call_00_L7KTyu4R9MldKAI5sKhT8176',
+      endSeq: '5',
+      summary: 'This summary is long enough to pass the kernel minimum length threshold of fifty characters for the compressible content range.',
+    }],
+  } as never, fakeExec(session))
+  assert.match((result as { text: string }).text, /Compressed 1 block/)
+  assert.equal(session.deriveMessages().length, 8, 'seq 1..5 shadowed as requested')
+})
+
 test('M3: tools refuse to run without an agent context', async () => {
   const env = makeEnv()
   const session = buildTextSession(4)

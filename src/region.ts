@@ -56,8 +56,12 @@ export function assertNoActiveCompaction(events: readonly SessionEvent[]): void 
 }
 
 /**
- * Validate one inclusive surface span: both edges on the current surface, in
- * surface order, and tool-call/result balanced at both edges.
+ * Validate one inclusive surface span and adjust its edges to the nearest
+ * tool-pairing-balanced cuts. Missing or reversed ranges still throw; an
+ * edge that sits inside a tool-call/result pair is nudged outward to the
+ * closest clean cut instead (models routinely pick edges from the nudge's
+ * range table that straddle a pair). The returned range is what a caller
+ * should actually shadow.
  */
 export function resolveSurfaceRange(
   session: Session,
@@ -65,21 +69,28 @@ export function resolveSurfaceRange(
   end: number,
 ): { start: number; end: number } {
   const nodes = session.surface.nodes
-  const startIdx = nodes.indexOf(start)
-  const endIdx = nodes.indexOf(end)
+  let startIdx = nodes.indexOf(start)
+  let endIdx = nodes.indexOf(end)
   if (startIdx < 0 || endIdx < 0) {
     throw new Error(`billion-context-dsh: seq ${start}..${end} not in the current surface`)
   }
   if (startIdx > endIdx) {
     throw new Error(`billion-context-dsh: reversed range ${start}..${end}`)
   }
-  if (!toolPairingBalancedBefore(session, start)) {
-    throw new Error('billion-context-dsh: range start sits inside a tool-call/result pair')
+  // Nudge the start forward and the end backward to the nearest balanced cuts.
+  while (startIdx <= endIdx && !toolPairingBalancedBefore(session, nodes[startIdx]!)) {
+    startIdx += 1
   }
-  if (!toolPairingBalancedAfter(session, end)) {
-    throw new Error('billion-context-dsh: range end sits inside a tool-call/result pair')
+  while (endIdx >= startIdx && !toolPairingBalancedAfter(session, nodes[endIdx]!)) {
+    endIdx -= 1
   }
-  return { start, end }
+  if (startIdx > endIdx) {
+    throw new Error(
+      `billion-context-dsh: no tool-pairing-balanced range inside seq ${start}..${end} — `
+      + 'narrow the range or consult acp_status for the current surface',
+    )
+  }
+  return { start: nodes[startIdx]!, end: nodes[endIdx]! }
 }
 
 /** The surface seqs shadowed by the inclusive positional span. */

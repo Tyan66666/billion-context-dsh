@@ -108,15 +108,20 @@ test('M5: a second active compaction is rejected', () => {
   assert.throws(() => assertNoActiveCompaction(session.events), /already active/)
 })
 
-test('M5: tool-call ranges must stay pair-balanced', () => {
+test('M5: tool-call ranges are auto-adjusted to balanced edges', () => {
   const session = Session.create('pair')
   appendTurn(session, 1)
   appendUser(session, longText('q', 0))
   appendToolCall(session, 'calling', 'call_1')
   appendToolResult(session, 'result text', 'call_1')
   appendUser(session, longText('q2', 1))
-  // Cutting inside the pair (assistant tool-call alone) is rejected.
-  assert.throws(() => resolveSurfaceRange(session, 1, 2), /tool-call\/result pair/)
-  // A balanced cut is fine.
+  // surface: [1 user, 2 tool-call, 3 tool/result, 4 user]
+  // A range whose end sits inside the pair (…, tool-call) nudges the end back
+  // to the nearest balanced cut.
+  assert.deepEqual(resolveSurfaceRange(session, 1, 2), { start: 1, end: 1 })
+  // A complete call/result pair is balanced and unchanged.
+  assert.deepEqual(resolveSurfaceRange(session, 2, 3), { start: 2, end: 3 })
   assert.deepEqual(resolveSurfaceRange(session, 1, 3), { start: 1, end: 3 })
+  // A lone unbalanced call has no balanced cut to adjust to.
+  assert.throws(() => resolveSurfaceRange(session, 2, 2), /no tool-pairing-balanced range/)
 })
