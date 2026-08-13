@@ -43,6 +43,7 @@ import { acpCommand } from './commands.ts'
 import { buildNudge } from './nudge.ts'
 
 export { AcpStateStore } from './state.ts'
+export { kernelConfigFor, type KernelConfigInput } from './config.ts'
 export { makeTools, type ToolEnvironment } from './tools.ts'
 export { acpCommand } from './commands.ts'
 export { buildNudge, type NudgeEnvironment, type NudgeOutcome } from './nudge.ts'
@@ -61,6 +62,14 @@ export { eventsToCoreMessages, projectEvent, surfaceEventsOf, extractEventText }
 export interface AcpConfig {
   /** The context window used for pressure decisions. Default 128000. */
   readonly modelContextLimit: number
+  /** Nudge window lower bound (usage fraction). Kernel default 0.45 — same as billion-context-pi. */
+  readonly nudgeMinContextLimitPct?: number
+  /** Nudge window upper bound (over-limit). Kernel default 0.75 — same as billion-context-pi. */
+  readonly nudgeMaxContextLimitPct?: number
+  /** Emergency nudge threshold (bypasses per-turn dedup). Kernel default 0.95 — same as billion-context-pi. */
+  readonly nudgeEmergencyThresholdPct?: number
+  /** Any other acp-kernel Config override (billion-context-pi's `coreOverrides` escape hatch). */
+  readonly coreOverrides?: Partial<import('acp-kernel').Config>
   /** Register the four model tools on `ctx.tools`. Default true. */
   readonly autoTools: boolean
   /** Register the `/acp` command on `ctx.commands`. Default true. */
@@ -105,6 +114,10 @@ export class AcpCompactionEngine extends CompactionEngine {
       kernel: this.kernel,
       store: this.store,
       modelContextLimit: this.config.modelContextLimit,
+      nudgeMinContextLimitPct: this.config.nudgeMinContextLimitPct,
+      nudgeMaxContextLimitPct: this.config.nudgeMaxContextLimitPct,
+      nudgeEmergencyThresholdPct: this.config.nudgeEmergencyThresholdPct,
+      coreOverrides: this.config.coreOverrides,
     }
 
     if (this.config.autoTools) {

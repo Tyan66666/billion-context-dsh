@@ -58,7 +58,7 @@ export function appendToolResult(session: Session, text: string, callId: string,
     message: {
       id: `res-${callId}`,
       role: 'user',
-      content: [{ type: 'tool-result', callId, output: [{ type: 'text', text }] }],
+      content: [{ type: 'tool-result', toolCallId: callId, content: [{ type: 'text', text }] }],
       source: { kind: 'tool', callId },
     },
   }, { surfaceOp: 'append' })

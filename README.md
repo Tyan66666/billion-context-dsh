@@ -63,6 +63,10 @@ When the hosting context provides `ctx.tools` / `ctx.commands`, the engine also 
 | Key | Default | Meaning |
 |---|---|---|
 | `modelContextLimit` | `128000` | Context window used for the kernel's pressure decisions |
+| `nudgeMinContextLimitPct` | kernel default `0.45` | Nudge window lower bound (usage fraction) — same default as billion-context-pi |
+| `nudgeMaxContextLimitPct` | kernel default `0.75` | Over-limit line: above this the nudge fires regardless of growth |
+| `nudgeEmergencyThresholdPct` | kernel default `0.95` | Emergency nudge (bypasses the per-turn dedup) |
+| `coreOverrides` | — | Any other acp-kernel `Config` override (billion-context-pi's `coreOverrides` escape hatch) |
 | `autoTools` | `true` | Register the four model tools on `ctx.tools` |
 | `autoCommand` | `true` | Register the `/acp` command on `ctx.commands` |
 | `autoNudge` | `true` | Inject the nudge into `agent/pre-step` |

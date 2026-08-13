@@ -14,14 +14,27 @@
 import type { CoreMessage } from 'acp-kernel'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 
-/** Extract plain text from a DSH content block array or string. */
+/**
+ * Extract plain text from a DSH content block array or string.
+ *
+ * Recursive: a real DSH `tool-result` block is `{ type: 'tool-result',
+ * toolCallId, content: ContentBlock[] }` — the inner `content` array holds
+ * the actual `text` blocks, so a top-level-only walk would drop every tool
+ * result from the projection (and with it the seq's ref assignment, breaking
+ * compress boundary resolution). Nested arrays are flattened depth-first.
+ */
 export function extractText(content: unknown): string {
   if (typeof content === 'string') return content
   if (!Array.isArray(content)) return ''
   const parts: string[] = []
   for (const block of content) {
-    const b = block as { type?: string; text?: string }
-    if (b.type === 'text' && typeof b.text === 'string') parts.push(b.text)
+    if (block === null || typeof block !== 'object') continue
+    const b = block as { type?: unknown; text?: unknown; content?: unknown }
+    if (b.type === 'text' && typeof b.text === 'string') {
+      parts.push(b.text)
+    } else if (Array.isArray(b.content)) {
+      parts.push(extractText(b.content))
+    }
   }
   return parts.join('\n')
 }

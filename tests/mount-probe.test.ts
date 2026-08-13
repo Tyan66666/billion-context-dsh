@@ -56,7 +56,14 @@ test('M1: DSH surface events project to acp-kernel CoreMessage', () => {
         turn: 1,
         step: 2,
         message: {
-          content: [{ type: 'text', text: 'tool output' }],
+          // Real DSH ToolResultBlock: nested content array inside a
+          // 'tool-result' block. Regression: extractText must recurse or the
+          // result projects to empty text and its seq never gets a ref.
+          content: [{
+            type: 'tool-result',
+            toolCallId: 'call_1',
+            content: [{ type: 'text', text: 'tool output' }],
+          }],
           toolName: 'bash',
           toolCallId: 'call_1',
         },
@@ -76,6 +83,7 @@ test('M1: DSH surface events project to acp-kernel CoreMessage', () => {
   assert.equal(msgs[3]!.contentType, 'tool-result')
   assert.equal(msgs[3]!.toolCallId, 'call_1')
   assert.equal(msgs[3]!.role, 'tool')
+  assert.equal(msgs[3]!.text, 'tool output', 'nested tool-result text must project')
 })
 
 test('M1: non-surface events project to nothing', () => {

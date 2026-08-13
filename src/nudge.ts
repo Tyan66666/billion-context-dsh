@@ -7,7 +7,6 @@
  */
 
 import {
-  defaultConfig,
   estimateTokensFast,
   renderNudgeText,
   type CompressionCore,
@@ -15,15 +14,15 @@ import {
 } from 'acp-kernel'
 import { createUserMessage, type UserMessage } from '@deepseek-ai/dsh-llm'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import type { AcpStateStore } from './state.ts'
+import { AcpStateStore } from './state.ts'
 import { eventsToCoreMessages, surfaceEventsOf } from './messages.ts'
 import { findOpenTurn } from './region.ts'
+import { kernelConfigFor, type KernelConfigInput } from './config.ts'
 
 /** Kernel inputs the nudge path shares with the compress tool. */
-export interface NudgeEnvironment {
+export interface NudgeEnvironment extends KernelConfigInput {
   readonly kernel: CompressionCore
   readonly store: AcpStateStore
-  readonly modelContextLimit: number
 }
 
 export interface NudgeOutcome {
@@ -66,7 +65,7 @@ export function buildNudge(
   const state = env.store.stateFor(session)
   const coreMessages = eventsToCoreMessages(surfaceEventsOf(session))
   const tokenCount = coreMessages.reduce((sum, message) => sum + estimateTokensFast(message.text ?? ''), 0)
-  const config = defaultConfig(env.modelContextLimit)
+  const config = kernelConfigFor(env)
   const turn = env.kernel.processTurn({ messages: coreMessages, state, config, tokenCount })
   env.store.set(session, turn.state)
 

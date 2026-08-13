@@ -11,9 +11,10 @@
  */
 
 import { defineTool, type ToolDefinition, type ToolRunContext } from '@deepseek-ai/dsh-tools'
-import { defaultConfig, estimateTokensFast, type CompressionCore } from 'acp-kernel'
+import { estimateTokensFast, type CompressionCore } from 'acp-kernel'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { AcpStateStore } from './state.ts'
+import { kernelConfigFor, type KernelConfigInput } from './config.ts'
 import {
   rebuildBlockLedger,
   resolveSurfaceRange,
@@ -22,10 +23,9 @@ import {
 } from './region.ts'
 import { eventsToCoreMessages, extractEventText, surfaceEventsOf } from './messages.ts'
 
-export interface ToolEnvironment {
+export interface ToolEnvironment extends KernelConfigInput {
   readonly kernel: CompressionCore
   readonly store: AcpStateStore
-  readonly modelContextLimit: number
 }
 
 interface TextOutput {
@@ -84,7 +84,7 @@ async function handleCompress(env: ToolEnvironment, args: CompressArgs, exec: To
   const state = env.store.stateFor(session)
   const coreMessages = eventsToCoreMessages(surfaceEventsOf(session))
   const tokenCount = coreMessages.reduce((sum, message) => sum + estimateTokensFast(message.text ?? ''), 0)
-  const config = defaultConfig(env.modelContextLimit)
+  const config = kernelConfigFor(env)
 
   // Assign refs / advance state exactly like a turn would.
   const turn = env.kernel.processTurn({ messages: coreMessages, state, config, tokenCount })

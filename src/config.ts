@@ -1,0 +1,44 @@
+/**
+ * Kernel configuration assembly — the DSH counterpart of billion-context-pi's
+ * `resolveConfig`: build acp-kernel's `Config` from adapter-level knobs.
+ *
+ * Defaults are deliberately the acp-kernel `defaultConfig` values (the same
+ * defaults billion-context-pi ships: nudge window 45%–75%, emergency 95%,
+ * growth ratio 5%, protected last messages 5). Every knob is optional — an
+ * omitted value keeps the kernel default, so the behavior matches the Pi
+ * adapter exactly unless a deployment opts out.
+ * @module billion-context-dsh/config
+ */
+
+import { defaultConfig, type Config } from 'acp-kernel'
+
+/** The kernel-facing knobs shared by the nudge path and the compress tool. */
+export interface KernelConfigInput {
+  readonly modelContextLimit: number
+  /** Nudge window lower bound (usage fraction). Kernel default: 0.45. */
+  readonly nudgeMinContextLimitPct?: number
+  /** Nudge window upper bound — over-limit. Kernel default: 0.75. */
+  readonly nudgeMaxContextLimitPct?: number
+  /** Emergency nudge threshold (bypasses per-turn dedup). Kernel default: 0.95. */
+  readonly nudgeEmergencyThresholdPct?: number
+  /** Any other acp-kernel Config override (the billion-context-pi escape hatch). */
+  readonly coreOverrides?: Partial<Config>
+}
+
+/**
+ * Assemble the kernel config: `defaultConfig(limit)` merged with the optional
+ * nudge thresholds (merged into the defaults, never replacing them wholesale)
+ * and any additional `coreOverrides`.
+ */
+export function kernelConfigFor(input: KernelConfigInput): Config {
+  const nudgePatch: Partial<Config['nudge']> = {}
+  if (input.nudgeMinContextLimitPct !== undefined) nudgePatch.minContextLimitPct = input.nudgeMinContextLimitPct
+  if (input.nudgeMaxContextLimitPct !== undefined) nudgePatch.maxContextLimitPct = input.nudgeMaxContextLimitPct
+  if (input.nudgeEmergencyThresholdPct !== undefined) nudgePatch.emergencyThresholdPct = input.nudgeEmergencyThresholdPct
+
+  const overrides: Partial<Config> = { ...input.coreOverrides }
+  if (Object.keys(nudgePatch).length > 0) {
+    overrides.nudge = { ...defaultConfig(input.modelContextLimit).nudge, ...nudgePatch }
+  }
+  return defaultConfig(input.modelContextLimit, overrides)
+}
