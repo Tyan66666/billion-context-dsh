@@ -6,6 +6,19 @@ The model decides *when* and *what* to compress — not a hard limit. Long conve
 
 This is the DSH port of [billion-context-pi](https://github.com/ranxianglei/billion-context-pi) (the Pi coding-agent adapter). The compression kernel (`acp-kernel`) is reused verbatim; the adapter layer was rewritten against DSH's durable-surface model — see [docs/dsh-porting-verification.md](docs/dsh-porting-verification.md) for the verified mapping.
 
+## Upstream & credits
+
+This project is a **port/derivation** and stands on the shoulders of the following upstream work — all MIT licensed:
+
+| Upstream | Author | Role |
+|---|---|---|
+| [billion-context-pi](https://github.com/ranxianglei/billion-context-pi) | [ranxianglei](https://github.com/ranxianglei) | The Pi coding-agent adapter this project ports to DeepSeek Harness; source of the adapter design, tool semantics, and this project's default configuration |
+| [acp-kernel](https://github.com/ranxianglei/acp-kernel) | [ranxianglei](https://github.com/ranxianglei) | Framework-agnostic context-compression engine — reused **verbatim** (refs, blocks, tiers, nudge decisions, search, status) |
+| [opencode-acp](https://github.com/ranxianglei/opencode-acp) | [ranxianglei](https://github.com/ranxianglei) | Origin of the ACP ("model decides when and what to compress") design |
+| [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) | DeepSeek AI | The host platform this project extends (compaction capability seam, agent presets, durable session log) |
+
+This project reuses `acp-kernel`'s compression core and `billion-context-pi`'s default behavior unchanged; the DSH adapter layer (session-event projection, durable surface transaction, model tools, nudge, config) is original work in this repository. Upstream copyright and licenses remain with their respective authors; see [LICENSE](LICENSE) for this project's terms.
+
 ## How it works
 
 DSH derives every model request from its append-only session log (the *surface*). ACP semantics map onto that model directly:
