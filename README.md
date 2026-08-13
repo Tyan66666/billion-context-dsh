@@ -2,6 +2,18 @@
 
 [English](./README.md) | [中文](./README.zh-CN.md)
 
+> **⚠️ Beta notice — not for production use**
+> This project (**v0.1.0**) is a work-in-progress beta. The [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) itself is also in **public beta**. **Do not use either in engineering / production environments** — expect breaking changes and rough edges.
+
+<p align="center">
+<strong>Built with gratitude on top of these projects</strong> — please give them a ⭐:
+<br />
+<a href="https://github.com/deepseek-ai/deepseek-harness">DeepSeek Harness</a> ·
+<a href="https://github.com/ranxianglei/billion-context-pi">billion-context-pi</a> ·
+<a href="https://github.com/ranxianglei/acp-kernel">acp-kernel</a> ·
+<a href="https://github.com/ranxianglei/opencode-acp">opencode-acp</a>
+</p>
+
 <p align="center">
 <strong>Billion-Context</strong> for <a href="https://github.com/deepseek-ai/deepseek-harness">DeepSeek Harness</a>
 <br />
