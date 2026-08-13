@@ -1,0 +1,50 @@
+{
+	"name": "billion-context-dsh",
+	"version": "0.0.0",
+	"description": "Active Context Pruning (ACP) for the DeepSeek Harness — model-driven context management as a CompactionEngine backend.",
+	"type": "module",
+	"main": "dist/index.js",
+	"types": "dist/index.d.ts",
+	"exports": {
+		".": {
+			"types": "./dist/index.d.ts",
+			"import": "./dist/index.js"
+		}
+	},
+	"files": [
+		"dist",
+		"README.md",
+		"LICENSE"
+	],
+	"sideEffects": false,
+	"license": "MIT",
+	"engines": {
+		"node": ">=20"
+	},
+	"scripts": {
+		"typecheck": "tsc --noEmit",
+		"build": "tsup && tsc --emitDeclarationOnly",
+		"test": "node --import tsx --test tests/*.test.ts"
+	},
+	"dependencies": {
+		"acp-kernel": "0.0.23"
+	},
+	"peerDependencies": {
+		"@deepseek-ai/cordis": "^4.0.1",
+		"@deepseek-ai/dsh-compaction": "^0.1.0-rc.6"
+	},
+	"devDependencies": {
+		"@deepseek-ai/cordis": "4.0.1",
+		"@deepseek-ai/dsh-agent": "0.1.0-rc.6",
+		"@deepseek-ai/dsh-commands": "0.1.0-rc.6",
+		"@deepseek-ai/dsh-compaction": "0.1.0-rc.6",
+		"@deepseek-ai/dsh-llm": "0.1.0-rc.6",
+		"@deepseek-ai/dsh-session": "0.1.0-rc.6",
+		"@deepseek-ai/dsh-tools": "0.1.0-rc.6",
+		"@deepseek-ai/schemastery": "3.18.1",
+		"@types/node": "^26.1.2",
+		"tsup": "^8.5.1",
+		"tsx": "^4.23.1",
+		"typescript": "^7.0.2"
+	}
+}
