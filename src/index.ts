@@ -85,9 +85,20 @@ export interface AcpConfig {
   readonly autoModelContextLimit: boolean
   /** Nudge window lower bound (usage fraction; validation only — the growth-driven trigger has no percentage floor). Kernel default 0.45 — same as billion-context-pi. */
   readonly nudgeMinContextLimitPct?: number
-  /** Nudge window upper bound — over-limit guarantee line. Kernel default 0.75 — same as billion-context-pi. */
+  /**
+   * Nudge window upper bound — over-limit guarantee line: above this the
+   * kernel injects a nudge regardless of growth or cadence. Engine default
+   * 0.70 (deliberately BELOW the kernel/billion-context-pi default 0.75 and
+   * the host compaction-basic auto-compaction line 0.80, so the forced nudge
+   * always fires first); an explicit value wins.
+   */
   readonly nudgeMaxContextLimitPct?: number
-  /** Emergency nudge threshold (bypasses per-turn dedup). Kernel default 0.95 — same as billion-context-pi. */
+  /**
+   * Emergency nudge threshold (bypasses the per-turn dedup). Engine default
+   * 0.85 (down from the kernel/billion-context-pi default 0.95: 95% leaves
+   * the model no room to act before the API rejects, and the host's 80%
+   * compaction-basic line shadows it in standard/code/cordis modes).
+   */
   readonly nudgeEmergencyThresholdPct?: number
   /** Any other acp-kernel Config override (billion-context-pi's `coreOverrides` escape hatch). */
   readonly coreOverrides?: Partial<import('acp-kernel').Config>
@@ -104,6 +115,13 @@ const DEFAULT_CONFIG: AcpConfig = {
   autoTools: true,
   autoCommand: true,
   autoNudge: true,
+  // Nudge thresholds: engine defaults 0.70/0.85 — deliberately below the
+  // kernel/billion-context-pi 0.75/0.95. 0.95 leaves no room to act before
+  // the API rejects, and the host's compaction-basic line (thresholdRatio
+  // 0.80) shadows it in standard/code/cordis modes; 0.70 keeps the forced
+  // over-limit nudge ahead of that 80% line. Explicit values always win.
+  nudgeMaxContextLimitPct: 0.7,
+  nudgeEmergencyThresholdPct: 0.85,
 }
 
 export function resolveAcpConfig(config: Partial<AcpConfig> = {}): AcpConfig {

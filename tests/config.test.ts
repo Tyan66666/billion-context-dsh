@@ -8,6 +8,7 @@ import { kernelConfigFor, type KernelConfigInput } from '../src/config.ts'
 import { defaultCountTokens } from 'acp-kernel'
 import { buildNudge } from '../src/nudge.ts'
 import { AcpStateStore } from '../src/state.ts'
+import { resolveAcpConfig } from '../src/index.ts'
 import { buildTextSession, appendTurn, appendUser } from './helpers.ts'
 
 test('config: defaults equal the kernel (and billion-context-pi) defaults', () => {
@@ -94,6 +95,19 @@ test('config: a lowered over-limit threshold triggers the nudge', () => {
   )
   assert.ok(withLowMax !== null, 'lowering the over-limit threshold to 50% forces the nudge')
   assert.equal(withLowMax!.emergency, false)
+})
+
+test('config: engine defaults lower the nudge thresholds to 0.70/0.85', () => {
+  // The engine ships 0.70/0.85 (down from the kernel/billion-context-pi
+  // 0.75/0.95) so the forced nudge fires before the host's compaction-basic
+  // 80% line and the model keeps room to act. Explicit values win.
+  const defaults = resolveAcpConfig({})
+  assert.equal(defaults.nudgeMaxContextLimitPct, 0.7)
+  assert.equal(defaults.nudgeEmergencyThresholdPct, 0.85)
+
+  const explicit = resolveAcpConfig({ nudgeMaxContextLimitPct: 0.6, nudgeEmergencyThresholdPct: 0.9 })
+  assert.equal(explicit.nudgeMaxContextLimitPct, 0.6)
+  assert.equal(explicit.nudgeEmergencyThresholdPct, 0.9)
 })
 
 test('config: token estimation is CJK-aware (1 char/token) not 4-char flat', () => {

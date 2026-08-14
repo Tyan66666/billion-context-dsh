@@ -7,6 +7,10 @@
  * growth ratio 5%, protected last messages 5). Every knob is optional — an
  * omitted value keeps the kernel default, so the behavior matches the Pi
  * adapter exactly unless a deployment opts out.
+ *
+ * NOTE: `AcpCompactionEngine` (src/index.ts) ships its own engine-level
+ * defaults 0.70/0.85 for the two nudge thresholds on top of this layer, so an
+ * engine with no explicit config lands on 0.70/0.85, not 0.75/0.95.
  * @module billion-context-dsh/config
  */
 
