@@ -21,6 +21,7 @@ import {
   resolvePrompts,
 } from '../src/prompts.ts'
 import { buildTextSession } from './helpers.ts'
+import AcpCompactionEngine, { AcpCompactionEngine as Named } from '../src/index.ts'
 
 function fakeAgent(session: import('@deepseek-ai/dsh-session').Session): Agent {
   return {
@@ -249,4 +250,55 @@ test('M4/prompts 13: Chinese override smoke (i18n scenario)', () => {
   assert.ok(sys.includes('主动上下文剪枝'))
   assert.ok(sys.includes('Compression Philosophy:'))
   assert.ok(sys.includes('compress/decompress/search_context/acp_status'))
+})
+
+test('M4/prompts 14: engine-level — config.prompts reaches system prompt section, tool descriptions, and the pre-step nudge', async () => {
+  const ctx = new Context()
+  const sections: Array<{ name: string; order: number; text: string }> = []
+  const tools: Array<{ name: string; description: string }> = []
+  ctx.provide('systemPrompt' as never, { section: (opts: never) => sections.push(opts as never) } as never)
+  ctx.provide('tools' as never, { register: (tool: never) => tools.push(tool as never) } as never)
+  ctx.plugin(AcpCompactionEngine as never, {
+    modelContextLimit: 16000,
+    prompts: {
+      nudge: { normal: '引擎级自定义 {pct}' },
+      systemPrompt: '引擎级系统提示\n{philosophy}',
+      tools: { compress: '引擎级压缩工具描述' },
+    },
+  } as never)
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  const engine = ctx.compaction as Named
+  assert.ok(engine instanceof Named)
+  assert.equal(engine.prompts.nudge.normal, '引擎级自定义 {pct}', 'engine resolved the custom template')
+
+  // System prompt section: rendered once with the custom template + kernel philosophy.
+  assert.equal(sections.length, 1, 'ACP section registered exactly once')
+  assert.ok(sections[0]!.text.includes('引擎级系统提示'))
+  assert.ok(sections[0]!.text.includes('Compression Philosophy:'), 'kernel philosophy embedded via {philosophy}')
+
+  // Tool descriptions: registered from env.prompts (proves env carried this.prompts).
+  const compressTool = tools.find((t) => t.name === 'compress')
+  assert.equal(compressTool!.description, '引擎级压缩工具描述')
+
+  // pre-step: the custom normal frame reaches the injected nudge message.
+  const decision = await (ctx.waterfall(
+    'agent/pre-step' as never,
+    { agent: fakeAgent(buildTextSession(12)) } as never,
+    async () => ({ kind: 'enter', messages: [] }) as never,
+  ) as never)
+  const decisionObj = decision as { kind: string; messages: Array<{ content: Array<{ type: string; text?: string }> }> }
+  assert.equal(decisionObj.kind, 'enter')
+  assert.equal(decisionObj.messages.length, 1, 'the nudge message was appended to the decision')
+  const text = decisionObj.messages[0]!.content.map((block) => block.text ?? '').join('')
+  assert.ok(text.startsWith('引擎级自定义 '), 'the custom nudge frame reached the injected message')
+})
+
+test('M4/prompts 15: engine construction fails fast on a template typo', () => {
+  assert.throws(
+    () => new Named(new Context(), { prompts: { nudge: { normal: '{bad}' } } }),
+    /prompts\.nudge\.normal contains unknown placeholder \{bad\}/,
+  )
+  // Group-level null from YAML-ish input is tolerated (whole group falls back).
+  const engine = new Named(new Context(), { prompts: { nudge: null } } as never)
+  assert.equal(engine.prompts.nudge.normal, DEFAULT_PROMPTS.nudge.normal)
 })
