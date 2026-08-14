@@ -1,12 +1,12 @@
 # billion-context-dsh
 
-[English](./README.md) | [中文](./README.zh-CN.md)
+[中文](./README.md) | [English](./README.en.md)
 
-> **⚠️ Beta notice — not for production use**
-> This project (**v0.1.1**) is a work-in-progress beta. The [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) itself is also in **public beta**. **Do not use either in engineering / production environments** — expect breaking changes and rough edges.
+> **⚠️ 测试版声明——请勿用于生产环境**
+> 本项目（**v0.1.1**）仍处于开发中的测试版。[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 本身也处于**公开测试版**阶段。**请勿将两者用于工程化 / 生产环境**——预期会有破坏性变更与粗糙之处。
 
 <p align="center">
-<strong>Built with gratitude on top of these projects</strong> — please give them a ⭐:
+<strong>衷心感谢以下项目——请给它们一个 ⭐：</strong>
 <br />
 <a href="https://github.com/deepseek-ai/deepseek-harness">DeepSeek Harness</a> ·
 <a href="https://github.com/ranxianglei/billion-context-pi">billion-context-pi</a> ·
@@ -17,7 +17,7 @@
 <p align="center">
 <strong>Billion-Context</strong> for <a href="https://github.com/deepseek-ai/deepseek-harness">DeepSeek Harness</a>
 <br />
-The model decides <em>when</em> and <em>what</em> to compress — not a hard limit.
+由模型决定<em>何时</em>压缩、<em>压缩什么</em>——而不是一个硬性上限。
 </p>
 
 ---
@@ -35,118 +35,137 @@ The model decides <em>when</em> and <em>what</em> to compress — not a hard lim
 
 ---
 
-## Why?
+## 为什么？
 
-When conversations get long, the model runs out of context. Most tools hard-truncate — silently dropping earlier messages. **billion-context-dsh** gives the model a `compress` tool: the LLM decides **when** and **what** to compress into high-fidelity summaries, preserving critical details (file paths, decisions, error strings) while reclaiming context space.
+当对话变长，模型会耗尽上下文。多数工具直接硬截断——悄悄丢弃早期消息。**billion-context-dsh** 给模型一个 `compress` 工具：由 LLM 决定**何时**、**压缩什么**，写成高保真摘要，保留关键细节（文件路径、决策、错误信息）的同时回收上下文空间。
 
-Unlike DSH's built-in auto-compaction (which replaces a range with an automatically generated summary), billion-context-dsh:
+与 DSH 内置的自动压缩（用自动生成的摘要替换一段范围）不同，billion-context-dsh：
 
-- **Model-driven** — the model writes the summary itself; there is no second LLM summarization call (the ACP cost win)
-- **Advisory, never imperative** — automatic policy only *nudges*; the model decides whether and when to compress
-- **Durable & recoverable** — a compressed range becomes a checkpoint node, the originals stay in the append-only session log; `decompress` restores them, `search_context` finds information inside blocks
-- **Seq-based refs** — no message tags; surface seqs are carried by the nudge's range table, with auto-balanced range edges and `#callId` tolerance
+- **模型驱动** —— 摘要由模型自己书写，没有第二次 LLM 摘要调用（ACP 的成本优势）
+- **只建议、不强令** —— 自动策略只 *nudge*（提醒），是否压缩、何时压缩由模型决定
+- **持久且可恢复** —— 压缩范围成为 checkpoint 节点，原文保留在 append-only 会话日志中；`decompress` 可恢复，`search_context` 可在块内查找
+- **基于 seq 引用** —— 不需要消息标签；surface seq 由 nudge 的范围表携带，范围边界自动平衡、容忍 `#callId` 片段
 
-This is the DeepSeek Harness port of [billion-context-pi](https://github.com/ranxianglei/billion-context-pi) (the Pi coding-agent adapter): the compression core ([acp-kernel](https://github.com/ranxianglei/acp-kernel)) is reused verbatim, and the adapter layer was rewritten against DSH's durable-surface model — see [docs](https://github.com/Tyan66666/billion-context-dsh/tree/main/docs) for the verified mapping.
+这是 [billion-context-pi](https://github.com/ranxianglei/billion-context-pi)（Pi 编码代理适配器）在 DeepSeek Harness 上的移植：压缩内核（[acp-kernel](https://github.com/ranxianglei/acp-kernel)）原样复用，适配层针对 DSH 的 durable-surface 模型重写——经过验证的映射关系见 [docs](https://github.com/Tyan66666/billion-context-dsh/tree/main/docs)。
 
-## Install
+## 安装
 
 ```bash
 npm install billion-context-dsh
 ```
 
-That's it. Add one composition row where a compaction backend is expected (host composition or an agent preset's `compaction` realm):
+就这样。然后在需要压缩后端的位置加组合配置——两种范围，按需选择：
+
+**全局生效（host 平面，所有模式）——推荐**。在你的 profile 补丁（如 `~/.dsh/profiles/web/cordis.patch.yml`）中追加：
 
 ```yaml
-- id: compaction-billion-context
-  name: 'billion-context-dsh'
-  config:
-    modelContextLimit: 128000   # default; the pressure window
+# ACP 作为全局压缩后端：四个模型工具 + `/acp` 命令 + nudge + ACP 提示词段，
+# 对所有模式（standard / code / minimal / cordis / 自定义预设）生效。
+# 必须同时禁用 host 的 compaction-basic：同一 realm 内两个后端同时
+# provide `ctx.compaction` 会冲突。
+- id: compaction-basic
+  disabled: true
+
+- insert:
+    - id: compaction-acp
+      name: 'billion-context-dsh'
+      config:
+        modelContextLimit: 128000   # 默认；压力窗口
 ```
 
-> **One context manager per agent.** The preset's `compaction` isolate realm should mount this engine *instead of* `dsh-compaction-basic` — two backends providing `ctx.compaction` would collide (see README mount examples in the [full docs](https://github.com/Tyan66666/billion-context-dsh/tree/main/docs)).
+**单模式生效（agent preset 的 `compaction` realm）**。用本引擎*替换*该 realm 内的 `dsh-compaction-basic`：
 
-## How it works
+```yaml
+- id: compaction-acp
+  name: 'billion-context-dsh'
+  config:
+    modelContextLimit: 128000   # 默认；压力窗口
+```
 
-DSH derives every model request from its append-only session log (the *surface*). ACP semantics map onto that model directly:
+> **每个 agent 只留一个上下文管理器。** 两个后端同时 provide `ctx.compaction` 会冲突——同一 realm 内切勿并存。完整安装与验证指南见 [docs/INSTALL.md](docs/INSTALL.md)。
 
-| ACP concept | DSH implementation |
+## 工作原理
+
+DSH 的每个模型请求都派生自其 append-only 会话日志（*surface*）。ACP 语义直接映射到这一模型：
+
+| ACP 概念 | DSH 实现 |
 |---|---|
-| `compress` tool shadows a range | durable `surfaceOp: { op: 'replace' }` — the model-written summary becomes a checkpoint node; the originals stay in the log |
-| refs (`m00001` tags) | surface seqs, carried by the nudge's compressible-range table |
-| nudge ("consider compressing") | injected at `agent/pre-step` by the kernel's pressure decision — a short advisory, never an order |
-| `decompress` | read-only recovery of shadowed originals from the log |
-| `search_context` | scores block summaries + originals rebuilt from the log |
-| `acp_status` | block ledger + context pressure |
-| block state | in-memory kernel state + **log-rebuilt ledger** (no sidecar files) |
+| `compress` 工具遮蔽一段范围 | 持久化 `surfaceOp: { op: 'replace' }`——模型书写的摘要成为 checkpoint 节点；原文保留在日志中 |
+| refs（`m00001` 标签） | surface seq，由 nudge 的可压缩范围表携带 |
+| nudge（"考虑压缩一下"） | 由内核的压力决策在 `agent/pre-step` 注入——简短建议，绝非命令 |
+| `decompress` | 从日志只读恢复被遮蔽的原文 |
+| `search_context` | 对从日志重建的块摘要与原文打分 |
+| `acp_status` | 块账本与上下文压力 |
+| 块状态 | 内存内核状态 + **日志重建账本**（无旁车文件） |
 
-The load-bearing compression guidance (tools, philosophy, summary rules) is registered as a one-time system-prompt section, so nudges stay short. There is deliberately **no automatic summarization**: automatic policy only nudges the model (`compactIfNeeded` returns null).
+承载性的压缩指引（工具、哲学、摘要规则）注册为一次性系统提示段，因此 nudge 保持简短。刻意**不做自动摘要**：自动策略只 nudge 模型（`compactIfNeeded` 返回 null）。
 
-## Video
+## 视频讲解
 
-A walkthrough of the ACP philosophy this project inherits — how active context compression keeps a session lean at ~200K tokens (opencode-acp & billion-context-pi). *Video credit: the original author, [裘香莲](https://space.bilibili.com/) on Bilibili — not ours.*
+本项目继承的 ACP 哲学讲解——主动上下文压缩如何在约 20 万 token 内保持会话精简（opencode-acp 与 billion-context-pi）。*视频原作者：[裘香莲](https://space.bilibili.com/)（B 站 UP 主），非本项目制作。*
 
-[![Watch on Bilibili](https://i1.hdslb.com/bfs/archive/083a77fede77502cbd6b2e206f8aadcc4dacc7ea.jpg)](https://www.bilibili.com/video/BV1qAMR6MEA4/)
+[![在 B 站观看](https://i1.hdslb.com/bfs/archive/083a77fede77502cbd6b2e206f8aadcc4dacc7ea.jpg)](https://www.bilibili.com/video/BV1qAMR6MEA4/)
 
-## Model-facing tools
+## 模型工具
 
-| Tool | What it does |
+| 工具 | 作用 |
 | --- | --- |
-| `compress` | Replace a seq range with a dense summary you write (edges auto-balanced to tool-pair boundaries) |
-| `decompress` | Restore a previously compressed block's original content (read-only) |
-| `search_context` | Search compressed block summaries and originals by keyword |
-| `acp_status` | Context usage, compressed blocks, compressible ranges |
-| `/acp` | status / compress / decompress from the command bar |
+| `compress` | 用你书写的紧凑摘要替换 seq 范围（边界自动平衡到 tool-call/result 配对点） |
+| `decompress` | 恢复已压缩块的原始内容（只读） |
+| `search_context` | 按关键词搜索压缩块摘要与原文 |
+| `acp_status` | 上下文占用、压缩块、可压缩范围 |
+| `/acp` | 从命令栏执行 status / compress / decompress |
 
-## Upstream & credits
+## 上游项目与致谢
 
-This project is a **port/derivation** and stands on the shoulders of the following upstream work — all MIT licensed. **Thank you** to [ranxianglei](https://github.com/ranxianglei) and the DeepSeek Harness team for building these projects and making them open source:
+本项目是一个**移植/派生项目**，站在以下上游工作的肩膀上——全部为 MIT 许可。**衷心感谢** [ranxianglei](https://github.com/ranxianglei) 和 DeepSeek Harness 团队创建并开源这些项目：
 
-| Upstream | Author | Role |
+| 上游项目 | 作者 | 角色 |
 |---|---|---|
-| **[billion-context-pi](https://github.com/ranxianglei/billion-context-pi)** | [ranxianglei](https://github.com/ranxianglei) | The Pi coding-agent adapter this project ports to DeepSeek Harness; source of the adapter design, tool semantics, and this project's default configuration |
-| **[acp-kernel](https://github.com/ranxianglei/acp-kernel)** | [ranxianglei](https://github.com/ranxianglei) | Framework-agnostic context-compression engine — reused **verbatim** (refs, blocks, tiers, nudge decisions, search, status) |
-| **[opencode-acp](https://github.com/ranxianglei/opencode-acp)** | [ranxianglei](https://github.com/ranxianglei) | Origin of the ACP ("model decides when and what to compress") design |
-| **[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)** | DeepSeek AI | The host platform this project extends (compaction capability seam, agent presets, durable session log) |
+| **[billion-context-pi](https://github.com/ranxianglei/billion-context-pi)** | [ranxianglei](https://github.com/ranxianglei) | 本项目移植的 Pi 编码代理适配器；适配器设计、工具语义与本项目默认配置的来源 |
+| **[acp-kernel](https://github.com/ranxianglei/acp-kernel)** | [ranxianglei](https://github.com/ranxianglei) | 框架无关的上下文压缩引擎——**原样复用**（refs、blocks、tiers、nudge 决策、search、status） |
+| **[opencode-acp](https://github.com/ranxianglei/opencode-acp)** | [ranxianglei](https://github.com/ranxianglei) | ACP（"模型决定何时压缩、压缩什么"）设计的源头 |
+| **[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)** | DeepSeek AI | 本项目所扩展的宿主平台（compaction 能力接缝、agent preset、持久化会话日志） |
 
-This project reuses `acp-kernel`'s compression core and `billion-context-pi`'s default behavior unchanged; the DSH adapter layer (session-event projection, durable surface transaction, model tools, nudge, config) is original work in this repository. Upstream copyright and licenses remain with their respective authors; see [LICENSE](LICENSE) for this project's terms.
+本项目原样复用 `acp-kernel` 的压缩内核与 `billion-context-pi` 的默认行为；DSH 适配层（会话事件投影、持久化表面事务、模型工具、nudge、配置）为本仓库原创。上游版权与许可归其各自作者所有；本项目的许可条款见 [LICENSE](LICENSE)。
 
-## Configuration
+## 配置
 
-| Key | Default | Meaning |
+| 键 | 默认值 | 含义 |
 |---|---|---|
-| `modelContextLimit` | `128000` | Context window used for the kernel's pressure decisions |
-| `nudgeMinContextLimitPct` | kernel default `0.45` | Nudge window lower bound (usage fraction) — same default as billion-context-pi |
-| `nudgeMaxContextLimitPct` | kernel default `0.75` | Over-limit line: above this the nudge fires regardless of growth |
-| `nudgeEmergencyThresholdPct` | kernel default `0.95` | Emergency nudge (bypasses the per-turn dedup) |
-| `coreOverrides` | — | Any other acp-kernel `Config` override (billion-context-pi's `coreOverrides` escape hatch) |
-| `autoTools` | `true` | Register the four model tools on `ctx.tools` |
-| `autoCommand` | `true` | Register the `/acp` command on `ctx.commands` |
-| `autoNudge` | `true` | Inject the nudge into `agent/pre-step` |
+| `modelContextLimit` | `128000` | 用于内核压力决策的上下文窗口 |
+| `nudgeMinContextLimitPct` | 内核默认 `0.45` | Nudge 窗口下界（用量占比）——与 billion-context-pi 相同的默认值 |
+| `nudgeMaxContextLimitPct` | 内核默认 `0.75` | 过限线：超过此值则无论增长与否都触发 nudge |
+| `nudgeEmergencyThresholdPct` | 内核默认 `0.95` | 紧急 nudge（绕过每轮去重） |
+| `coreOverrides` | — | 任何其他 acp-kernel `Config` 覆盖（billion-context-pi 的 `coreOverrides` 逃生口） |
+| `autoTools` | `true` | 在 `ctx.tools` 注册四个模型工具 |
+| `autoCommand` | `true` | 在 `ctx.commands` 注册 `/acp` 命令 |
+| `autoNudge` | `true` | 当内核建议时向 `agent/pre-step` 注入 nudge |
 
-## Development
+## 开发
 
 ```bash
 npm install
-npm run typecheck   # strict TS
+npm run typecheck   # 严格 TS
 npm test            # node --import tsx --test tests/*.test.ts
-npm run build       # tsup bundle (inlines acp-kernel) + .d.ts
+npm run build       # tsup 打包（内联 acp-kernel）+ .d.ts
 ```
 
-`dist/index.js` is self-contained except for the `@deepseek-ai/*` seam packages, which the hosting deployment provides.
+`dist/index.js` 自包含，仅外链 `@deepseek-ai/*` 接缝包（由宿主部署提供）。
 
-## Architecture
+## 架构
 
 ```
 src/
-├── index.ts        # AcpCompactionEngine (CompactionEngine backend) + wiring
-├── messages.ts     # M1: session events ↔ acp-kernel CoreMessage projection
-├── state.ts        # M2: per-session kernel state
-├── region.ts       # M5: durable region transaction + log-rebuilt block ledger
+├── index.ts        # AcpCompactionEngine（CompactionEngine 后端）+ 接线
+├── messages.ts     # M1: 会话事件 ↔ acp-kernel CoreMessage 投影
+├── state.ts        # M2: 每会话内核状态
+├── region.ts       # M5: 持久化区域事务 + 日志重建块账本
 ├── tools.ts        # M3: compress / decompress / search_context / acp_status
-├── nudge.ts        # M4: kernel pressure decision → injected advisory nudge
-├── system-prompt.ts# M4: one-time ACP guidance section (keeps nudges short)
-├── config.ts       # kernel config assembly (thresholds + coreOverrides)
-└── commands.ts     # M4: /acp slash command
+├── nudge.ts        # M4: 内核压力决策 → 注入的建议式 nudge
+├── system-prompt.ts# M4: 一次性 ACP 指引段（让 nudge 保持简短）
+├── config.ts       # 内核配置组装（阈值 + coreOverrides）
+└── commands.ts     # M4: /acp 斜杠命令
 ```
 
 ## License

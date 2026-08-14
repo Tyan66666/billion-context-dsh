@@ -91,7 +91,7 @@ If a kernel major version breaks the seam contracts, treat it as a porting task:
 Pre-flight (ALL must pass): `npm run typecheck && npm test && npm run build`.
 
 1. Bump version: `npm version <patch|minor|major> --no-git-tag-version` (bug fixes → patch).
-2. Update the `vX.Y.Z` references in `README.md`, `README.zh-CN.md`, `docs/README.md`, `docs/index.md` (Beta notice + Release links).
+2. Update the `vX.Y.Z` references in `README.md`, `README.en.md`, `docs/README.md`, `docs/index.md` (Beta notice + Release links).
 3. `npm publish`.
 4. Commit `release vX.Y.Z` (package.json + package-lock.json + docs), push.
 5. `gh release create vX.Y.Z` with notes listing fixes + live verification data.
