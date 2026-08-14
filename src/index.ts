@@ -36,12 +36,13 @@ import {
   type ManualCompactAgentContext,
 } from '@deepseek-ai/dsh-compaction'
 import { createCore, type CompressionCore } from 'acp-kernel'
-import type {} from '@deepseek-ai/dsh-agent'
+import type { Agent } from '@deepseek-ai/dsh-agent'
 import { AcpStateStore } from './state.ts'
 import { makeTools, type ToolEnvironment } from './tools.ts'
 import { acpCommand } from './commands.ts'
 import { buildNudge } from './nudge.ts'
 import { ACP_SYSTEM_PROMPT, ACP_SYSTEM_PROMPT_ORDER } from './system-prompt.ts'
+import { DEFAULT_CONTEXT_WINDOW, detectContextWindow, type AcpWindow } from './window.ts'
 
 export { AcpStateStore } from './state.ts'
 export { kernelConfigFor, type KernelConfigInput } from './config.ts'
@@ -49,6 +50,12 @@ export { ACP_SYSTEM_PROMPT, ACP_SYSTEM_PROMPT_ORDER } from './system-prompt.ts'
 export { makeTools, type ToolEnvironment } from './tools.ts'
 export { acpCommand } from './commands.ts'
 export { buildNudge, type NudgeEnvironment, type NudgeOutcome } from './nudge.ts'
+export {
+  DEFAULT_CONTEXT_WINDOW,
+  detectContextWindow,
+  windowSourceLabel,
+  type AcpWindow,
+} from './window.ts'
 export {
   rebuildBlockLedger,
   resolveSurfaceRange,
@@ -67,8 +74,15 @@ export {
 export { eventsToCoreMessages, projectEvent, surfaceEventsOf, extractEventText } from './messages.ts'
 
 export interface AcpConfig {
-  /** The context window used for pressure decisions. Default 128000. */
-  readonly modelContextLimit: number
+  /**
+   * The context window used for pressure decisions, in tokens. When omitted,
+   * `autoModelContextLimit` (default true) probes the model's real window via
+   * `agent.ctx.llm.resolveModelInfo(provider, model)`; an explicit value
+   * always wins and disables the probe.
+   */
+  readonly modelContextLimit?: number
+  /** Probe the model's real context window from the LLM runtime. Default true. */
+  readonly autoModelContextLimit: boolean
   /** Nudge window lower bound (usage fraction). Kernel default 0.45 — same as billion-context-pi. */
   readonly nudgeMinContextLimitPct?: number
   /** Nudge window upper bound (over-limit). Kernel default 0.75 — same as billion-context-pi. */
@@ -86,7 +100,7 @@ export interface AcpConfig {
 }
 
 const DEFAULT_CONFIG: AcpConfig = {
-  modelContextLimit: 128000,
+  autoModelContextLimit: true,
   autoTools: true,
   autoCommand: true,
   autoNudge: true,
@@ -110,6 +124,8 @@ export class AcpCompactionEngine extends CompactionEngine {
   readonly config: AcpConfig
 
   private readonly lastNudgeTurn = new Map<string, number>()
+  /** Per provider/model route the resolved window (probe failures cached too). */
+  private readonly windowCache = new Map<string, AcpWindow>()
 
   constructor(ctx: Context, config: Partial<AcpConfig> = {}) {
     super(ctx)
@@ -120,11 +136,13 @@ export class AcpCompactionEngine extends CompactionEngine {
     const env: ToolEnvironment = {
       kernel: this.kernel,
       store: this.store,
-      modelContextLimit: this.config.modelContextLimit,
+      // Initial value before any probe; windowFor() replaces it per pre-step.
+      modelContextLimit: this.config.modelContextLimit ?? DEFAULT_CONTEXT_WINDOW,
       nudgeMinContextLimitPct: this.config.nudgeMinContextLimitPct,
       nudgeMaxContextLimitPct: this.config.nudgeMaxContextLimitPct,
       nudgeEmergencyThresholdPct: this.config.nudgeEmergencyThresholdPct,
       coreOverrides: this.config.coreOverrides,
+      windowFor: (agent) => this.windowFor(agent),
     }
 
     // Tools and commands may not be registered yet on cold start: cordis
@@ -171,7 +189,8 @@ export class AcpCompactionEngine extends CompactionEngine {
       ctx.on('agent/pre-step', async (payload, next) => {
         const decision = await next()
         if (decision.kind === 'reject') return decision
-        const outcome = buildNudge(payload.agent, env, this.lastNudgeTurn)
+        const window = await this.windowFor(payload.agent)
+        const outcome = buildNudge(payload.agent, { ...env, modelContextLimit: window.limit }, this.lastNudgeTurn)
         if (outcome === null) return decision
         return { kind: 'enter', messages: [...decision.messages, outcome.message] }
       })
@@ -186,6 +205,35 @@ export class AcpCompactionEngine extends CompactionEngine {
         text: ACP_SYSTEM_PROMPT,
       })
     }
+  }
+
+  /**
+   * Resolve the effective context window for an agent. An explicitly
+   * configured `modelContextLimit` always wins (no probe). Otherwise probe the
+   * model's real window via `agent.ctx.llm.resolveModelInfo` (cached per
+   * provider/model route, probe failures cached too) and fall back to
+   * DEFAULT_CONTEXT_WINDOW when auto-detection is disabled or unavailable.
+   */
+  async windowFor(agent: Agent): Promise<AcpWindow> {
+    if (this.config.modelContextLimit !== undefined) {
+      return { limit: this.config.modelContextLimit, source: 'explicit' }
+    }
+    const provider = agent.options.provider ?? ''
+    const model = agent.options.model ?? ''
+    const key = `${provider}\0${model}`
+    const cached = this.windowCache.get(key)
+    if (cached !== undefined) return cached
+    let window: AcpWindow
+    if (!this.config.autoModelContextLimit) {
+      window = { limit: DEFAULT_CONTEXT_WINDOW, source: 'default', provider, model }
+    } else {
+      const detected = await detectContextWindow(agent, provider, model)
+      window = detected === null
+        ? { limit: DEFAULT_CONTEXT_WINDOW, source: 'default', provider, model }
+        : { limit: detected, source: 'auto', provider, model }
+    }
+    this.windowCache.set(key, window)
+    return window
   }
 
   /** ACP is model-driven: automatic pressure policy never summarizes by itself. */

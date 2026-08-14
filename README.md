@@ -75,7 +75,7 @@ npm install billion-context-dsh
     - id: compaction-acp
       name: 'billion-context-dsh'
       config:
-        modelContextLimit: 128000   # 默认；压力窗口
+        modelContextLimit: 128000   # 可选；省略时自动探测模型真实窗口（回退 128000）
 ```
 
 **单模式生效（agent preset 的 `compaction` realm）**。先在该 realm 内*禁用（或删除）原有的 `dsh-compaction-basic` 行*，再插入本引擎——同一 realm 内两个后端不能并存：
@@ -89,7 +89,7 @@ npm install billion-context-dsh
 - id: compaction-acp
   name: 'billion-context-dsh'
   config:
-    modelContextLimit: 128000   # 默认；压力窗口
+    modelContextLimit: 128000   # 可选；省略时自动探测模型真实窗口（回退 128000）
 ```
 
 > **每个 agent 只留一个上下文管理器。** 两个后端同时 provide `ctx.compaction` 会冲突——同一 realm 内切勿并存。完整安装与验证指南见 [docs/INSTALL.md](docs/INSTALL.md)。
@@ -144,7 +144,8 @@ DSH 的每个模型请求都派生自其 append-only 会话日志（*surface*）
 
 | 键 | 默认值 | 含义 |
 |---|---|---|
-| `modelContextLimit` | `128000` | 用于内核压力决策的上下文窗口 |
+| `modelContextLimit` | 自动探测（回退 `128000`） | 用于内核压力决策的上下文窗口；显式配置时优先且跳过探测 |
+| `autoModelContextLimit` | `true` | 从模型 API 自动探测真实窗口（`agent.ctx.llm.resolveModelInfo`）；探测失败回退默认值，`acp_status` 展示窗口来源 |
 | `nudgeMinContextLimitPct` | 内核默认 `0.45` | Nudge 窗口下界（用量占比）——与 billion-context-pi 相同的默认值 |
 | `nudgeMaxContextLimitPct` | 内核默认 `0.75` | 过限线：超过此值则无论增长与否都触发 nudge |
 | `nudgeEmergencyThresholdPct` | 内核默认 `0.95` | 紧急 nudge（绕过每轮去重） |

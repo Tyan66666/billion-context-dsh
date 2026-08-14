@@ -17,19 +17,24 @@ import {
 } from './region.ts'
 import { eventsToCoreMessages, extractEventText, surfaceEventsOf } from './messages.ts'
 import { defaultConfig, defaultCountTokens } from 'acp-kernel'
+import { windowSourceLabel } from './window.ts'
 
-function statusText(env: ToolEnvironment, agent: Agent): string {
+async function statusText(env: ToolEnvironment, agent: Agent): Promise<string> {
   const session = agent.session
   const ledger = rebuildBlockLedger(session.events)
   const totalTokens = ledger.reduce((sum, block) => sum + block.shadowedTokenCount, 0)
   const coreMessages = eventsToCoreMessages(surfaceEventsOf(session))
   const estimated = coreMessages.reduce((sum, message) => sum + defaultCountTokens(message.text ?? ''), 0)
-  const limit = env.modelContextLimit
+  const window = env.windowFor === undefined
+    ? { limit: env.modelContextLimit, source: 'explicit' as const }
+    : await env.windowFor(agent)
+  const limit = window.limit
   const lines = [
     `ACP status — session ${session.id}`,
     `  blocks: ${ledger.length}`,
     `  tokens compressed: ${totalTokens}`,
     `  estimated context: ${estimated} / ${limit} (${Math.round((estimated / limit) * 100)}%)`,
+    `  context window: ${limit} (${windowSourceLabel(window)})`,
   ]
   for (const block of ledger.slice(0, 10)) {
     const tier = block.tier > 1 ? ` [T${block.tier}]` : ''
@@ -97,7 +102,7 @@ export function acpCommand(env: ToolEnvironment): CommandDefinition {
     handler: async (invocation) => {
       const raw = invocation.rawInput.trim()
       if (raw === '' || raw === 'status') {
-        return { kind: 'success', text: statusText(env, invocation.agent) }
+        return { kind: 'success', text: await statusText(env, invocation.agent) }
       }
       if (raw.startsWith('compress')) {
         return { kind: 'success', text: compressText(env, invocation.agent, raw.slice('compress'.length).trim().split(/\s+/) ) }

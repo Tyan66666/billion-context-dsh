@@ -43,11 +43,10 @@ npm install --prefix ~/.dsh/profiles/web ./billion-context-dsh-0.0.0.tgz
     - id: compaction-acp
       name: 'billion-context-dsh'
       config:
-        # 模型的真实上下文窗口！默认 128000 只适合 128K 窗口的模型：
-        # nudge / acp_status 的上下文使用率 = surface tokens / modelContextLimit，
-        # 分母配小了百分比会虚高（百万窗口模型配 128K 会虚高 8 倍、nudge 过频）。
-        # 请改成你所用模型的实际窗口（如百万窗口 → 1000000），growth 触发
-        # 阈值（50000）不随此值变化。
+        # 模型的真实上下文窗口！省略（推荐）时会自动从模型 API 探测
+        # （agent.ctx.llm.resolveModelInfo），探测失败回退默认 128000；
+        # 显式配置则优先且跳过探测。分母配小（如百万窗口模型配 128K）
+        # 会让使用率虚高 8 倍、nudge 过频。growth 触发阈值（50000）不随此值变化。
         modelContextLimit: 128000
 ```
 
@@ -93,7 +92,7 @@ cp <deepseek-harness>/apps/cli/config/agent-presets/standard/{agent.cordis.yml,p
 - id: compaction-acp
   name: 'billion-context-dsh'
   config:
-    # 同上：设为模型的真实上下文窗口，否则使用率百分比虚高（默认 128000 按 128K 窗口）。
+    # 同上：省略时自动探测模型真实窗口，显式配置优先（默认 128000 按 128K 窗口）。
     modelContextLimit: 128000
 ```
 

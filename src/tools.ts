@@ -15,6 +15,7 @@ import { defaultCountTokens, type CompressionCore } from 'acp-kernel'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { AcpStateStore } from './state.ts'
 import { kernelConfigFor, type KernelConfigInput } from './config.ts'
+import { windowSourceLabel, type AcpWindow } from './window.ts'
 import {
   blockRefForSummarySeq,
   compactionIdsOfKernelBlocks,
@@ -30,6 +31,8 @@ import { allLogMessages, eventsToCoreMessages, extractEventText, surfaceEventsOf
 export interface ToolEnvironment extends KernelConfigInput {
   readonly kernel: CompressionCore
   readonly store: AcpStateStore
+  /** Resolve the effective context window for an agent (optional: status falls back to modelContextLimit). */
+  readonly windowFor?: (agent: Agent) => Promise<AcpWindow>
 }
 
 interface TextOutput {
@@ -321,18 +324,23 @@ interface StatusArgs {
   [key: string]: never
 }
 
-function handleStatus(env: ToolEnvironment, _args: StatusArgs, exec: ToolRunContext): TextOutput {
-  const session = requireAgent(exec).session
+async function handleStatus(env: ToolEnvironment, _args: StatusArgs, exec: ToolRunContext): Promise<TextOutput> {
+  const agent = requireAgent(exec)
+  const session = agent.session
   const ledger = rebuildBlockLedger(session.events)
   const totalTokens = ledger.reduce((sum, block) => sum + block.shadowedTokenCount, 0)
   const coreMessages = eventsToCoreMessages(surfaceEventsOf(session))
   const estimated = coreMessages.reduce((sum, message) => sum + defaultCountTokens(message.text ?? ''), 0)
-  const limit = env.modelContextLimit
+  const window = env.windowFor === undefined
+    ? { limit: env.modelContextLimit, source: 'explicit' as const }
+    : await env.windowFor(agent)
+  const limit = window.limit
   const lines = [
     `ACP status — session ${session.id}`,
     `  blocks: ${ledger.length}`,
     `  tokens compressed: ${totalTokens}`,
     `  estimated context: ${estimated} / ${limit} (${Math.round((estimated / limit) * 100)}%)`,
+    `  context window: ${limit} (${windowSourceLabel(window)})`,
     `  surface: ${surfaceSummary(session)}`,
   ]
   for (const block of ledger.slice(0, 10)) {
@@ -381,7 +389,7 @@ export function makeTools(env: ToolEnvironment): ToolDefinition[] {
       parameters: statusParameters,
       output: textOutput(),
       execute(args, exec) {
-        return Promise.resolve(handleStatus(env, args as StatusArgs, exec))
+        return handleStatus(env, args as StatusArgs, exec)
       },
     }),
   ]

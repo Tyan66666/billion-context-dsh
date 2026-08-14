@@ -161,6 +161,7 @@ test('M3: acp_status reports the block ledger and pressure', async () => {
   const empty = await status.execute({}, fakeExec(session))
   assert.match((empty as { text: string }).text, /blocks: 0/)
   assert.match((empty as { text: string }).text, /surface: 12 nodes, seqs 1\.\.12/, 'the surface summary lets the model locate seqs without a nudge')
+  assert.match((empty as { text: string }).text, /context window: 128000 \(configured\)/, 'without a windowFor the env falls back to modelContextLimit')
 
   const compress = toolOf(env, 'compress')
   await compress.execute({
@@ -175,6 +176,23 @@ test('M3: acp_status reports the block ledger and pressure', async () => {
   assert.match((filled as { text: string }).text, /blocks: 1/)
   assert.match((filled as { text: string }).text, /estimated context:/)
   assert.match((filled as { text: string }).text, /surface: 8 nodes/, '12 messages - 5 shadowed + 1 summary = 8 surface nodes')
+})
+
+test('M3: acp_status shows the auto-detected context window and source', async () => {
+  const env = {
+    ...makeEnv(),
+    windowFor: async () => ({
+      limit: 1000000,
+      source: 'auto' as const,
+      provider: 'test-provider',
+      model: 'test-model',
+    }),
+  }
+  const session = buildTextSession(12)
+  const status = await toolOf(env, 'acp_status').execute({}, fakeExec(session))
+  const text = (status as { text: string }).text
+  assert.match(text, /context window: 1000000 \(auto-detected from test-provider\/test-model\)/)
+  assert.match(text, /estimated context: \d+ \/ 1000000/, 'pressure is computed against the probed window')
 })
 
 test('M3: compress rejects ranges outside the assigned surface', async () => {

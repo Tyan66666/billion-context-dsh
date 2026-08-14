@@ -73,7 +73,7 @@ That's it. Then add a composition row where a compaction backend is expected —
     - id: compaction-acp
       name: 'billion-context-dsh'
       config:
-        modelContextLimit: 128000   # default; the pressure window
+        modelContextLimit: 128000   # optional; omit to auto-detect the model's real window (fallback 128000)
 ```
 
 **Per-mode — an agent preset's `compaction` realm.** First *disable (or delete) the realm's existing `dsh-compaction-basic` row*, then mount this engine — two backends cannot coexist in the same realm:
@@ -87,7 +87,7 @@ That's it. Then add a composition row where a compaction backend is expected —
 - id: compaction-acp
   name: 'billion-context-dsh'
   config:
-    modelContextLimit: 128000   # default; the pressure window
+    modelContextLimit: 128000   # optional; omit to auto-detect the model's real window (fallback 128000)
 ```
 
 > **One context manager per agent.** Two backends providing `ctx.compaction` collide — never run both in the same realm. Full install & verification guide: [docs/INSTALL.md](docs/INSTALL.md).
@@ -142,7 +142,8 @@ This project reuses `acp-kernel`'s compression core and `billion-context-pi`'s d
 
 | Key | Default | Meaning |
 |---|---|---|
-| `modelContextLimit` | `128000` | Context window used for the kernel's pressure decisions |
+| `modelContextLimit` | auto-detected (fallback `128000`) | Context window used for the kernel's pressure decisions; an explicit value wins and skips the probe |
+| `autoModelContextLimit` | `true` | Probe the model's real window from the model API (`agent.ctx.llm.resolveModelInfo`); fall back to the default on failure, `acp_status` shows the window source |
 | `nudgeMinContextLimitPct` | kernel default `0.45` | Nudge window lower bound (usage fraction) — same default as billion-context-pi |
 | `nudgeMaxContextLimitPct` | kernel default `0.75` | Over-limit line: above this the nudge fires regardless of growth |
 | `nudgeEmergencyThresholdPct` | kernel default `0.95` | Emergency nudge (bypasses the per-turn dedup) |
