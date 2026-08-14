@@ -50,6 +50,31 @@ npm install --prefix ~/.dsh/profiles/web ./billion-context-dsh-0.0.0.tgz
 
 注意：shipped 预设（standard / code / cordis）各自内部仍带着 realm 级 `dsh-compaction-basic` 兜底（shipped 安装不可改），所以这些模式里"自动压力压缩"仍由 basic 兜底，但 ACP 的 `compress` 工具、nudge、提示词段照常可用；minimal 与不带 compaction realm 的预设直接使用 host 的 ACP 引擎。
 
+### 2a-2. 可选：关闭 shipped 模式的系统自动压缩（纯模型驱动）
+
+2a 方案下，shipped 预设（standard / code / cordis）的 realm 里仍挂着一份 `dsh-compaction-basic` 兜底，其 `auto` 默认开启——上下文压力超阈值时会**自动摘要**，与 ACP 的"模型驱动"理念并存但不一致。若你希望某个模式也完全由模型决定压缩时机，可以复制该预设并关闭自动压缩（shipped 安装不可直接编辑，复制是唯一正路；`auto: false` 是 `dsh-compaction-basic` 的原生配置）：
+
+```bash
+# 1) 复制 shipped 预设到用户目录（以 standard 为例）
+mkdir -p ~/.dsh/.agent-presets/standard-np
+cp <deepseek-harness>/apps/cli/config/agent-presets/standard/{agent.cordis.yml,preset.yml} \
+   ~/.dsh/.agent-presets/standard-np/
+```
+
+```yaml
+# 2) 编辑 ~/.dsh/.agent-presets/standard-np/agent.cordis.yml，
+#    在 compaction realm 组的 compaction-basic 行下加：
+    - id: compaction-basic
+      name: '@deepseek-ai/dsh-compaction-basic'
+      config:
+        auto: false        # 关闭系统自动压力压缩，只保留手动 /compact
+```
+
+保存后重启（或新开会话），GUI 里选择新的 `standard-np` 模式即可。该模式不再自动摘要，ACP 的 `compress` / nudge / 提示词段照常工作。已验证：复制 + `auto: false` 后预设可正常挂载（`standingKeyFor` → `mounted OK`）。
+
+- **standard / code**：可直接复制，无冲突。
+- **cordis**：含 `tool-cordis` 行（进程全局 inspect provider），复制会与已挂载的 shipped cordis 冲突——除非同时删除该预设里的 `tool-cordis` 行（代价：失去 cordis 的插件开发工具）。要纯模型驱动的 cordis，建议保留 shipped 原版，接受其 realm 兜底，或从 standard 副本开始按需补行。
+
 ### 2b. 单模式生效（agent preset 的 `compaction` realm）
 
 放进某个 preset 的 `compaction` isolate realm，并**用本引擎替换该 realm 的 `dsh-compaction-basic`**：先禁用（或删除）realm 内原有的 `dsh-compaction-basic` 行，再插入本引擎——同一 realm 内两个后端同时 provide `ctx.compaction` 会冲突：
