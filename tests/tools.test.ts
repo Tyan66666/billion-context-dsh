@@ -72,6 +72,44 @@ test('M3: compress lands a durable block and shrinks the surface', async () => {
   assert.ok(ledger[0]!.shadowedTokenCount > 0, 'the ledger records real reclaimed tokens, not 0')
 })
 
+test('M3: compress accepts multiple disjoint ranges in one call, each its own block', async () => {
+  const env = makeEnv()
+  const session = buildTextSession(12)
+  const before = session.deriveMessages().length
+
+  const compress = toolOf(env, 'compress')
+  const result = await compress.execute({
+    content: [
+      {
+        startSeq: 1,
+        endSeq: 3,
+        summary: 'First segment: JWT access tokens with 15 minute expiry, refresh tokens in Redis, login flow in src/auth/login.ts, sliding-window rate limiting, bcrypt cost 12.',
+      },
+      {
+        startSeq: 7,
+        endSeq: 9,
+        summary: 'Second segment: deployment pipeline with docker builds, registry push, kubernetes canary rollout and health-check probes.',
+      },
+    ],
+  } as never, fakeExec(session))
+
+  const text = (result as { text: string }).text
+  assert.match(text, /Compressed 2 block/)
+  assert.match(text, /seqs 1\.\.3/)
+  assert.match(text, /seqs 7\.\.9/)
+
+  // Both segments land as independent durable blocks with distinct ids.
+  const ledger = rebuildBlockLedger(session.events)
+  assert.equal(ledger.length, 2)
+  assert.deepEqual(ledger[0]!.shadowedSeqs, [1, 2, 3])
+  assert.deepEqual(ledger[1]!.shadowedSeqs, [7, 8, 9])
+  assert.notEqual(ledger[0]!.blockId, ledger[1]!.blockId)
+
+  // 12 messages - 6 shadowed + 2 summary nodes = 8 surface nodes.
+  assert.equal(session.deriveMessages().length, 8)
+  assert.ok(session.deriveMessages().length < before)
+})
+
 test('M3: decompress recovers the shadowed originals read-only', async () => {
   const env = makeEnv()
   const session = buildTextSession(12)

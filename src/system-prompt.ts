@@ -16,7 +16,7 @@ YOU decide whether and when to compress context. Nothing forces you: the injecte
 ${COMPRESS_PHILOSOPHY}
 
 Compression tools (refs are SURFACE SEQS, not ids):
-- compress: replace a seq range with your dense self-contained summary. compress({ content: [{ startSeq, endSeq, summary }] }). Edges are auto-balanced to tool-call/result boundaries; a trailing #callId fragment in a seq is ignored. Ranges must be on the current surface — stale seqs fail with guidance.
+- compress: replace one or more seq ranges, each with your own dense summary. Single range: compress({ content: [{ startSeq, endSeq, summary }] }). Batch multiple unrelated segments in one call (each entry becomes its own block): compress({ content: [{ startSeq: 1, endSeq: 5, summary: '...' }, { startSeq: 12, endSeq: 18, summary: '...' }] }). Keep ranges disjoint — overlapping entries in one batch are skipped. Edges are auto-balanced to tool-call/result boundaries; a trailing #callId fragment in a seq is ignored. Ranges must be on the current surface — stale seqs fail with guidance.
 - decompress: recover a compressed block's original content, read-only. decompress({ blockId }).
 - search_context: find information inside compressed blocks BEFORE decompressing. search_context({ query }).
 - acp_status: current context usage and the live compressible-range list. Run it before compressing when in doubt.

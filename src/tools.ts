@@ -282,7 +282,8 @@ export function makeTools(env: ToolEnvironment): ToolDefinition[] {
       description:
         'Replace older conversation ranges with dense summaries you write. '
         + 'Each message seq is a surface reference. Single range: compress({ content: [{ startSeq, endSeq, summary }] }). '
-        + 'Batch multiple unrelated ranges in one call. Never compress content the current step is actively using.',
+        + 'Batch multiple unrelated ranges in one call (each content entry becomes its own block); keep ranges disjoint. '
+        + 'Never compress content the current step is actively using.',
       parameters: compressParameters,
       output: textOutput(),
       async execute(args, exec) {

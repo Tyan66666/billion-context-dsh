@@ -42,9 +42,9 @@ export function rangeTable(session: import('@deepseek-ai/dsh-session').Session):
   return [
     '',
     `Surface: ${surfaceSummary(session)}`,
-    'Compressible ranges (refs are surface seqs):',
+    'Compressible ranges (suggestions only — compress any consumed span; refs are surface seqs):',
     ...lines,
-    'Compress with: compress({ content: [{ startSeq, endSeq, summary }] })',
+    'Compress with: compress({ content: [{ startSeq, endSeq, summary }] }) — content is an array: batch multiple unrelated segments in one call, each entry its own block. Keep ranges disjoint.',
   ].join('\n')
 }
 
