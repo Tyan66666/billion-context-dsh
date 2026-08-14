@@ -16,7 +16,7 @@ import { createUserMessage, type UserMessage } from '@deepseek-ai/dsh-llm'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { AcpStateStore } from './state.ts'
 import { eventsToCoreMessages, surfaceEventsOf } from './messages.ts'
-import { findOpenTurn } from './region.ts'
+import { buildCompressibleSeqRanges, findOpenTurn } from './region.ts'
 import { kernelConfigFor, type KernelConfigInput } from './config.ts'
 
 /** Kernel inputs the nudge path shares with the compress tool. */
@@ -30,27 +30,19 @@ export interface NudgeOutcome {
   readonly emergency: boolean
 }
 
-/** Render the compressible-range table as seq refs for the model. */
-export function rangeTable(nudge: NudgeDecision, state: { messageRefs: { byRef: Record<string, string> } }): string {
-  const byRef = state.messageRefs.byRef
-  const lines = nudge.compressibleRanges.slice(0, 6).map((range) => {
-    const startRaw = byRef[range.startRef]
-    const endRaw = byRef[range.endRef]
-    if (startRaw === undefined || endRaw === undefined) return null
-    const start = Number(startRaw)
-    const end = Number(endRaw)
-    // The kernel ref map can drift after surface replacements, resolving a
-    // range to stale/out-of-order seqs (end before start) — drop those rather
-    // than confusing the model with impossible ranges.
-    if (!Number.isInteger(start) || !Number.isInteger(end) || end < start) return null
-    return `  - seq ${start}..${end} — ${range.count} messages, ~${range.tokens} tokens`
-  })
-  const visible = lines.filter((line): line is string => line !== null)
-  if (visible.length === 0) return ''
+/**
+ * Render the compressible-range table as seq refs for the model.
+ * Computed directly from the surface (not the kernel's ref map, which can
+ * drift and hide large tool results) — see buildCompressibleSeqRanges.
+ */
+export function rangeTable(session: import('@deepseek-ai/dsh-session').Session): string {
+  const ranges = buildCompressibleSeqRanges(session).slice(0, 6)
+  if (ranges.length === 0) return ''
+  const lines = ranges.map((range) => `  - seq ${range.start}..${range.end} — ${range.count} messages, ~${range.tokens} tokens`)
   return [
     '',
     'Compressible ranges (refs are surface seqs):',
-    ...visible,
+    ...lines,
     'Compress with: compress({ content: [{ startSeq, endSeq, summary }] })',
   ].join('\n')
 }
@@ -101,7 +93,7 @@ export function buildNudge(
   if (alreadyShown) return null
   lastNudgeTurn.set(session.id, turnNumber)
 
-  const text = buildNudgeText(nudge, emergency, turn.state)
+  const text = buildNudgeText(nudge, emergency, session)
   const message = createUserMessage({
     content: [{ type: 'text', text }],
     source: { kind: 'plugin', plugin: 'acp-nudge' },
@@ -117,7 +109,7 @@ export function buildNudge(
 function buildNudgeText(
   nudge: NudgeDecision,
   emergency: boolean,
-  state: { messageRefs: { byRef: Record<string, string> } },
+  session: import('@deepseek-ai/dsh-session').Session,
 ): string {
   // Cap the reported percentage at 100: a broken measurement (e.g. response
   // pressure folded in) must never surface as an absurd "230%" to the model.
@@ -126,5 +118,5 @@ function buildNudgeText(
     ? `⚠️ Context usage is at ${pct}% of the window — nearly full. Consider compressing consumed ranges soon so working context stays available; the choice and timing are yours.`
     : `Context usage is at ${pct}%. This is a suggestion, not a requirement — you decide whether and when to compress.`
   const guidance = 'Compress by need, not by percentage: replace only ranges you have genuinely consumed, with dense self-contained summaries.'
-  return [frame, '', guidance, rangeTable(nudge, state)].join('\n')
+  return [frame, '', guidance, rangeTable(session)].join('\n')
 }

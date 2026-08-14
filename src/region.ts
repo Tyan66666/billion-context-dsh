@@ -194,3 +194,74 @@ export function rebuildBlockLedger(events: readonly SessionEvent[]): AcpBlockLed
   }
   return ledger
 }
+
+/** One self-computed compressible span of the current surface. */
+export interface SeqCompressibleRange {
+  readonly start: number
+  readonly end: number
+  readonly count: number
+  readonly tokens: number
+}
+
+/** Whether a surface user message is a compaction checkpoint node (already compressed). */
+function isCheckpointNode(event: SessionEvent): boolean {
+  if (event.type !== 'user/message') return false
+  const source = (event.data as { source?: { plugin?: string } }).source
+  return source?.plugin === 'compact'
+}
+
+/**
+ * Compute compressible spans directly from the surface — independent of the
+ * kernel's ref map, which can drift after surface replacements in long
+ * sessions and hide large tool results from the nudge range table. Skips the
+ * recent protected tail, the last user message, and compaction checkpoints;
+ * edges are then balanced through resolveSurfaceRange. Ranges are ordered by
+ * size (largest reclaimed first).
+ */
+export function buildCompressibleSeqRanges(
+  session: Session,
+  opts: { preserveRecent?: number } = {},
+): SeqCompressibleRange[] {
+  const nodes = session.surface.nodes
+  const preserve = opts.preserveRecent ?? 5
+  const protectedSeqs = new Set<number>()
+  for (const seq of nodes.slice(-preserve)) protectedSeqs.add(seq)
+  for (let index = nodes.length - 1; index >= 0; index -= 1) {
+    const event = session.events[nodes[index]!]
+    if (event?.type === 'user/message' && !isCheckpointNode(event)) {
+      protectedSeqs.add(nodes[index]!)
+      break
+    }
+  }
+  const raw: SeqCompressibleRange[] = []
+  let cur: SeqCompressibleRange | null = null
+  const flush = (): void => {
+    if (cur !== null) raw.push(cur)
+    cur = null
+  }
+  for (const seq of nodes) {
+    const event = session.events[seq]
+    if (event === undefined || protectedSeqs.has(seq) || isCheckpointNode(event)) {
+      flush()
+      continue
+    }
+    const tokens = defaultCountTokens(extractEventText(event))
+    if (cur === null) {
+      cur = { start: seq, end: seq, count: 1, tokens }
+    } else {
+      cur = { start: cur.start, end: seq, count: cur.count + 1, tokens: cur.tokens + tokens }
+    }
+  }
+  flush()
+  const out: SeqCompressibleRange[] = []
+  for (const range of raw) {
+    try {
+      const { start, end } = resolveSurfaceRange(session, range.start, range.end)
+      const count = range.count
+      out.push({ start, end, count, tokens: range.tokens })
+    } catch {
+      // Cannot be balanced into a compressible span — skip.
+    }
+  }
+  return out.sort((a, b) => b.tokens - a.tokens)
+}

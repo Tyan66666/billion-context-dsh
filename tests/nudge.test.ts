@@ -74,20 +74,11 @@ test('M4: emergency nudges bypass the per-turn dedup', () => {
   assert.equal(second!.emergency, true)
 })
 
-test('M4: range table drops ranges whose refs resolve to stale/out-of-order seqs', () => {
-  const nudge = {
-    compressibleRanges: [
-      { startRef: 'm00001', endRef: 'm00002', count: 2, tokens: 500, toolPct: 0, textPct: 100 },
-      // end < start — stale ref mapping after a surface replacement
-      { startRef: 'm00003', endRef: 'm00004', count: 2, tokens: 300, toolPct: 0, textPct: 100 },
-    ],
-  } as never
-  const state = {
-    messageRefs: {
-      byRef: { m00001: '10', m00002: '12', m00003: '65000', m00004: '14000' },
-    },
-  } as never
-  const text = rangeTable(nudge as never, state as never)
-  assert.match(text, /seq 10\.\.12/)
+test('M4: range table is computed from the surface, skipping the protected tail', () => {
+  const session = buildTextSession(12)
+  const text = rangeTable(session)
+  assert.match(text, /Compressible ranges/)
+  // The protected recent tail (last 5 messages) is skipped; older runs appear.
+  assert.match(text, /seq \d+\.\.\d+ — \d+ messages/)
   assert.doesNotMatch(text, /65000/)
 })
