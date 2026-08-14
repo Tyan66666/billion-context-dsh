@@ -9,6 +9,7 @@
 import {
   estimateTokensFast,
   type CompressionCore,
+  type CoreMessage,
   type NudgeDecision,
 } from 'acp-kernel'
 import { createUserMessage, type UserMessage } from '@deepseek-ai/dsh-llm'
@@ -30,13 +31,19 @@ export interface NudgeOutcome {
 }
 
 /** Render the compressible-range table as seq refs for the model. */
-function rangeTable(nudge: NudgeDecision, state: { messageRefs: { byRef: Record<string, string> } }): string {
+export function rangeTable(nudge: NudgeDecision, state: { messageRefs: { byRef: Record<string, string> } }): string {
   const byRef = state.messageRefs.byRef
   const lines = nudge.compressibleRanges.slice(0, 6).map((range) => {
     const startRaw = byRef[range.startRef]
     const endRaw = byRef[range.endRef]
     if (startRaw === undefined || endRaw === undefined) return null
-    return `  - seq ${startRaw}..${endRaw} — ${range.count} messages, ~${range.tokens} tokens`
+    const start = Number(startRaw)
+    const end = Number(endRaw)
+    // The kernel ref map can drift after surface replacements, resolving a
+    // range to stale/out-of-order seqs (end before start) — drop those rather
+    // than confusing the model with impossible ranges.
+    if (!Number.isInteger(start) || !Number.isInteger(end) || end < start) return null
+    return `  - seq ${start}..${end} — ${range.count} messages, ~${range.tokens} tokens`
   })
   const visible = lines.filter((line): line is string => line !== null)
   if (visible.length === 0) return ''
@@ -46,6 +53,20 @@ function rangeTable(nudge: NudgeDecision, state: { messageRefs: { byRef: Record<
     ...visible,
     'Compress with: compress({ content: [{ startSeq, endSeq, summary }] })',
   ].join('\n')
+}
+
+/**
+ * The token count driving pressure decisions. Prefer the host's token meter
+ * (anchored on real provider usage — matches the UI occupancy) and fall back
+ * to the fast heuristic when the meter is absent (tests, minimal hosts).
+ */
+function measuredTokenCount(agent: Agent, coreMessages: CoreMessage[]): number {
+  const meter = agent.ctx?.get?.('tokenMeter') as
+    | { measure?: (session: unknown) => { totalTokens?: number } }
+    | undefined
+  const measured = meter?.measure?.(agent.session)?.totalTokens
+  if (typeof measured === 'number' && measured > 0) return measured
+  return coreMessages.reduce((sum, message) => sum + estimateTokensFast(message.text ?? ''), 0)
 }
 
 /**
@@ -63,7 +84,7 @@ export function buildNudge(
   const session = agent.session
   const state = env.store.stateFor(session)
   const coreMessages = eventsToCoreMessages(surfaceEventsOf(session))
-  const tokenCount = coreMessages.reduce((sum, message) => sum + estimateTokensFast(message.text ?? ''), 0)
+  const tokenCount = measuredTokenCount(agent, coreMessages)
   const config = kernelConfigFor(env)
   const turn = env.kernel.processTurn({ messages: coreMessages, state, config, tokenCount })
   env.store.set(session, turn.state)
