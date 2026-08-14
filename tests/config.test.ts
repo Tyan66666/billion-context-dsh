@@ -5,6 +5,7 @@ import { createCore, defaultConfig, type CompressionCore } from 'acp-kernel'
 import { Session } from '@deepseek-ai/dsh-session'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { kernelConfigFor, type KernelConfigInput } from '../src/config.ts'
+import { defaultCountTokens } from 'acp-kernel'
 import { buildNudge } from '../src/nudge.ts'
 import { AcpStateStore } from '../src/state.ts'
 import { buildTextSession, appendTurn, appendUser } from './helpers.ts'
@@ -93,4 +94,12 @@ test('config: a lowered over-limit threshold triggers the nudge', () => {
   )
   assert.ok(withLowMax !== null, 'lowering the over-limit threshold to 50% forces the nudge')
   assert.equal(withLowMax!.emergency, false)
+})
+
+test('config: token estimation is CJK-aware (1 char/token) not 4-char flat', () => {
+  // The kernel's defaultCountTokens counts CJK at 1 char per token and
+  // everything else at 4 chars per token — the fix for the flat estimate.
+  assert.equal(defaultCountTokens('中'.repeat(100)), 100, '100 CJK chars = 100 tokens')
+  assert.equal(defaultCountTokens('a'.repeat(100)), 25, '100 ascii chars = 25 tokens')
+  assert.equal(defaultCountTokens('中'.repeat(50) + 'a'.repeat(40)), 60, 'mixed CJK+ascii')
 })

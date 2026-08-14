@@ -7,7 +7,7 @@
  */
 
 import {
-  estimateTokensFast,
+  defaultCountTokens,
   type CompressionCore,
   type CoreMessage,
   type NudgeDecision,
@@ -69,7 +69,7 @@ function measuredTokenCount(agent: Agent, coreMessages: CoreMessage[]): number {
     | undefined
   const surface = meter?.measure?.(agent.session)?.surfaceTokens
   if (typeof surface === 'number' && surface > 0) return surface
-  return coreMessages.reduce((sum, message) => sum + estimateTokensFast(message.text ?? ''), 0)
+  return coreMessages.reduce((sum, message) => sum + defaultCountTokens(message.text ?? ''), 0)
 }
 
 /**

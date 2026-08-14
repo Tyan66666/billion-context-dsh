@@ -11,7 +11,7 @@
  */
 
 import { defineTool, type ToolDefinition, type ToolRunContext } from '@deepseek-ai/dsh-tools'
-import { estimateTokensFast, type CompressionCore } from 'acp-kernel'
+import { defaultCountTokens, type CompressionCore } from 'acp-kernel'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { AcpStateStore } from './state.ts'
 import { kernelConfigFor, type KernelConfigInput } from './config.ts'
@@ -103,7 +103,7 @@ async function handleCompress(env: ToolEnvironment, args: CompressArgs, exec: To
   const session = agent.session
   const state = env.store.stateFor(session)
   const coreMessages = eventsToCoreMessages(surfaceEventsOf(session))
-  const tokenCount = coreMessages.reduce((sum, message) => sum + estimateTokensFast(message.text ?? ''), 0)
+  const tokenCount = coreMessages.reduce((sum, message) => sum + defaultCountTokens(message.text ?? ''), 0)
   const config = kernelConfigFor(env)
 
   // Assign refs / advance state exactly like a turn would.
@@ -157,7 +157,7 @@ async function handleCompress(env: ToolEnvironment, args: CompressArgs, exec: To
     let shadowedTokens = 0
     for (const seq of shadowed) {
       const event = session.events[seq]
-      if (event !== undefined) shadowedTokens += estimateTokensFast(extractEventText(event))
+      if (event !== undefined) shadowedTokens += defaultCountTokens(extractEventText(event))
     }
     const { compactionId } = runCompactionTransaction(session, {
       start,
@@ -251,7 +251,7 @@ function handleStatus(env: ToolEnvironment, _args: StatusArgs, exec: ToolRunCont
   const ledger = rebuildBlockLedger(session.events)
   const totalTokens = ledger.reduce((sum, block) => sum + block.shadowedTokenCount, 0)
   const coreMessages = eventsToCoreMessages(surfaceEventsOf(session))
-  const estimated = coreMessages.reduce((sum, message) => sum + estimateTokensFast(message.text ?? ''), 0)
+  const estimated = coreMessages.reduce((sum, message) => sum + defaultCountTokens(message.text ?? ''), 0)
   const limit = env.modelContextLimit
   const lines = [
     `ACP status — session ${session.id}`,

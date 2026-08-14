@@ -14,14 +14,14 @@ import {
   shadowedSeqsOf,
 } from './region.ts'
 import { eventsToCoreMessages, extractEventText, surfaceEventsOf } from './messages.ts'
-import { defaultConfig, estimateTokensFast } from 'acp-kernel'
+import { defaultConfig, defaultCountTokens } from 'acp-kernel'
 
 function statusText(env: ToolEnvironment, agent: Agent): string {
   const session = agent.session
   const ledger = rebuildBlockLedger(session.events)
   const totalTokens = ledger.reduce((sum, block) => sum + block.shadowedTokenCount, 0)
   const coreMessages = eventsToCoreMessages(surfaceEventsOf(session))
-  const estimated = coreMessages.reduce((sum, message) => sum + estimateTokensFast(message.text ?? ''), 0)
+  const estimated = coreMessages.reduce((sum, message) => sum + defaultCountTokens(message.text ?? ''), 0)
   const limit = env.modelContextLimit
   const lines = [
     `ACP status — session ${session.id}`,
@@ -51,7 +51,7 @@ function compressText(env: ToolEnvironment, agent: Agent, args: string[]): strin
   let shadowedTokens = 0
   for (const seq of shadowed) {
     const event = session.events[seq]
-    if (event !== undefined) shadowedTokens += estimateTokensFast(extractEventText(event))
+    if (event !== undefined) shadowedTokens += defaultCountTokens(extractEventText(event))
   }
   const { compactionId } = runCompactionTransaction(session, {
     start,
