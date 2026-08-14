@@ -122,6 +122,9 @@ test('M5: tool-call ranges are auto-adjusted to balanced edges', () => {
   // A complete call/result pair is balanced and unchanged.
   assert.deepEqual(resolveSurfaceRange(session, 2, 3), { start: 2, end: 3 })
   assert.deepEqual(resolveSurfaceRange(session, 1, 3), { start: 1, end: 3 })
-  // A lone unbalanced call has no balanced cut to adjust to.
-  assert.throws(() => resolveSurfaceRange(session, 2, 2), /no tool-pairing-balanced range/)
+  // A lone tool message (2 or 3 alone) expands outward to its balanced pair.
+  assert.deepEqual(resolveSurfaceRange(session, 2, 2), { start: 2, end: 3 }, 'lone tool-call expands to include its result')
+  assert.deepEqual(resolveSurfaceRange(session, 3, 3), { start: 2, end: 3 }, 'lone tool-result expands to include its call')
+  // A range that can neither shrink nor expand still fails with guidance.
+  assert.throws(() => resolveSurfaceRange(session, 99, 100), /not in the current surface/)
 })

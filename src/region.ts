@@ -56,12 +56,14 @@ export function assertNoActiveCompaction(events: readonly SessionEvent[]): void 
 }
 
 /**
- * Validate one inclusive surface span and adjust its edges to the nearest
- * tool-pairing-balanced cuts. Missing or reversed ranges still throw; an
- * edge that sits inside a tool-call/result pair is nudged outward to the
- * closest clean cut instead (models routinely pick edges from the nudge's
- * range table that straddle a pair). The returned range is what a caller
- * should actually shadow.
+ * Validate one inclusive surface span and adjust its edges to a
+ * tool-pairing-balanced range. Missing or reversed ranges still throw. An
+ * edge that sits inside a tool-call/result pair is first nudged inward to the
+ * nearest clean cut; if that collapses the range (e.g. the model asked for a
+ * SINGLE tool result, which can never be balanced alone), the range EXPANDS
+ * outward to the enclosing balanced pair instead — a lone tool message is
+ * almost always a "consumed output" the model genuinely wants to compress.
+ * The returned range is what a caller should actually shadow.
  */
 export function resolveSurfaceRange(
   session: Session,
@@ -69,28 +71,43 @@ export function resolveSurfaceRange(
   end: number,
 ): { start: number; end: number } {
   const nodes = session.surface.nodes
-  let startIdx = nodes.indexOf(start)
-  let endIdx = nodes.indexOf(end)
-  if (startIdx < 0 || endIdx < 0) {
+  const requestedStartIdx = nodes.indexOf(start)
+  const requestedEndIdx = nodes.indexOf(end)
+  if (requestedStartIdx < 0 || requestedEndIdx < 0) {
     throw new Error(`billion-context-dsh: seq ${start}..${end} not in the current surface`)
   }
-  if (startIdx > endIdx) {
+  if (requestedStartIdx > requestedEndIdx) {
     throw new Error(`billion-context-dsh: reversed range ${start}..${end}`)
   }
-  // Nudge the start forward and the end backward to the nearest balanced cuts.
+  let startIdx = requestedStartIdx
+  let endIdx = requestedEndIdx
+  // First pass: nudge inward to the nearest balanced cuts.
   while (startIdx <= endIdx && !toolPairingBalancedBefore(session, nodes[startIdx]!)) {
     startIdx += 1
   }
   while (endIdx >= startIdx && !toolPairingBalancedAfter(session, nodes[endIdx]!)) {
     endIdx -= 1
   }
-  if (startIdx > endIdx) {
-    throw new Error(
-      `billion-context-dsh: no tool-pairing-balanced range inside seq ${start}..${end} — `
-      + 'narrow the range or consult acp_status for the current surface',
-    )
+  if (startIdx <= endIdx) {
+    return { start: nodes[startIdx]!, end: nodes[endIdx]! }
   }
-  return { start: nodes[startIdx]!, end: nodes[endIdx]! }
+  // Second pass: the inward pass collapsed (a lone tool message) — expand
+  // outward from the REQUESTED span to the smallest balanced enclosing pair.
+  startIdx = requestedStartIdx
+  endIdx = requestedEndIdx
+  while (startIdx > 0 && !toolPairingBalancedBefore(session, nodes[startIdx]!)) {
+    startIdx -= 1
+  }
+  while (endIdx < nodes.length - 1 && !toolPairingBalancedAfter(session, nodes[endIdx]!)) {
+    endIdx += 1
+  }
+  if (toolPairingBalancedBefore(session, nodes[startIdx]!) && toolPairingBalancedAfter(session, nodes[endIdx]!)) {
+    return { start: nodes[startIdx]!, end: nodes[endIdx]! }
+  }
+  throw new Error(
+    `billion-context-dsh: no tool-pairing-balanced range around seq ${start}..${end} — `
+    + 'narrow the range or consult acp_status for the current surface',
+  )
 }
 
 /** The surface seqs shadowed by the inclusive positional span. */
