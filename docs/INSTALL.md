@@ -24,9 +24,21 @@ npm install --prefix ~/.dsh/profiles/web ./billion-context-dsh-0.0.0.tgz
 
 ## 2. 组合行
 
-编辑 `~/.dsh/profiles/web/cordis.patch.yml`，追加：
+两种挂法，按你想要生效的范围选。
+
+### 2a. 全局生效（host 平面，所有模式）——推荐
+
+编辑 `~/.dsh/profiles/web/cordis.patch.yml`（你的 profile 的补丁文件），追加：
 
 ```yaml
+# ACP 作为全局压缩后端：四个模型工具 + `/acp` 命令 + nudge + ACP 提示词段，
+# 对每个模式（standard / code / minimal / cordis / 自定义预设）都生效。
+# 必须同时禁用 host 的 compaction-basic：同一 realm 内两个后端同时
+# provide `ctx.compaction` 会冲突（README 的 "One context manager per
+# agent" 警告），默认 web profile 的 host 层本来就挂着 compaction-basic。
+- id: compaction-basic
+  disabled: true
+
 - insert:
     - id: compaction-acp
       name: 'billion-context-dsh'
@@ -34,13 +46,17 @@ npm install --prefix ~/.dsh/profiles/web ./billion-context-dsh-0.0.0.tgz
         modelContextLimit: 128000
 ```
 
-作用：host 平面注册 `ctx.compaction` + 四个模型工具 + `/acp` 命令 + `agent/pre-step` nudge 监听。
+作用：host 平面注册 `ctx.compaction` + 四个模型工具 + `/acp` 命令 + `agent/pre-step` nudge 监听，所有模式共享一份。
 
-> 生产替换 `compaction-basic` 时，不要放 host 平面，而是放进 agent preset 的 `compaction` isolate realm（见 README 的组合示例）——那时本引擎的 `compactIfNeeded` 才成为该 agent 的自动压缩策略（返回 null = 只 nudge 不自动摘要）。
+注意：shipped 预设（standard / code / cordis）各自内部仍带着 realm 级 `dsh-compaction-basic` 兜底（shipped 安装不可改），所以这些模式里"自动压力压缩"仍由 basic 兜底，但 ACP 的 `compress` 工具、nudge、提示词段照常可用；minimal 与不带 compaction realm 的预设直接使用 host 的 ACP 引擎。
+
+### 2b. 单模式生效（agent preset 的 `compaction` realm）
+
+放进某个 preset 的 `compaction` isolate realm，并**用本引擎替换该 realm 的 `dsh-compaction-basic`**（见 README 的组合示例）。只对该模式生效，不是全局。此时本引擎的 `compactIfNeeded` 成为该 agent 的自动压缩策略（返回 null = 只 nudge 不自动摘要）。
 
 ## 3. 重启
 
-组合变更需要重启 dsh web 进程（你当前的启动方式，如 `pnpm run dev:web` 或 `dsh --profile web`）。重启后打开/新建一个会话。
+组合变更后，若你的 profile 开启了补丁热加载（如 `dsh --profile web` 对 `cordis.patch.yml` 的配置热更新）则立即生效，否则重启 dsh web 进程（你当前的启动方式，如 `pnpm run dev:web` 或 `dsh --profile web`）。重启后打开/新建一个会话。
 
 ## 4. 验证清单
 
@@ -67,5 +83,7 @@ npm run typecheck && npm test && npm run build
 
 ```bash
 rm ~/.dsh/profiles/web/node_modules/billion-context-dsh   # 或对应 tarball 安装
-# 从 cordis.patch.yml 删除 compaction-acp 行，重启
+# 从 cordis.patch.yml 删除 compaction-acp 插入行；若按 2a 全局方案装的，
+# 还要删除对 compaction-basic 的 disabled: true（恢复默认自动压缩）。
+# 视热加载/重启策略生效。
 ```
