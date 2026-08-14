@@ -103,30 +103,135 @@ function hasPlainRef(session: Session, seq: number): boolean {
 }
 
 /**
+ * A requested range whose EVERY live message was already shadowed by one or
+ * more blocks. The compress tool catches this and reports the range as already
+ * compressed (with the covering block ids) instead of folding block summary
+ * nodes as plain messages or erroring out. Distillation stays an explicit act:
+ * target a LIVE checkpoint seq directly to distill (tier 2/3).
+ */
+export class AlreadyCompressedRangeError extends Error {
+  constructor(
+    readonly start: number,
+    readonly end: number,
+    readonly coveringBlockIds: readonly string[],
+  ) {
+    super(
+      `billion-context-dsh: seq ${start}..${end} already compressed — `
+      + 'no live content remains in that span',
+    )
+    this.name = 'AlreadyCompressedRangeError'
+  }
+}
+
+type StaleRangeRecovery =
+  | { kind: 'ok'; start: number; end: number }
+  | { kind: 'already-compressed'; coveringBlockIds: string[] }
+  | { kind: 'unresolvable'; failedEdge: number }
+
+/**
+ * Rebuild a requested range whose edges are no longer on the current surface.
+ * The dominant cause is staleness: the seqs came from an older nudge table or
+ * a previous compress result, and an earlier compression SHADOWED them (they
+ * stay in the append-only log, but are gone from the surface). The recovery:
+ *
+ *  1. An edge that does not exist in the log at all (invented, or from another
+ *     session) is unresolvable — there is no way to guess what it meant.
+ *  2. The still-LIVE surface nodes inside the requested span, in VALUE order
+ *     (the surface can be locally non-monotonic after replacements, so value
+ *     order is the only coherent span). If there are none, the whole span was
+ *     already compressed → 'already-compressed' with the covering block ids.
+ *  3. Otherwise the range snaps to the first..last live PLAIN node in the
+ *     span. Block checkpoint nodes are deliberately excluded: distilling a
+ *     block on a STALE reference would silently change block structure the
+ *     model never intended to touch — distillation requires targeting a live
+ *     checkpoint seq directly.
+ */
+function recoverStaleRange(session: Session, start: number, end: number): StaleRangeRecovery {
+  if (session.events[start] === undefined || session.events[end] === undefined) {
+    const failedEdge = session.events[start] === undefined ? start : end
+    return { kind: 'unresolvable', failedEdge }
+  }
+  const liveInside = session.surface.nodes
+    .filter((seq) => seq >= start && seq <= end)
+    .sort((a, b) => a - b)
+  const plain = liveInside.filter((seq) => !isCheckpointNode(session.events[seq]!))
+  if (plain.length === 0) {
+    const coveringBlockIds = rebuildBlockLedger(session.events)
+      .filter((entry) => entry.shadowedSeqs.some((seq) => seq >= start && seq <= end))
+      .map((entry) => entry.blockId)
+    return { kind: 'already-compressed', coveringBlockIds }
+  }
+  return { kind: 'ok', start: plain[0]!, end: plain[plain.length - 1]! }
+}
+
+export interface ResolvedSurfaceRange {
+  readonly start: number
+  readonly end: number
+  /**
+   * True when the requested edges were not on the current surface and were
+   * remapped to the still-live content of the requested span (an earlier
+   * compression shadowed them). Callers surface this so the model sees what
+   * was actually compressed instead of silently shadowing a different span.
+   */
+  readonly recovered?: boolean
+}
+
+/**
  * Validate one inclusive surface span and adjust its edges to a
- * tool-pairing-balanced range whose boundaries carry a bare-seq ref. Missing
- * or reversed ranges still throw. An edge that sits inside a tool-call/result
- * pair — or on a multi-tool-call assistant message that has no bare-seq ref —
- * is first nudged inward to the nearest clean cut; if that collapses the range
- * (e.g. the model asked for a SINGLE tool result, which can never be balanced
- * alone), the range EXPANDS outward to the enclosing clean pair instead — a
- * lone tool message is almost always a "consumed output" the model genuinely
- * wants to compress. The returned range is what a caller should actually shadow.
+ * tool-pairing-balanced range whose boundaries carry a bare-seq ref. Reversed
+ * ranges throw. An edge that sits inside a tool-call/result pair — or on a
+ * multi-tool-call assistant message that has no bare-seq ref — is first nudged
+ * inward to the nearest clean cut; if that collapses the range (e.g. the model
+ * asked for a SINGLE tool result, which can never be balanced alone), the
+ * range EXPANDS outward to the enclosing clean pair instead — a lone tool
+ * message is almost always a "consumed output" the model genuinely wants to
+ * compress. The returned range is what a caller should actually shadow.
+ *
+ * Missing edges are NOT an immediate error: the seqs were probably shadowed by
+ * an earlier compression (stale nudge table / old compress result). The span
+ * is rebuilt from its still-live remainder via recoverStaleRange — a fully
+ * shadowed span throws AlreadyCompressedRangeError, a genuinely unknown edge
+ * throws the not-in-surface guidance error. The returned range is what a
+ * caller should actually shadow.
  */
 export function resolveSurfaceRange(
   session: Session,
   start: number,
   end: number,
-): { start: number; end: number } {
+): ResolvedSurfaceRange {
   const nodes = session.surface.nodes
-  const requestedStartIdx = nodes.indexOf(start)
-  const requestedEndIdx = nodes.indexOf(end)
+  if (start > end) {
+    throw new Error(`billion-context-dsh: reversed range ${start}..${end}`)
+  }
+  let requestedStartIdx = nodes.indexOf(start)
+  let requestedEndIdx = nodes.indexOf(end)
+  let recovered = false
   if (requestedStartIdx < 0 || requestedEndIdx < 0) {
-    throw new Error(
-      `billion-context-dsh: seq ${start}..${end} not in the current surface — `
-      + 'surface seqs are sparse message nodes (only user/message, assistant/message, '
-      + 'tool/result events); consult acp_status for the current surface range',
-    )
+    const stale = recoverStaleRange(session, start, end)
+    if (stale.kind === 'unresolvable') {
+      throw new Error(
+        `billion-context-dsh: seq ${start}..${end} not in the current surface — `
+        + `edge seq ${stale.failedEdge} is not in this session's log. `
+        + 'Surface seqs are sparse message nodes (only user/message, assistant/message, '
+        + 'tool/result events); consult acp_status for the current surface range',
+      )
+    }
+    if (stale.kind === 'already-compressed') {
+      throw new AlreadyCompressedRangeError(start, end, stale.coveringBlockIds)
+    }
+    start = stale.start
+    end = stale.end
+    recovered = true
+    requestedStartIdx = nodes.indexOf(start)
+    requestedEndIdx = nodes.indexOf(end)
+    if (requestedStartIdx < 0 || requestedEndIdx < 0) {
+      // Unreachable in practice (recovery returns live nodes), but never let
+      // a negative index reach the balancing passes.
+      throw new Error(
+        `billion-context-dsh: seq ${start}..${end} not in the current surface — `
+        + 'consult acp_status for the current surface range',
+      )
+    }
   }
   if (requestedStartIdx > requestedEndIdx) {
     throw new Error(`billion-context-dsh: reversed range ${start}..${end}`)
@@ -151,7 +256,19 @@ export function resolveSurfaceRange(
     endIdx -= 1
   }
   if (startIdx <= endIdx && nodes[startIdx]! <= nodes[endIdx]!) {
-    return { start: nodes[startIdx]!, end: nodes[endIdx]! }
+    return recovered
+      ? { start: nodes[startIdx]!, end: nodes[endIdx]!, recovered: true }
+      : { start: nodes[startIdx]!, end: nodes[endIdx]! }
+  }
+  // A recovered span NEVER expands across block checkpoints: the model's
+  // requested edges were stale, so growing the span into block territory could
+  // fold content it never intended to touch. If the live remainder cannot be
+  // balanced by shrinking alone, give up with guidance instead.
+  if (recovered) {
+    throw new Error(
+      `billion-context-dsh: no tool-pairing-balanced live remainder around seq ${start}..${end} — `
+      + 'narrow the range or consult acp_status for the current surface',
+    )
   }
   // Second pass: the inward pass collapsed (a lone tool message) — expand
   // outward from the REQUESTED span to the smallest clean enclosing pair.

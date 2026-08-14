@@ -4,6 +4,7 @@ import { Session } from '@deepseek-ai/dsh-session'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { AcpStateStore } from '../src/state.ts'
 import {
+  AlreadyCompressedRangeError,
   assertNoActiveCompaction,
   findOpenTurn,
   rebuildBlockLedger,
@@ -106,6 +107,104 @@ test('M5: resolveSurfaceRange rejects missing, reversed, and pair-broken ranges'
   )
   assert.throws(() => resolveSurfaceRange(session, 4, 1), /reversed range/)
   assert.deepEqual(shadowedSeqsOf(session, 1, 3), [1, 2, 3])
+})
+
+test('M5: resolveSurfaceRange recovers stale edges to the live remainder', () => {
+  const session = buildTextSession(6)
+  runCompactionTransaction(session, {
+    start: 1,
+    end: 4,
+    shadowedSeqs: [1, 2, 3, 4],
+    summary: [{ type: 'text', text: 'First block summary with plenty of detail.' }],
+    shadowedTokenCount: 1000,
+    provider: 'p',
+    model: 'm',
+  })
+  // Surface is [checkpoint, 5, 6]: seqs 1..4 were shadowed by the block.
+  // A stale range whose start was shadowed (the classic old-nudge reuse) snaps
+  // to the still-live content of the requested span.
+  assert.deepEqual(resolveSurfaceRange(session, 3, 6), { start: 5, end: 6, recovered: true })
+  // A fully live range keeps the current behavior (no recovery flag).
+  assert.deepEqual(resolveSurfaceRange(session, 5, 6), { start: 5, end: 6 })
+})
+
+test('M5: a fully shadowed span throws AlreadyCompressedRangeError with the covering blocks', () => {
+  const session = buildTextSession(6)
+  runCompactionTransaction(session, {
+    start: 1,
+    end: 4,
+    shadowedSeqs: [1, 2, 3, 4],
+    summary: [{ type: 'text', text: 'First block summary with plenty of detail.' }],
+    shadowedTokenCount: 1000,
+    provider: 'p',
+    model: 'm',
+  })
+  assert.throws(
+    () => resolveSurfaceRange(session, 1, 4),
+    (error: unknown) => error instanceof AlreadyCompressedRangeError
+      && error.start === 1
+      && error.end === 4
+      && error.coveringBlockIds.length === 1
+      && error.coveringBlockIds[0] === rebuildBlockLedger(session.events)[0]!.blockId,
+    're-compressing an already compressed span reports the covering block',
+  )
+})
+
+test('M5: recovery never folds block checkpoint nodes (distillation stays explicit)', () => {
+  const session = buildTextSession(12)
+  runCompactionTransaction(session, {
+    start: 1,
+    end: 5,
+    shadowedSeqs: [1, 2, 3, 4, 5],
+    summary: [{ type: 'text', text: 'First block summary with plenty of detail.' }],
+    shadowedTokenCount: 1000,
+    provider: 'p',
+    model: 'm',
+  })
+  runCompactionTransaction(session, {
+    start: 6,
+    end: 10,
+    shadowedSeqs: [6, 7, 8, 9, 10],
+    summary: [{ type: 'text', text: 'Second block summary with plenty of detail.' }],
+    shadowedTokenCount: 1000,
+    provider: 'p',
+    model: 'm',
+  })
+  // Surface: [c1, c2, 11, 12] — the requested span 3..9 holds only shadowed
+  // content (its live nodes would be the two checkpoints, which are never
+  // folded on a stale reference): already compressed, both blocks reported.
+  assert.throws(
+    () => resolveSurfaceRange(session, 3, 9),
+    (error: unknown) => error instanceof AlreadyCompressedRangeError
+      && error.coveringBlockIds.length === 2,
+    'a span whose only live nodes are checkpoints is already compressed, not distilled',
+  )
+  // A stale span covering both blocks AND the live tail compresses only the tail.
+  assert.deepEqual(resolveSurfaceRange(session, 3, 12), { start: 11, end: 12, recovered: true })
+
+  // Now a gap between the blocks: block2 shadows 8..10, leaving 6..7 live.
+  const gapped = buildTextSession(12)
+  runCompactionTransaction(gapped, {
+    start: 1,
+    end: 5,
+    shadowedSeqs: [1, 2, 3, 4, 5],
+    summary: [{ type: 'text', text: 'First block summary with plenty of detail.' }],
+    shadowedTokenCount: 1000,
+    provider: 'p',
+    model: 'm',
+  })
+  runCompactionTransaction(gapped, {
+    start: 8,
+    end: 10,
+    shadowedSeqs: [8, 9, 10],
+    summary: [{ type: 'text', text: 'Second block summary with plenty of detail.' }],
+    shadowedTokenCount: 1000,
+    provider: 'p',
+    model: 'm',
+  })
+  // Surface: [c1, c2, 6, 7, 11, 12]. A stale span 3..9 covers both blocks and
+  // the live middle — only the middle is compressed, neither block is touched.
+  assert.deepEqual(resolveSurfaceRange(gapped, 3, 9), { start: 6, end: 7, recovered: true })
 })
 
 test('M5: a second active compaction is rejected', () => {

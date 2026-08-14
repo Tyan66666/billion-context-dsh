@@ -45,6 +45,7 @@ export function rangeTable(session: import('@deepseek-ai/dsh-session').Session):
     'Compressible ranges (suggestions only — compress any consumed span; refs are surface seqs):',
     ...lines,
     'Compress with: compress({ content: [{ startSeq, endSeq, summary }] }) — content is an array: batch multiple unrelated segments in one call, each entry its own block. Keep ranges disjoint.',
+    'Snapshot taken at nudge time: the seqs go stale once the surface moves (a later compress shadows them), so re-run acp_status for fresh refs before compressing.',
   ].join('\n')
 }
 

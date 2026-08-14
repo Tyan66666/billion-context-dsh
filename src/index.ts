@@ -57,6 +57,7 @@ export {
   type AcpWindow,
 } from './window.ts'
 export {
+  AlreadyCompressedRangeError,
   rebuildBlockLedger,
   resolveSurfaceRange,
   runCompactionTransaction,
@@ -70,6 +71,7 @@ export {
   expandShadowedSeqs,
   type AcpBlockLedgerEntry,
   type CompactionTransactionInput,
+  type ResolvedSurfaceRange,
 } from './region.ts'
 export { eventsToCoreMessages, projectEvent, surfaceEventsOf, extractEventText } from './messages.ts'
 

@@ -17,6 +17,7 @@ import type { AcpStateStore } from './state.ts'
 import { kernelConfigFor, type KernelConfigInput } from './config.ts'
 import { windowSourceLabel, type AcpWindow } from './window.ts'
 import {
+  AlreadyCompressedRangeError,
   blockRefForSummarySeq,
   compactionIdsOfKernelBlocks,
   expandShadowedSeqs,
@@ -25,6 +26,7 @@ import {
   runCompactionTransaction,
   shadowedSeqsOf,
   surfaceSummary,
+  type ResolvedSurfaceRange,
 } from './region.ts'
 import { allLogMessages, eventsToCoreMessages, extractEventText, surfaceEventsOf } from './messages.ts'
 
@@ -123,39 +125,77 @@ async function handleCompress(env: ToolEnvironment, args: CompressArgs, exec: To
   env.store.set(session, turn.state)
   const byRaw = turn.state.messageRefs.byRaw
 
-  const ranges = args.content.map((range) => {
+  const ranges: Array<
+    ResolvedSurfaceRange & {
+      startSeq: number
+      endSeq: number
+      startRef: string
+      endRef: string
+      summary: string
+      topic?: string
+    }
+  > = []
+  // Ranges whose whole span was already shadowed by earlier compressions.
+  // They land as advisory warnings, never as errors or phantom blocks.
+  const alreadyCompressedNotes: string[] = []
+  for (const range of args.content) {
     const startSeq = parseSeq(range.startSeq)
     const endSeq = parseSeq(range.endSeq)
-    // Balance edges FIRST: the requested edges may sit on multi-tool-call
-    // assistant messages, which project to `${seq}#${callId}` CoreMessage ids
-    // and therefore have NO bare-`${seq}` ref. resolveSurfaceRange shifts them
-    // to clean tool-pairing-balanced cuts that always carry a bare ref, so the
-    // resolved refs exist and the shadowed span matches the returned range.
-    const { start, end } = resolveSurfaceRange(session, startSeq, endSeq)
+    let resolved: ResolvedSurfaceRange
+    try {
+      // Balance edges FIRST: the requested edges may sit on multi-tool-call
+      // assistant messages, which project to `${seq}#${callId}` CoreMessage ids
+      // and therefore have NO bare-`${seq}` ref. resolveSurfaceRange shifts them
+      // to clean tool-pairing-balanced cuts that always carry a bare ref, so the
+      // resolved refs exist and the shadowed span matches the returned range.
+      // Edges shadowed by an earlier compression (stale nudge table / old
+      // compress result) are remapped to the still-live content of the span.
+      resolved = resolveSurfaceRange(session, startSeq, endSeq)
+    } catch (error) {
+      if (error instanceof AlreadyCompressedRangeError) {
+        const covering = error.coveringBlockIds
+        const blockNote = covering.length === 0
+          ? ''
+          : ` (block ${covering[0]!.slice(0, 8)}${covering.length > 1 ? ` +${covering.length - 1} more` : ''})`
+        alreadyCompressedNotes.push(
+          `  seqs ${error.start}..${error.end} already compressed${blockNote} — nothing to reclaim; decompress to recover the originals`,
+        )
+        continue
+      }
+      throw error
+    }
     // An edge on an ACTIVE block's checkpoint summary node resolves to the
     // kernel block ref (bN) — the boundary that makes applyCompression distill
     // (tier 2/3) instead of folding the summary as a plain message.
-    const startBlockRef = blockRefForSummarySeq(session, start)
-    const endBlockRef = blockRefForSummarySeq(session, end)
-    const startRef = startBlockRef ?? byRaw[String(start)]
-    const endRef = endBlockRef ?? byRaw[String(end)]
+    const startBlockRef = blockRefForSummarySeq(session, resolved.start)
+    const endBlockRef = blockRefForSummarySeq(session, resolved.end)
+    const startRef = startBlockRef ?? byRaw[String(resolved.start)]
+    const endRef = endBlockRef ?? byRaw[String(resolved.end)]
     if (startRef === undefined || endRef === undefined) {
       throw new Error(
-        `billion-context-dsh: seq ${start}..${end} has no assigned ref — `
+        `billion-context-dsh: seq ${resolved.start}..${resolved.end} has no assigned ref — `
         + 'the range must be on the current surface (run acp_status for the live seq list)',
       )
     }
-    return {
+    ranges.push({
+      ...resolved,
       startSeq,
       endSeq,
-      start,
-      end,
       startRef,
       endRef,
       summary: range.summary,
       ...(range.topic ?? args.topic) === undefined ? {} : { topic: range.topic ?? args.topic },
+    })
+  }
+
+  // Nothing to do: every requested range was already compressed.
+  if (ranges.length === 0) {
+    const text = ['Compressed 0 block(s), ~0 tokens reclaimed.', ...alreadyCompressedNotes]
+    if (alreadyCompressedNotes.length > 0) {
+      text.push('  (all requested ranges were already compressed — decompress a block to recover its originals)')
     }
-  })
+    return { text: text.join('\n') }
+  }
 
   const applied = env.kernel.applyCompression({
     ranges: ranges.map(({ startRef, endRef, summary, topic }) => ({ startRef, endRef, summary, topic })),
@@ -196,9 +236,7 @@ async function handleCompress(env: ToolEnvironment, args: CompressArgs, exec: To
 
   const lines: string[] = []
   let skippedRanges = 0
-  for (let index = 0; index < ranges.length; index += 1) {
-    const range = ranges[index]!
-    const original = args.content[index]!
+  for (const range of ranges) {
     const key = `${range.startRef}::${range.endRef}`
     const block = blockByRangeKey.get(key)
     if (block === undefined) {
@@ -227,7 +265,7 @@ async function handleCompress(env: ToolEnvironment, args: CompressArgs, exec: To
       start,
       end,
       shadowedSeqs: shadowed,
-      summary: [{ type: 'text', text: original.summary }],
+      summary: [{ type: 'text', text: range.summary }],
       shadowedTokenCount: shadowedTokens,
       provider: agent.options.provider ?? '',
       model: agent.options.model ?? '',
@@ -242,16 +280,21 @@ async function handleCompress(env: ToolEnvironment, args: CompressArgs, exec: To
     })
     const adjusted = start !== range.startSeq || end !== range.endSeq
     const tierLabel = tier === 1 ? '' : `, tier ${tier}`
+    const note = range.recovered === true
+      ? ` (seqs ${range.startSeq}..${range.endSeq} were already shadowed — compressed the live remainder ${start}..${end})`
+      : adjusted
+        ? ` (adjusted from ${range.startSeq}..${range.endSeq} to balanced edges)`
+        : ''
     lines.push(
-      `  block ${compactionId.slice(0, 8)}: seqs ${start}..${end}, ${shadowed.length} messages shadowed${tierLabel}`
-      + (adjusted ? ` (adjusted from ${range.startSeq}..${range.endSeq} to balanced edges)` : ''),
+      `  block ${compactionId.slice(0, 8)}: seqs ${start}..${end}, ${shadowed.length} messages shadowed${tierLabel}${note}`,
     )
   }
 
   const summaryLine = `Compressed ${applied.result.blocksCreated} block(s), ~${applied.result.tokensCompressed} tokens reclaimed.`
-  const warningLines = [...freeWarnings.map((warning) => `  ${warning}`), ...lines]
-  const footer = skippedRanges > 0
-    ? `  (${skippedRanges} range(s) skipped — see warnings above)`
+  const totalSkipped = skippedRanges + alreadyCompressedNotes.length
+  const warningLines = [...freeWarnings.map((warning) => `  ${warning}`), ...alreadyCompressedNotes, ...lines]
+  const footer = totalSkipped > 0
+    ? `  (${totalSkipped} range(s) skipped — see warnings above)`
     : ''
   return { text: `${summaryLine}\n${[...warningLines, footer].filter((line) => line !== '').join('\n')}` }
 }
@@ -358,7 +401,10 @@ export function makeTools(env: ToolEnvironment): ToolDefinition[] {
         'Replace older conversation ranges with dense summaries you write. '
         + 'Each message seq is a surface reference. Single range: compress({ content: [{ startSeq, endSeq, summary }] }). '
         + 'Batch multiple unrelated ranges in one call (each content entry becomes its own block); keep ranges disjoint. '
-        + 'Never compress content the current step is actively using.',
+        + 'Never compress content the current step is actively using. '
+        + 'Seq refs must come from the CURRENT surface (acp_status or the latest nudge): a span whose edges were shadowed '
+        + 'by an earlier compress is auto-remapped to its still-live content, a fully compressed span is reported as '
+        + 'already compressed, and invented/other-session seqs fail with guidance.',
       parameters: compressParameters,
       output: textOutput(),
       async execute(args, exec) {

@@ -414,6 +414,104 @@ test('M3: overlapping batch entries skip the later range with a warning', async 
   assert.deepEqual(ledger[0]!.shadowedSeqs, [1, 2, 3])
 })
 
+test('M3: compress remaps a stale range to the still-live remainder', async () => {
+  const env = makeEnv()
+  const session = buildTextSession(12)
+  const compress = toolOf(env, 'compress')
+  await compress.execute({
+    content: [{
+      startSeq: 1,
+      endSeq: 5,
+      summary: 'Authentication system: JWT access tokens with 15 minute expiry, refresh tokens in Redis with 30 day TTL, login flow in src/auth/login.ts with sliding-window rate limiting at 10 requests per minute per IP address, bcrypt hashing at cost factor 12.',
+    }],
+  } as never, fakeExec(session))
+
+  // Reuse a stale nudge-style range whose START was shadowed by the block
+  // above (the "seq 93148..174600 not in the current surface" class of bug).
+  // The tool must remap it to the live remainder instead of erroring.
+  const result = await compress.execute({
+    content: [{
+      startSeq: 3,
+      endSeq: 10,
+      summary: 'Deployment pipeline with docker builds, registry push, kubernetes canary rollout and health-check probes, plus the environment configuration matrix.',
+    }],
+  } as never, fakeExec(session))
+  const text = (result as { text: string }).text
+  assert.match(text, /Compressed 1 block/)
+  assert.match(text, /were already shadowed — compressed the live remainder/)
+  assert.match(text, /seqs 6\.\.10/)
+
+  const ledger = rebuildBlockLedger(session.events)
+  assert.equal(ledger.length, 2, 'the recovered range lands a second block')
+  assert.deepEqual(ledger[1]!.shadowedSeqs, [6, 7, 8, 9, 10], 'only the live remainder is shadowed, never the checkpoint')
+})
+
+test('M3: compress reports a fully shadowed range as already compressed, no error', async () => {
+  const env = makeEnv()
+  const session = buildTextSession(12)
+  const compress = toolOf(env, 'compress')
+  await compress.execute({
+    content: [{
+      startSeq: 1,
+      endSeq: 5,
+      summary: 'Authentication system: JWT access tokens with 15 minute expiry, refresh tokens in Redis with 30 day TTL, login flow in src/auth/login.ts with sliding-window rate limiting at 10 requests per minute per IP address, bcrypt hashing at cost factor 12.',
+    }],
+  } as never, fakeExec(session))
+
+  // The exact stale re-compression that used to throw
+  // 'seq 1..5 not in the current surface' — now a clean advisory no-op.
+  const result = await compress.execute({
+    content: [{
+      startSeq: 1,
+      endSeq: 5,
+      summary: 'Repeated summary that would otherwise fail on stale seqs with enough technical detail to pass the minimum length threshold.',
+    }],
+  } as never, fakeExec(session))
+  const text = (result as { text: string }).text
+  assert.match(text, /Compressed 0 block/)
+  assert.match(text, /already compressed/)
+  assert.match(text, /decompress to recover/)
+
+  const ledger = rebuildBlockLedger(session.events)
+  assert.equal(ledger.length, 1, 'no phantom block for the stale re-compression')
+})
+
+test('M3: a batch mixing a fresh range and a fully shadowed range lands one block', async () => {
+  const env = makeEnv()
+  const session = buildTextSession(12)
+  const compress = toolOf(env, 'compress')
+  await compress.execute({
+    content: [{
+      startSeq: 1,
+      endSeq: 5,
+      summary: 'Authentication system: JWT access tokens with 15 minute expiry, refresh tokens in Redis with 30 day TTL, login flow in src/auth/login.ts with sliding-window rate limiting at 10 requests per minute per IP address, bcrypt hashing at cost factor 12.',
+    }],
+  } as never, fakeExec(session))
+
+  const result = await compress.execute({
+    content: [
+      {
+        startSeq: 1,
+        endSeq: 5,
+        summary: 'Stale range that is already covered by the first block and must be skipped, not error.',
+      },
+      {
+        startSeq: 7,
+        endSeq: 9,
+        summary: 'Fresh deployment segment: docker builds, registry push, kubernetes canary rollout and health-check probes.',
+      },
+    ],
+  } as never, fakeExec(session))
+  const text = (result as { text: string }).text
+  assert.match(text, /Compressed 1 block/, 'only the fresh range creates a block')
+  assert.match(text, /already compressed/)
+  assert.match(text, /1 range\(s\) skipped/)
+
+  const ledger = rebuildBlockLedger(session.events)
+  assert.equal(ledger.length, 2, 'the stale entry never creates a durable block')
+  assert.deepEqual(ledger[1]!.shadowedSeqs, [7, 8, 9])
+})
+
 test('M3: a mixed boundary [message..blockSummary] distills and folds extra messages', async () => {
   const env = makeEnv()
   const session = buildTextSession(12)
