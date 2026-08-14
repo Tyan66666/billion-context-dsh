@@ -135,3 +135,30 @@ PROBE OK
 2. 先实现 M1 消息适配层 + M3 的 `compress` 工具（不接自动触发），用一个真实会话验证"模型调用 compress → durable 替换 → 上下文变小"闭环。
 3. 若接受"事务机制上游化"这个小型 DSH 贡献，先提一个把 `compactSurfaceRegion` 事务从 compaction-basic 移到 seam 的 PR（纯重构、行为不变），ACP 后端即可复用，避免 400 行重复实现。
 4. 拒绝路径 B（核心加内存改写钩子）：与 reconstructability 原则冲突，需要 DSH 维护者拍板，作为非阻塞的独立讨论。
+
+---
+
+## 附录：v0.1.1 实战——长会话排障报告
+
+在真实部署（DSH web profile + `acp` preset，Rectangle 项目的一个长会话）中验证时，压缩闭环暴露了 6 个问题，全部在 v0.1.1 修复（[Release v0.1.1](https://github.com/Tyan66666/billion-context-dsh/releases/tag/v0.1.1)）：
+
+| # | 现象 | 根因 | 修复 |
+|---|---|---|---|
+| 1 | `acp_status` 显示 `tokens compressed: 0`（多个大块） | 写事务时 `shadowedTokenCount` 写死 0 | 压缩时按实际遮蔽消息估算并写入账本 |
+| 2 | nudge 显示 `230%` 荒谬占用 | 用了 token-meter 的 `totalTokens`（请求+响应压力，含响应预估） | 改用 `surfaceTokens`（纯输入侧），显示 cap 100% |
+| 3 | 估算对中文失准 | 用了 `estimateTokensFast`（纯 4 字符/token） | 改用 acp-kernel 的 `defaultCountTokens`（CJK 1 字符/token + 其他 4 字符/token，与 billion-context-pi 一致） |
+| 4 | 压缩单条工具结果报 `no tool-pairing-balanced range` | `resolveSurfaceRange` 只向内收缩，单条 tool 消息收缩到空 | 收缩失败时**向外扩展到最小完整配对**（单条结果自动带上其调用） |
+| 5 | 模型说"压无可压"（大工具结果在范围表隐形） | kernel 的 ref 映射在长会话压缩后漂移，`compressibleRanges` 漏掉大段 | nudge 范围表改为**从 surface 自算**（跳过保护区 + 摘要节点，边界配对平衡） |
+| 6 | 旧块 `tokens compressed` 仍为 0 | 修复前写入的块没有 token 数据 | 账本重建时对 0 值**从日志原文补算** |
+
+**实机验证数据**（修复后）：
+
+```
+compress({ startSeq: 64757, endSeq: 265056, ... })
+→ Compressed 1 block(s), ~139200 tokens reclaimed. block 9458eab3, 583 messages shadowed
+→ acp_status: blocks: 16 | tokens compressed: 145305 | estimated context: 26165 / 128000 (20%)
+```
+
+一次压缩回收 **~13.9 万 tokens**，上下文 **129% → 20%**，模型自述"当前摘要块里完整保留了所有关键信息（提交历史、代码架构、mask 编码、本地化、测试命令、点击问题结论），后续任何需求都能无缝接续"——ACP 闭环在真实长会话中完整走通。
+
+**关键教训**：`acp-kernel` 的 ref 映射在**经过 surface 替换（压缩）的超长会话**中会漂移（范围表出现 `end < start` 的乱序段、大工具结果拿不到 ref）。任何依赖 kernel `compressibleRanges` 的宿主侧逻辑都应**从 surface 自算兜底**——这是移植中最值得记住的一课。
