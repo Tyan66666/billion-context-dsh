@@ -65,6 +65,17 @@ npm run build       # tsup (inlines acp-kernel) + tsc --emitDeclarationOnly
 - Add a regression test for every bug fix (see tests/ for the battle-report tests: CJK estimation, stale-range filtering, lone tool expansion, legacy backfill).
 - Keep `@deepseek-ai/*` devDeps on the **0.1.0-rc.6 line** (aligned with `@deepseek-ai/dsh-compaction` peer). Do not mix rc lines.
 
+### Commit messages
+
+Single-line subjects, prefix by change kind (the description after the prefix is free-form, keep it informative):
+
+- `(feat) <summary>` — feature work (e.g. `(feat) tier-2/3 block distillation — …`)
+- `(fix) <summary>` — bug fixes
+- `docs: <summary>` — documentation only (README, docs/, AGENTS.md)
+- `release vX.Y.Z` — the release commit, exactly as in §5 (unchanged)
+
+A multi-commit feature may use a bare squash subject on merge (e.g. `(feat) guide multi-segment batch compress + regression test`). PR merges stay human-only (§5).
+
 ## 4b. acp-kernel upgrade policy (the kernel WILL move on)
 
 `acp-kernel` is pinned **exactly** (e.g. `0.0.23`, never `^`) because tsup inlines it — a caret range makes the resolved version drift when the lockfile regenerates, breaking reproducible builds. But pinning is **not** freezing: upgrades are a controlled, manual process.
