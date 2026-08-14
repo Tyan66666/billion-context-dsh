@@ -41,12 +41,27 @@ import { AcpStateStore } from './state.ts'
 import { makeTools, type ToolEnvironment } from './tools.ts'
 import { acpCommand } from './commands.ts'
 import { buildNudge } from './nudge.ts'
-import { ACP_SYSTEM_PROMPT, ACP_SYSTEM_PROMPT_ORDER } from './system-prompt.ts'
+import { ACP_SYSTEM_PROMPT_ORDER } from './system-prompt.ts'
+import { renderSystemPrompt, resolvePrompts, type AcpPrompts, type ResolvedPrompts } from './prompts.ts'
 import { DEFAULT_CONTEXT_WINDOW, detectContextWindow, type AcpWindow } from './window.ts'
 
 export { AcpStateStore } from './state.ts'
 export { kernelConfigFor, type KernelConfigInput } from './config.ts'
 export { ACP_SYSTEM_PROMPT, ACP_SYSTEM_PROMPT_ORDER } from './system-prompt.ts'
+export {
+  DEFAULT_PROMPTS,
+  DEFAULT_RESOLVED,
+  renderSystemPrompt,
+  renderTemplate,
+  resolvePrompts,
+  type AcpPrompts,
+  type NudgePrompts,
+  type PromptInput,
+  type PromptOverride,
+  type RangeTablePrompts,
+  type ResolvedPrompts,
+  type ToolPrompts,
+} from './prompts.ts'
 export { makeTools, type ToolEnvironment } from './tools.ts'
 export { acpCommand } from './commands.ts'
 export { buildNudge, resolveTokenCount, type NudgeEnvironment, type NudgeOutcome } from './nudge.ts'
@@ -122,6 +137,8 @@ export interface AcpConfig {
   readonly autoCommand: boolean
   /** Inject the nudge into `agent/pre-step` when the kernel recommends it. Default true. */
   readonly autoNudge: boolean
+  /** Per-stage prompt template overrides (nudge / range table / system prompt / tool descriptions). See docs/configurable-prompts-design.md. */
+  readonly prompts?: AcpPrompts
 }
 
 const DEFAULT_CONFIG: AcpConfig = {
@@ -154,6 +171,8 @@ export class AcpCompactionEngine extends CompactionEngine {
   readonly store: AcpStateStore
   /** Resolved engine configuration. */
   readonly config: AcpConfig
+  /** Resolved prompt templates (validated at construction — fail-fast on template typos). */
+  readonly prompts: ResolvedPrompts
 
   private readonly lastNudgeTurn = new Map<string, number>()
   /** Per provider/model route the resolved window (probe failures cached too). */
@@ -162,6 +181,9 @@ export class AcpCompactionEngine extends CompactionEngine {
   constructor(ctx: Context, config: Partial<AcpConfig> = {}) {
     super(ctx)
     this.config = resolveAcpConfig(config)
+    // Resolve + validate prompt templates BEFORE building env: a template typo
+    // must fail engine construction, never silently leak into model context.
+    this.prompts = resolvePrompts(config.prompts)
     const ports = this.config.countTokens !== undefined ? { countTokens: this.config.countTokens } : {}
     this.kernel = createCore(ports)
     this.store = new AcpStateStore()
@@ -176,6 +198,7 @@ export class AcpCompactionEngine extends CompactionEngine {
       nudgeEmergencyThresholdPct: this.config.nudgeEmergencyThresholdPct,
       coreOverrides: this.config.coreOverrides,
       windowFor: (agent) => this.windowFor(agent),
+      prompts: this.prompts,
     }
 
     // Tools and commands may not be registered yet on cold start: cordis
@@ -240,7 +263,7 @@ export class AcpCompactionEngine extends CompactionEngine {
       systemPrompt.section({
         name: 'billion-context-dsh',
         order: ACP_SYSTEM_PROMPT_ORDER,
-        text: ACP_SYSTEM_PROMPT,
+        text: renderSystemPrompt(this.prompts),
       })
     } else {
       let done = false
@@ -252,7 +275,7 @@ export class AcpCompactionEngine extends CompactionEngine {
         registry.section({
           name: 'billion-context-dsh',
           order: ACP_SYSTEM_PROMPT_ORDER,
-          text: ACP_SYSTEM_PROMPT,
+          text: renderSystemPrompt(this.prompts),
         })
       }
       ctx.on('internal/service', (name: unknown) => {

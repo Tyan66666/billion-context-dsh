@@ -29,6 +29,7 @@ src/
 ├── tools.ts        # M3: compress / decompress / search_context / acp_status
 ├── nudge.ts        # M4: advisory nudge (surface-computed range table)
 ├── system-prompt.ts# M4: one-time ACP guidance section
+├── prompts.ts      # M4: configurable prompt templates + render/validate (config.prompts)
 ├── config.ts       # kernel config assembly (thresholds + coreOverrides)
 └── commands.ts     # M4: /acp slash command
 ```
