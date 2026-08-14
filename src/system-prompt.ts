@@ -21,6 +21,8 @@ Compression tools (refs are SURFACE SEQS, not ids):
 - search_context: find information inside compressed blocks BEFORE decompressing. search_context({ query }).
 - acp_status: current context usage and the live compressible-range list. Run it before compressing when in doubt.
 
+Tiered compression: each compressed block appears on the surface as one summary node. Compressing that node again DISTILLS the block (tier 2): the parent summary folds into your new summary and the original messages are freed. Distilling a tier-2 block yields tier 3. Distill when a summary itself is consumed — decompress on the tier-2 block recovers the full originals.
+
 When you write a summary, it becomes the ONLY record of that range: keep file paths, signatures, exact values, decisions, and error strings verbatim so a later reader (or you, after decompress) can continue without the original. Never reuse historical seqs — the surface moves as messages land and compress; verify with acp_status.`
 
 /** System-prompt section order: tool guidance lives in 100–199. */

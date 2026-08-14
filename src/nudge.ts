@@ -15,8 +15,8 @@ import {
 import { createUserMessage, type UserMessage } from '@deepseek-ai/dsh-llm'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { AcpStateStore } from './state.ts'
-import { eventsToCoreMessages, surfaceEventsOf } from './messages.ts'
-import { buildCompressibleSeqRanges, findOpenTurn, surfaceSummary } from './region.ts'
+import { allLogMessages, eventsToCoreMessages, surfaceEventsOf } from './messages.ts'
+import { buildCompressibleSeqRanges, findOpenTurn, summarySeqOfKernelBlock, surfaceSummary } from './region.ts'
 import { kernelConfigFor, type KernelConfigInput } from './config.ts'
 
 /** Kernel inputs the nudge path shares with the compress tool. */
@@ -79,8 +79,11 @@ export function buildNudge(
 ): NudgeOutcome | null {
   const session = agent.session
   const state = env.store.stateFor(session)
-  const coreMessages = eventsToCoreMessages(surfaceEventsOf(session))
-  const tokenCount = measuredTokenCount(agent, coreMessages)
+  // Full log for the kernel (so block anchors survive — see handleCompress);
+  // the measured token count stays a SURFACE measurement.
+  const coreMessages = allLogMessages(session)
+  const surfaceMessages = eventsToCoreMessages(surfaceEventsOf(session))
+  const tokenCount = measuredTokenCount(agent, surfaceMessages)
   const config = kernelConfigFor(env)
   const turn = env.kernel.processTurn({ messages: coreMessages, state, config, tokenCount })
   env.store.set(session, turn.state)
@@ -107,7 +110,7 @@ export function buildNudge(
  * when to compress. Full guidance (tools, philosophy, summary rules) lives in
  * the system prompt once, not in every nudge.
  */
-function buildNudgeText(
+export function buildNudgeText(
   nudge: NudgeDecision,
   emergency: boolean,
   session: import('@deepseek-ai/dsh-session').Session,
@@ -119,5 +122,18 @@ function buildNudgeText(
     ? `⚠️ Context usage is at ${pct}% of the window — nearly full. Consider compressing consumed ranges soon so working context stays available; the choice and timing are yours.`
     : `Context usage is at ${pct}%. This is a suggestion, not a requirement — you decide whether and when to compress.`
   const guidance = 'Compress by need, not by percentage: replace only ranges you have genuinely consumed, with dense self-contained summaries.'
-  return [frame, '', guidance, rangeTable(session)].join('\n')
+  const parts = [frame, '', guidance]
+  if ((nudge.tier === 2 || nudge.tier === 3) && (nudge.tierTargetBlocks?.length ?? 0) > 0) {
+    const targets = nudge.tierTargetBlocks!
+    const summarySeqs = targets
+      .map((block) => summarySeqOfKernelBlock(session, block.blockId))
+      .filter((seq): seq is number => seq !== null)
+    const pending = nudge.tier === 2 ? nudge.breakdown?.pendingT2 : nudge.breakdown?.pendingT3
+    const tokens = typeof pending === 'number' ? pending : 0
+    parts.push(
+      `Tier ${nudge.tier}: ${targets.length} tier-${nudge.tier - 1} block(s) distillable (${tokens} tokens) — compress their summary node(s) [seqs ${summarySeqs.join(', ')}] to reclaim the original messages.`,
+    )
+  }
+  parts.push(rangeTable(session))
+  return parts.join('\n')
 }

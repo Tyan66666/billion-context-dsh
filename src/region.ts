@@ -12,7 +12,7 @@
  */
 
 import { randomUUID } from 'node:crypto'
-import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
+import type { Session, SessionEvent, SessionEventMap } from '@deepseek-ai/dsh-session'
 import {
   CompactionId,
   compactCheckpointSource,
@@ -32,6 +32,19 @@ export interface AcpBlockLedgerEntry {
   readonly shadowedTokenCount: number
   readonly start: number
   readonly end: number
+  /** Compression tier: 1 (message range), 2 (distills tier-1 blocks), 3 (distills tier-2 blocks). Legacy blocks default to 1. */
+  readonly tier: 1 | 2 | 3
+  /** Compaction ids of the blocks this block distilled (parents). Empty for tier-1 blocks. */
+  readonly parentBlockIds: readonly string[]
+  /** The acp-kernel block id (`bN`) created for this transaction — absent for legacy blocks (synthesised by order). */
+  readonly kernelBlockId?: string
+  /** The surface seq of this block's checkpoint summary node (derived from the log; null when the node is gone). */
+  readonly summarySeq?: number
+  /** The kernel block's raw direct/effective message ids at creation (recorded since the tier feature; absent for legacy). */
+  readonly directMessageIds?: readonly string[]
+  readonly effectiveMessageIds?: readonly string[]
+  /** Unix epoch ms of the compaction/summary event. */
+  readonly createdAt: number
 }
 
 /** The open turn number, or null when the log ends between turns. */
@@ -179,6 +192,44 @@ export interface CompactionTransactionInput {
   readonly shadowedTokenCount: number
   readonly provider: string
   readonly model: string
+  /** Compression tier of this block (default 1). */
+  readonly tier?: 1 | 2 | 3
+  /** The acp-kernel block id (`bN`) created by the kernel for this transaction. */
+  readonly kernelBlockId?: string
+  /** Compaction ids of the blocks distilled into this one. */
+  readonly parentBlockIds?: readonly string[]
+  /** The kernel block's direct/effective message ids (raw CoreMessage ids) — recorded for faithful rehydration. */
+  readonly directMessageIds?: readonly string[]
+  readonly effectiveMessageIds?: readonly string[]
+}
+
+/**
+ * ACP tier extension fields carried on `compaction/summary` events. The
+ * upstream dsh-compaction event type does not know them, so reads and writes
+ * go through this precise intersection (never `any`).
+ */
+export interface AcpCompactionSummaryFields {
+  /** Compression tier (1/2/3) — 1 = message range, 2 = distills tier-1, 3 = distills tier-2. */
+  readonly tier?: 1 | 2 | 3
+  /** The acp-kernel block id (`bN`) created for this transaction. */
+  readonly kernelBlockId?: string
+  /** Durable compaction ids of the blocks distilled into this one. */
+  readonly parentBlockIds?: readonly string[]
+  /**
+   * The kernel block's direct message ids (raw CoreMessage ids) at creation —
+   * recorded so a restarted engine rehydrates the SAME coverage (a tier-2
+   * block's coverage is its parents' originals, not the checkpoint node).
+   */
+  readonly directMessageIds?: readonly string[]
+  /** The kernel block's effective message ids (raw CoreMessage ids) at creation. */
+  readonly effectiveMessageIds?: readonly string[]
+}
+
+type CompactionSummaryData = SessionEventMap['compaction/summary']
+
+/** Read a `compaction/summary` event's data including the ACP tier extension fields. */
+export function readCompactionSummary(event: SessionEvent): CompactionSummaryData & AcpCompactionSummaryFields {
+  return event.data as CompactionSummaryData & AcpCompactionSummaryFields
 }
 
 /**
@@ -203,7 +254,14 @@ export function runCompactionTransaction(
     shadowedTokenCount: input.shadowedTokenCount,
     provider: input.provider,
     model: input.model,
-  }).seq)
+    tier: input.tier ?? 1,
+    ...(input.kernelBlockId === undefined ? {} : { kernelBlockId: input.kernelBlockId }),
+    ...(input.parentBlockIds === undefined || input.parentBlockIds.length === 0
+      ? {}
+      : { parentBlockIds: [...input.parentBlockIds] }),
+    ...(input.directMessageIds === undefined ? {} : { directMessageIds: [...input.directMessageIds] }),
+    ...(input.effectiveMessageIds === undefined ? {} : { effectiveMessageIds: [...input.effectiveMessageIds] }),
+  } as CompactionSummaryData & AcpCompactionSummaryFields).seq)
 
   const message = createUserMessage({
     content: input.summary,
@@ -218,12 +276,22 @@ export function runCompactionTransaction(
   return { compactionId, seqs }
 }
 
+/** The seq of a compaction's checkpoint summary node in the log (visible or shadowed). */
+function summarySeqOfCompaction(events: readonly SessionEvent[], compactionId: string): number | null {
+  for (const event of events) {
+    if (event.type !== 'user/message') continue
+    const source = (event.data as { source?: { plugin?: string; compactionId?: string } }).source
+    if (source?.plugin === 'compact' && source.compactionId === compactionId) return event.seq
+  }
+  return null
+}
+
 /** Rebuild the block ledger from the durable log (no kernel state needed). */
 export function rebuildBlockLedger(events: readonly SessionEvent[]): AcpBlockLedgerEntry[] {
   const ledger: AcpBlockLedgerEntry[] = []
   for (const event of events) {
     if (event.type !== 'compaction/summary') continue
-    const data = event.data
+    const data = readCompactionSummary(event)
     // Blocks written before the token-accounting fix carry shadowedTokenCount
     // 0; backfill from the shadowed originals still in the log so acp_status
     // reports real reclaimed tokens.
@@ -235,6 +303,11 @@ export function rebuildBlockLedger(events: readonly SessionEvent[]): AcpBlockLed
         if (original !== undefined) shadowedTokenCount += defaultCountTokens(extractEventText(original))
       }
     }
+    const tier = data.tier === 2 || data.tier === 3 ? data.tier : 1
+    const parentBlockIds: string[] = Array.isArray(data.parentBlockIds) ? [...data.parentBlockIds] : []
+    const directMessageIds: string[] | undefined = Array.isArray(data.directMessageIds) ? [...data.directMessageIds] : undefined
+    const effectiveMessageIds: string[] | undefined = Array.isArray(data.effectiveMessageIds) ? [...data.effectiveMessageIds] : undefined
+    const summarySeq = summarySeqOfCompaction(events, data.compactionId)
     ledger.push({
       blockId: data.compactionId,
       summary: extractText(data.summary),
@@ -242,6 +315,13 @@ export function rebuildBlockLedger(events: readonly SessionEvent[]): AcpBlockLed
       shadowedTokenCount,
       start: data.shadowedRange.start,
       end: data.shadowedRange.end,
+      tier,
+      parentBlockIds,
+      ...(typeof data.kernelBlockId === 'string' ? { kernelBlockId: data.kernelBlockId } : {}),
+      ...(summarySeq === null ? {} : { summarySeq }),
+      ...(directMessageIds === undefined ? {} : { directMessageIds }),
+      ...(effectiveMessageIds === undefined ? {} : { effectiveMessageIds }),
+      createdAt: event.time,
     })
   }
   return ledger
@@ -341,4 +421,128 @@ export function surfaceSummary(session: Session): string {
   const first = nodes[0]!
   const last = nodes[nodes.length - 1]!
   return `${nodes.length} nodes, seqs ${first}..${last}`
+}
+
+/** One block as seen by the tier machinery: durable id ↔ kernel ref (`bN`). */
+export interface AcpBlockRegistryEntry {
+  /** The durable compaction id. */
+  readonly blockId: string
+  /** The acp-kernel block ref (`bN`); synthesised by log order for legacy blocks. */
+  readonly kernelBlockId: string
+  readonly tier: 1 | 2 | 3
+  /** The surface seq of this block's checkpoint summary node (null when gone). */
+  readonly summarySeq: number | null
+  /** True until a LATER block distills this one. Only active blocks are distillable. */
+  readonly active: boolean
+  readonly parentBlockIds: readonly string[]
+}
+
+/**
+ * Rebuild the compactionId ↔ kernel-block-ref registry from the durable log.
+ * Legacy blocks (pre-tier, no recorded `kernelBlockId`) are synthesised as
+ * `b1`, `b2`, … in log order; recorded ids are kept as-is. A block is active
+ * until a later block lists it as a parent.
+ */
+export function blockRegistry(session: Session): AcpBlockRegistryEntry[] {
+  const ledger = rebuildBlockLedger(session.events)
+  const kernelIdOf = new Map<string, string>()
+  const raw: AcpBlockRegistryEntry[] = []
+  let next = 1
+  for (const entry of ledger) {
+    let kernelBlockId: string
+    if (entry.kernelBlockId !== undefined && /^b\d+$/.test(entry.kernelBlockId)) {
+      kernelBlockId = entry.kernelBlockId
+      const num = Number(kernelBlockId.slice(1))
+      if (Number.isInteger(num)) next = Math.max(next, num + 1)
+    } else {
+      kernelBlockId = `b${next}`
+      next += 1
+    }
+    kernelIdOf.set(entry.blockId, kernelBlockId)
+    raw.push({
+      blockId: entry.blockId,
+      kernelBlockId,
+      tier: entry.tier,
+      summarySeq: entry.summarySeq ?? null,
+      active: true,
+      parentBlockIds: [...entry.parentBlockIds],
+    })
+  }
+  const consumed = new Set<string>()
+  for (const entry of raw) {
+    for (const parent of entry.parentBlockIds) consumed.add(parent)
+  }
+  return raw.map((entry) => ({
+    ...entry,
+    active: !consumed.has(entry.blockId),
+  }))
+}
+
+/**
+ * The kernel block ref (`bN`) for a surface seq, when that seq is the
+ * checkpoint summary node of a block — the edge the model must use to
+ * distill (T2/T3). Active blocks distill; a stale (already-distilled) node
+ * still maps to its `bN` so the kernel reports "already compressed" instead
+ * of silently folding the summary as a plain message. Returns null for
+ * anything else (plain messages, non-checkpoint nodes).
+ */
+export function blockRefForSummarySeq(session: Session, seq: number): string | null {
+  const event = session.events[seq]
+  if (event?.type !== 'user/message') return null
+  const source = (event.data as { source?: { plugin?: string; compactionId?: string } }).source
+  if (source?.plugin !== 'compact' || source.compactionId === undefined) return null
+  const entry = blockRegistry(session).find((r) => r.blockId === source.compactionId)
+  if (entry === undefined) return null
+  return entry.kernelBlockId
+}
+
+/** The durable compaction ids distilled by the given kernel block refs (`bN`). */
+export function compactionIdsOfKernelBlocks(session: Session, kernelBlockIds: readonly string[]): string[] {
+  if (kernelBlockIds.length === 0) return []
+  const byKernel = new Map(blockRegistry(session).map((r) => [r.kernelBlockId, r.blockId]))
+  return kernelBlockIds
+    .map((id) => byKernel.get(id))
+    .filter((id): id is string => id !== undefined)
+}
+
+/** The checkpoint summary seq of an ACTIVE kernel block (`bN`), or null. */
+export function summarySeqOfKernelBlock(session: Session, kernelBlockId: string): number | null {
+  const entry = blockRegistry(session).find((r) => r.kernelBlockId === kernelBlockId)
+  return entry?.active ? entry.summarySeq : null
+}
+
+/** The durable block whose checkpoint node sits at `seq` (or null). */
+function checkpointBlockIdOf(events: readonly SessionEvent[], seq: number): string | null {
+  const event = events[seq]
+  if (event?.type !== 'user/message') return null
+  const source = (event.data as { source?: { plugin?: string; compactionId?: string } }).source
+  if (source?.plugin !== 'compact' || source.compactionId === undefined) return null
+  return source.compactionId
+}
+
+/**
+ * The shadowed seqs of a block, recursing into distilled parent blocks: a
+ * tier-2 block shadows its parent's checkpoint node, so recovering its
+ * originals requires expanding that node into the parent block's own shadowed
+ * seqs. Cycle-safe (a block can never be its own ancestor).
+ */
+export function expandShadowedSeqs(session: Session, blockId: string): number[] {
+  const ledger = rebuildBlockLedger(session.events)
+  const byId = new Map(ledger.map((entry) => [entry.blockId, entry]))
+  const root = byId.get(blockId)
+  if (root === undefined) return []
+  const out: number[] = []
+  const seen = new Set<string>()
+  const visit = (entry: AcpBlockLedgerEntry): void => {
+    if (seen.has(entry.blockId)) return
+    seen.add(entry.blockId)
+    for (const seq of entry.shadowedSeqs) {
+      const childId = checkpointBlockIdOf(session.events, seq)
+      const child = childId === null ? undefined : byId.get(childId)
+      if (child !== undefined) visit(child)
+      else out.push(seq)
+    }
+  }
+  visit(root)
+  return out
 }

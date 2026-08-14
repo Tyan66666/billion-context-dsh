@@ -105,6 +105,7 @@ DSH derives every model request from its append-only session log (the *surface*)
 | `search_context` | scores block summaries + originals rebuilt from the log |
 | `acp_status` | block ledger + context pressure |
 | block state | in-memory kernel state + **log-rebuilt ledger** (no sidecar files) |
+| tiered distillation (T2/T3) | re-compressing a block's summary node distills that block (tier 2); distilling a tier-2 block yields tier 3. Tier + kernel block ids are persisted to the log, so kernel state rehydrates from the log after a restart and stays distillable |
 
 The load-bearing compression guidance (tools, philosophy, summary rules) is registered as a one-time system-prompt section, so nudges stay short. There is deliberately **no automatic summarization**: automatic policy only nudges the model (`compactIfNeeded` returns null).
 
@@ -118,7 +119,7 @@ A walkthrough of the ACP philosophy this project inherits — how active context
 
 | Tool | What it does |
 | --- | --- |
-| `compress` | Replace a seq range with a dense summary you write (edges auto-balanced to tool-pair boundaries) |
+| `compress` | Replace a seq range with a dense summary you write (edges auto-balanced to tool-pair boundaries); re-compressing a block's summary node distills it (tier 2/3) |
 | `decompress` | Restore a previously compressed block's original content (read-only) |
 | `search_context` | Search compressed block summaries and originals by keyword |
 | `acp_status` | Context usage, compressed blocks, compressible ranges |

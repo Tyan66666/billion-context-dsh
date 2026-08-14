@@ -1,10 +1,13 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { Context } from '@deepseek-ai/cordis'
-import { createCore, type CompressionCore } from 'acp-kernel'
+import { createCore, type CompressionCore, type NudgeDecision } from 'acp-kernel'
 import type { Agent } from '@deepseek-ai/dsh-agent'
+import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { AcpStateStore } from '../src/state.ts'
-import { buildNudge, rangeTable } from '../src/nudge.ts'
+import { buildNudge, buildNudgeText, rangeTable } from '../src/nudge.ts'
+import { makeTools, type ToolEnvironment } from '../src/tools.ts'
+import { rebuildBlockLedger } from '../src/region.ts'
 import { buildTextSession } from './helpers.ts'
 
 function fakeAgent(session: import('@deepseek-ai/dsh-session').Session): Agent {
@@ -16,12 +19,29 @@ function fakeAgent(session: import('@deepseek-ai/dsh-session').Session): Agent {
   } as unknown as Agent
 }
 
-function makeEnv(limit: number) {
+function fakeExec(session: import('@deepseek-ai/dsh-session').Session): ToolRunContext {
+  const agent = fakeAgent(session)
+  return {
+    callId: 'call-acp',
+    name: 'compress',
+    arguments: {},
+    signal: new AbortController().signal,
+    agent,
+  } as unknown as ToolRunContext
+}
+
+function makeEnv(limit: number): ToolEnvironment {
   return {
     kernel: createCore({}) as CompressionCore,
     store: new AcpStateStore(),
     modelContextLimit: limit,
   }
+}
+
+function toolOf(env: ToolEnvironment, name: string) {
+  const tool = makeTools(env).find((definition) => definition.name === name)
+  assert.ok(tool, `tool ${name} registered`)
+  return tool
 }
 
 test('M4: buildNudge injects a compressible-range table under pressure', () => {
@@ -82,4 +102,64 @@ test('M4: range table is computed from the surface, skipping the protected tail'
   // The protected recent tail (last 5 messages) is skipped; older runs appear.
   assert.match(text, /seq \d+\.\.\d+ — \d+ messages/)
   assert.doesNotMatch(text, /65000/)
+})
+
+const NUDGE_TIER_SUMMARY = 'Tiered distillation test summary covering the authentication subsystem, the refresh-token lifecycle, the login flow, the rate-limiting strategy, the bcrypt cost factor, the session revocation rules, the deployment pipeline, the kubernetes canary rollout, and the health-check probe configuration with all critical file paths and decisions preserved verbatim for later recovery. '.repeat(50)
+
+test('M4: buildNudge recommends tier-2 distillation when tier-1 blocks accumulate', async () => {
+  // ~19K-char summaries ≈ 4.75K tokens each; the surface after two tier-1
+  // compressions is [c1, c2, 11, 12] ≈ 14.5K tokens against an 8K window →
+  // over-limit/emergency. Plain-message pending (all protected) < minCompressRange
+  // (5000), tier-1 summaries pending ≈ 9.5K ≥ 5000 → the kernel picks tier 2.
+  const env = makeEnv(8000)
+  const session = buildTextSession(12)
+  const compress = toolOf(env, 'compress')
+  await compress.execute({ content: [{ startSeq: 1, endSeq: 5, summary: NUDGE_TIER_SUMMARY }] } as never, fakeExec(session))
+  // seq 10 is inside the protected recent tail: excluded with a warning, but
+  // the block still lands (covering 6..9).
+  await compress.execute({ content: [{ startSeq: 6, endSeq: 10, summary: NUDGE_TIER_SUMMARY }] } as never, fakeExec(session))
+
+  const lastNudgeTurn = new Map<string, number>()
+  const outcome = buildNudge(fakeAgent(session), env, lastNudgeTurn)
+  assert.ok(outcome !== null, 'distillable tier-1 blocks produce a tier-2 nudge')
+  const text = outcome!.message.content.map((block) => (block as { text?: string }).text ?? '').join('')
+  assert.match(text, /Tier 2:/)
+  assert.match(text, /2 tier-1 block\(s\) distillable/)
+})
+
+test('M4: buildNudgeText renders the distillable tier-2 line with surface seqs', async () => {
+  const env = makeEnv(128000)
+  const session = buildTextSession(12)
+  const compress = toolOf(env, 'compress')
+  await compress.execute({ content: [{ startSeq: 1, endSeq: 5, summary: NUDGE_TIER_SUMMARY }] } as never, fakeExec(session))
+
+  const b1 = env.store.stateFor(session).blocks.find((block) => block.blockId === 'b1')
+  assert.ok(b1 !== undefined, 'the tier-1 block exists in the live kernel state')
+  const decision: NudgeDecision = {
+    shouldInject: true,
+    reason: 'tier-2 distillation recommended',
+    compressibleRanges: [],
+    tierTargetBlocks: [b1!],
+    contextUsage: 0.9,
+    tier: 2,
+    breakdown: {
+      usage: 0.9,
+      growth: 0,
+      growthReference: 0,
+      effectiveThreshold: 0,
+      nudgeGrowthTokens: 50000,
+      growthFloor: 20000,
+      hasPendingNudge: 0,
+      overLimit: 1,
+      emergencyOverride: 0,
+      pendingT1: 0,
+      pendingT2: 4750,
+      pendingT3: 0,
+    },
+  }
+  const text = buildNudgeText(decision, false, session)
+  assert.match(text, /Tier 2: 1 tier-1 block\(s\) distillable \(4750 tokens\)/)
+  const summarySeq = rebuildBlockLedger(session.events)[0]!.summarySeq
+  assert.ok(summarySeq !== undefined, 'the checkpoint seq is derivable from the log')
+  assert.match(text, new RegExp(`seqs ${summarySeq}`), 'the line carries the surface seq of the block summary node')
 })

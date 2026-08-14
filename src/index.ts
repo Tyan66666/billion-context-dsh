@@ -56,6 +56,11 @@ export {
   shadowedSeqsOf,
   findOpenTurn,
   assertNoActiveCompaction,
+  blockRegistry,
+  blockRefForSummarySeq,
+  compactionIdsOfKernelBlocks,
+  summarySeqOfKernelBlock,
+  expandShadowedSeqs,
   type AcpBlockLedgerEntry,
   type CompactionTransactionInput,
 } from './region.ts'

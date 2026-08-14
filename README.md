@@ -107,6 +107,7 @@ DSH 的每个模型请求都派生自其 append-only 会话日志（*surface*）
 | `search_context` | 对从日志重建的块摘要与原文打分 |
 | `acp_status` | 块账本与上下文压力 |
 | 块状态 | 内存内核状态 + **日志重建账本**（无旁车文件） |
+| 分层蒸馏（T2/T3） | 再次压缩某块的摘要节点 = 蒸馏该块（tier 2），蒸馏 tier-2 块得 tier 3；tier 与内核块 id 持久化进日志，重启后内核状态从日志再水合、可继续蒸馏 |
 
 承载性的压缩指引（工具、哲学、摘要规则）注册为一次性系统提示段，因此 nudge 保持简短。刻意**不做自动摘要**：自动策略只 nudge 模型（`compactIfNeeded` 返回 null）。
 
@@ -120,7 +121,7 @@ DSH 的每个模型请求都派生自其 append-only 会话日志（*surface*）
 
 | 工具 | 作用 |
 | --- | --- |
-| `compress` | 用你书写的紧凑摘要替换 seq 范围（边界自动平衡到 tool-call/result 配对点） |
+| `compress` | 用你书写的紧凑摘要替换 seq 范围（边界自动平衡到 tool-call/result 配对点）；对某块的摘要节点再次压缩 = 分层蒸馏（tier 2/3） |
 | `decompress` | 恢复已压缩块的原始内容（只读） |
 | `search_context` | 按关键词搜索压缩块摘要与原文 |
 | `acp_status` | 上下文占用、压缩块、可压缩范围 |

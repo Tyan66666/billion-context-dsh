@@ -16,13 +16,16 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { AcpStateStore } from './state.ts'
 import { kernelConfigFor, type KernelConfigInput } from './config.ts'
 import {
+  blockRefForSummarySeq,
+  compactionIdsOfKernelBlocks,
+  expandShadowedSeqs,
   rebuildBlockLedger,
   resolveSurfaceRange,
   runCompactionTransaction,
   shadowedSeqsOf,
   surfaceSummary,
 } from './region.ts'
-import { eventsToCoreMessages, extractEventText, surfaceEventsOf } from './messages.ts'
+import { allLogMessages, eventsToCoreMessages, extractEventText, surfaceEventsOf } from './messages.ts'
 
 export interface ToolEnvironment extends KernelConfigInput {
   readonly kernel: CompressionCore
@@ -103,8 +106,13 @@ async function handleCompress(env: ToolEnvironment, args: CompressArgs, exec: To
   const agent = requireAgent(exec)
   const session = agent.session
   const state = env.store.stateFor(session)
-  const coreMessages = eventsToCoreMessages(surfaceEventsOf(session))
-  const tokenCount = coreMessages.reduce((sum, message) => sum + defaultCountTokens(message.text ?? ''), 0)
+  // The kernel gets the FULL log (visible + shadowed): syncBlocks deactivates
+  // a block whose consumed messages are absent, and resolveBoundaries refuses
+  // to anchor a block ref it cannot find, so tier-2/3 distillation needs the
+  // originals present. The token count stays a surface measurement.
+  const coreMessages = allLogMessages(session)
+  const surfaceMessages = eventsToCoreMessages(surfaceEventsOf(session))
+  const tokenCount = surfaceMessages.reduce((sum, message) => sum + defaultCountTokens(message.text ?? ''), 0)
   const config = kernelConfigFor(env)
 
   // Assign refs / advance state exactly like a turn would.
@@ -121,8 +129,13 @@ async function handleCompress(env: ToolEnvironment, args: CompressArgs, exec: To
     // to clean tool-pairing-balanced cuts that always carry a bare ref, so the
     // resolved refs exist and the shadowed span matches the returned range.
     const { start, end } = resolveSurfaceRange(session, startSeq, endSeq)
-    const startRef = byRaw[String(start)]
-    const endRef = byRaw[String(end)]
+    // An edge on an ACTIVE block's checkpoint summary node resolves to the
+    // kernel block ref (bN) — the boundary that makes applyCompression distill
+    // (tier 2/3) instead of folding the summary as a plain message.
+    const startBlockRef = blockRefForSummarySeq(session, start)
+    const endBlockRef = blockRefForSummarySeq(session, end)
+    const startRef = startBlockRef ?? byRaw[String(start)]
+    const endRef = endBlockRef ?? byRaw[String(end)]
     if (startRef === undefined || endRef === undefined) {
       throw new Error(
         `billion-context-dsh: seq ${start}..${end} has no assigned ref — `
@@ -146,16 +159,54 @@ async function handleCompress(env: ToolEnvironment, args: CompressArgs, exec: To
     messages: coreMessages,
     state: turn.state,
     config,
+    // Deliberately NOT overriding protectedMessageIds: with the full log the
+    // kernel's recent/last-user protection is computed over the same
+    // non-block-covered messages as the visible feed, so default behavior is
+    // preserved. Any 'Excluded N protected message(s)' warning is surfaced.
   })
   if (applied.result.errors.length > 0) {
     return { text: `compress failed: ${applied.result.errors.join('; ')}` }
   }
   env.store.set(session, applied.state)
 
+  // Match freshly created kernel blocks to the requested ranges by their
+  // range key (the kernel stamps startRef/endRef onto each new block).
+  const previousIds = new Set(turn.state.blocks.map((block) => block.blockId))
+  const newBlocks = applied.state.blocks.filter((block) => !previousIds.has(block.blockId))
+  const blockByRangeKey = new Map(newBlocks.map((block) => [`${block.startRef}::${block.endRef}`, block]))
+  // Warnings carry two shapes: range-prefixed ("Skipped range (a..b) — …")
+  // attributable to a specific range, and free-form ("Excluded N protected
+  // message(s) …") attributable to the call as a whole.
+  const warningByRangeKey = new Map<string, string[]>()
+  const freeWarnings: string[] = []
+  for (const warning of applied.result.warnings) {
+    const match = /^Skipped range \((.+?)\.\.(.+?)\)/.exec(warning)
+    if (match !== null) {
+      const key = `${match[1]}::${match[2]}`
+      const list = warningByRangeKey.get(key) ?? []
+      list.push(warning)
+      warningByRangeKey.set(key, list)
+    } else {
+      freeWarnings.push(warning)
+    }
+  }
+
   const lines: string[] = []
+  let skippedRanges = 0
   for (let index = 0; index < ranges.length; index += 1) {
     const range = ranges[index]!
     const original = args.content[index]!
+    const key = `${range.startRef}::${range.endRef}`
+    const block = blockByRangeKey.get(key)
+    if (block === undefined) {
+      // The kernel skipped this range (already compressed / overlapped): no
+      // kernel block was created, so no durable transaction is landed — the
+      // ledger must never record a block the kernel does not know.
+      skippedRanges += 1
+      const warnings = warningByRangeKey.get(key) ?? []
+      for (const warning of warnings) lines.push(`  ${warning}`)
+      continue
+    }
     // The edges were already balanced above; shadow exactly that span.
     const { start, end } = range
     const shadowed = shadowedSeqsOf(session, start, end)
@@ -167,6 +218,8 @@ async function handleCompress(env: ToolEnvironment, args: CompressArgs, exec: To
       const event = session.events[seq]
       if (event !== undefined) shadowedTokens += defaultCountTokens(extractEventText(event))
     }
+    const tier = block.tier === 2 || block.tier === 3 ? block.tier : 1
+    const parentBlockIds = compactionIdsOfKernelBlocks(session, block.directBlockIds)
     const { compactionId } = runCompactionTransaction(session, {
       start,
       end,
@@ -175,17 +228,29 @@ async function handleCompress(env: ToolEnvironment, args: CompressArgs, exec: To
       shadowedTokenCount: shadowedTokens,
       provider: agent.options.provider ?? '',
       model: agent.options.model ?? '',
+      tier,
+      kernelBlockId: block.blockId,
+      ...(parentBlockIds.length === 0 ? {} : { parentBlockIds }),
+      // Record the kernel block's raw coverage so a restarted engine
+      // rehydrates the SAME effective messages (a tier-2 block's coverage is
+      // its parents' originals, not the checkpoint node).
+      directMessageIds: block.directMessageIds,
+      effectiveMessageIds: block.effectiveMessageIds,
     })
     const adjusted = start !== range.startSeq || end !== range.endSeq
+    const tierLabel = tier === 1 ? '' : `, tier ${tier}`
     lines.push(
-      `  block ${compactionId.slice(0, 8)}: seqs ${start}..${end}, ${shadowed.length} messages shadowed`
+      `  block ${compactionId.slice(0, 8)}: seqs ${start}..${end}, ${shadowed.length} messages shadowed${tierLabel}`
       + (adjusted ? ` (adjusted from ${range.startSeq}..${range.endSeq} to balanced edges)` : ''),
     )
   }
 
-  return {
-    text: `Compressed ${applied.result.blocksCreated} block(s), ~${applied.result.tokensCompressed} tokens reclaimed.\n${lines.join('\n')}`,
-  }
+  const summaryLine = `Compressed ${applied.result.blocksCreated} block(s), ~${applied.result.tokensCompressed} tokens reclaimed.`
+  const warningLines = [...freeWarnings.map((warning) => `  ${warning}`), ...lines]
+  const footer = skippedRanges > 0
+    ? `  (${skippedRanges} range(s) skipped — see warnings above)`
+    : ''
+  return { text: `${summaryLine}\n${[...warningLines, footer].filter((line) => line !== '').join('\n')}` }
 }
 
 const decompressParameters = {
@@ -204,13 +269,15 @@ function handleDecompress(_env: ToolEnvironment, args: DecompressArgs, exec: Too
     return { text: `decompress: block "${args.blockId}" not found (see acp_status for the block list)` }
   }
   const parts: string[] = []
-  for (const seq of block.shadowedSeqs) {
+  // Tier-2/3 blocks shadow parent checkpoint nodes: expand to the originals.
+  for (const seq of expandShadowedSeqs(session, block.blockId)) {
     const event = session.events[seq]
     const text = event === undefined ? '' : extractEventText(event)
     if (text.length > 0) parts.push(`[seq ${seq}] ${text}`)
   }
+  const tierNote = block.tier > 1 ? ` (tier ${block.tier}, distills ${block.parentBlockIds.length} block(s))` : ''
   return {
-    text: `Block ${block.blockId} — ${block.summary}\n\n${parts.join('\n\n') || '(no recoverable content)'}`,
+    text: `Block ${block.blockId} — ${block.summary}${tierNote}\n\n${parts.join('\n\n') || '(no recoverable content)'}`,
   }
 }
 

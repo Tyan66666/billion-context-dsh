@@ -139,6 +139,17 @@ export function surfaceEventsOf(session: import('@deepseek-ai/dsh-session').Sess
     .filter((event): event is SessionEvent => event !== undefined)
 }
 
+/**
+ * ALL message-type events in log order — the visible surface PLUS everything
+ * shadowed by compression. The ACP kernel deactivates any block whose consumed
+ * message ids are absent from the array it is given (syncBlocks), and refuses
+ * to anchor a block boundary that cannot find its messages, so T2/T3
+ * distillation requires the full log, not just the visible surface.
+ */
+export function allLogMessages(session: import('@deepseek-ai/dsh-session').Session): CoreMessage[] {
+  return eventsToCoreMessages(session.events)
+}
+
 /** Extract the model-facing text of any surface message event. */
 export function extractEventText(event: SessionEvent): string {
   switch (event.type) {

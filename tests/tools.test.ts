@@ -297,3 +297,133 @@ test('M3: nudge range-table edges compress successfully (plain-ref boundaries)',
   } as never, fakeExec(session))
   assert.match((result as { text: string }).text, /Compressed 1 block/)
 })
+
+const TIER_SUMMARY = 'Tiered distillation test summary covering the authentication subsystem, the refresh-token lifecycle, the login flow, the rate-limiting strategy, the bcrypt cost factor, the session revocation rules, the deployment pipeline, the kubernetes canary rollout, and the health-check probe configuration with all critical file paths and decisions preserved verbatim for later recovery. '.repeat(50)
+
+test('M3: distilling a block summary node produces a tier-2 block', async () => {
+  const env = makeEnv()
+  const session = buildTextSession(12)
+  const compress = toolOf(env, 'compress')
+  await compress.execute({
+    content: [{ startSeq: 1, endSeq: 5, summary: TIER_SUMMARY }],
+  } as never, fakeExec(session))
+
+  const ledger = rebuildBlockLedger(session.events)
+  assert.equal(ledger.length, 1)
+  assert.equal(ledger[0]!.tier, 1)
+  const summarySeq = ledger[0]!.summarySeq
+  assert.ok(summarySeq !== undefined, 'the checkpoint node seq is derivable from the log')
+  assert.ok(session.surface.nodes.includes(summarySeq!), 'the active block checkpoint is on the surface')
+
+  // Compressing the checkpoint node itself must DISTILL (tier 2), not fold the
+  // summary as a plain message.
+  const result = await compress.execute({
+    content: [{ startSeq: summarySeq, endSeq: summarySeq, summary: TIER_SUMMARY }],
+  } as never, fakeExec(session))
+  const text = (result as { text: string }).text
+  assert.match(text, /Compressed 1 block/)
+  assert.match(text, /tier 2/, 'the block line reports the distillation tier')
+
+  const after = rebuildBlockLedger(session.events)
+  assert.equal(after.length, 2)
+  assert.equal(after[1]!.tier, 2)
+  assert.deepEqual(after[1]!.shadowedSeqs, [summarySeq], 'the tier-2 block shadows the parent checkpoint node')
+  assert.deepEqual(after[1]!.parentBlockIds, [ledger[0]!.blockId], 'the distilled parent is recorded durably')
+  assert.equal(after[1]!.kernelBlockId, 'b2', 'the kernel block id is recorded for faithful rehydration')
+  assert.ok(after[1]!.effectiveMessageIds!.includes('1'), 'the tier-2 block records its parents ORIGINAL coverage, not the checkpoint node')
+
+  // decompress on the tier-2 block expands through the parent to the originals.
+  const decompress = toolOf(env, 'decompress')
+  const rec = await decompress.execute({ blockId: after[1]!.blockId }, fakeExec(session))
+  const recText = (rec as { text: string }).text
+  assert.match(recText, /tier 2, distills 1 block/)
+  assert.match(recText, /\[msg 0\]/)
+  assert.match(recText, /\[msg 4\]/)
+})
+
+test('M3: distilling a tier-2 block produces tier 3', async () => {
+  const env = makeEnv()
+  const session = buildTextSession(12)
+  const compress = toolOf(env, 'compress')
+  await compress.execute({ content: [{ startSeq: 1, endSeq: 5, summary: TIER_SUMMARY }] } as never, fakeExec(session))
+  const ledger1 = rebuildBlockLedger(session.events)
+  const tier1Seq = ledger1[0]!.summarySeq!
+  await compress.execute({ content: [{ startSeq: tier1Seq, endSeq: tier1Seq, summary: TIER_SUMMARY }] } as never, fakeExec(session))
+
+  const ledger2 = rebuildBlockLedger(session.events)
+  assert.equal(ledger2.length, 2)
+  assert.equal(ledger2[1]!.tier, 2)
+  const tier2Seq = ledger2[1]!.summarySeq
+  assert.ok(tier2Seq !== undefined)
+
+  const result = await compress.execute({
+    content: [{ startSeq: tier2Seq, endSeq: tier2Seq, summary: TIER_SUMMARY }],
+  } as never, fakeExec(session))
+  assert.match((result as { text: string }).text, /tier 3/)
+
+  const after = rebuildBlockLedger(session.events)
+  assert.equal(after.length, 3)
+  assert.equal(after[2]!.tier, 3)
+  assert.deepEqual(after[2]!.parentBlockIds, [ledger2[1]!.blockId])
+  assert.equal(after[2]!.kernelBlockId, 'b3')
+
+  // decompress recurses through BOTH levels back to the originals.
+  const decompress = toolOf(env, 'decompress')
+  const rec = await decompress.execute({ blockId: after[2]!.blockId }, fakeExec(session))
+  const recText = (rec as { text: string }).text
+  assert.match(recText, /tier 3, distills 1 block/)
+  assert.match(recText, /\[msg 0\]/)
+  assert.match(recText, /\[msg 4\]/)
+})
+
+test('M3: overlapping batch entries skip the later range with a warning', async () => {
+  const env = makeEnv()
+  const session = buildTextSession(12)
+  const compress = toolOf(env, 'compress')
+  const result = await compress.execute({
+    content: [
+      { startSeq: 1, endSeq: 3, summary: 'First overlapping segment: JWT access tokens, Redis refresh tokens, login flow, rate limiting, bcrypt cost 12.' },
+      { startSeq: 3, endSeq: 5, summary: 'Second overlapping segment: kubernetes canary rollout, health probes, docker registry push.' },
+    ],
+  } as never, fakeExec(session))
+  const text = (result as { text: string }).text
+  assert.match(text, /Compressed 1 block/, 'only the earlier range creates a block')
+  assert.match(text, /Skipped range/, 'the overlap is surfaced as a warning')
+  assert.match(text, /1 range\(s\) skipped/)
+
+  const ledger = rebuildBlockLedger(session.events)
+  assert.equal(ledger.length, 1, 'no phantom durable block for the skipped range')
+  assert.deepEqual(ledger[0]!.shadowedSeqs, [1, 2, 3])
+})
+
+test('M3: a mixed boundary [message..blockSummary] distills and folds extra messages', async () => {
+  const env = makeEnv()
+  const session = buildTextSession(12)
+  const compress = toolOf(env, 'compress')
+  // Tier-1 in the middle so the checkpoint lands AFTER older residual nodes.
+  await compress.execute({ content: [{ startSeq: 3, endSeq: 7, summary: TIER_SUMMARY }] } as never, fakeExec(session))
+
+  const ledger = rebuildBlockLedger(session.events)
+  assert.equal(ledger.length, 1)
+  const summarySeq = ledger[0]!.summarySeq!
+  // Surface: [1, 2, c1, 8, 9, 10, 11, 12] — span [2..c1] crosses the block edge.
+  const result = await compress.execute({
+    content: [{ startSeq: 2, endSeq: summarySeq, summary: TIER_SUMMARY }],
+  } as never, fakeExec(session))
+  const text = (result as { text: string }).text
+  assert.match(text, /tier 2/, 'a block boundary in the span makes the range distill')
+
+  const after = rebuildBlockLedger(session.events)
+  assert.equal(after.length, 2)
+  assert.equal(after[1]!.tier, 2)
+  assert.deepEqual(after[1]!.shadowedSeqs, [2, summarySeq])
+  assert.deepEqual(after[1]!.parentBlockIds, [ledger[0]!.blockId])
+
+  // The folded message (seq 2 = assistant, index 1) is recoverable alongside
+  // the distilled originals (seqs 3..7 → [msg 2]..[msg 6]).
+  const decompress = toolOf(env, 'decompress')
+  const rec = await decompress.execute({ blockId: after[1]!.blockId }, fakeExec(session))
+  const recText = (rec as { text: string }).text
+  assert.match(recText, /\[reply 1\]/, 'the folded assistant message is in the recursion')
+  assert.match(recText, /\[msg 4\]/, 'a distilled original from the parent block is in the recursion')
+})

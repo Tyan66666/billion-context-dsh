@@ -8,6 +8,8 @@ import type { CommandDefinition } from '@deepseek-ai/dsh-commands'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { ToolEnvironment } from './tools.ts'
 import {
+  blockRefForSummarySeq,
+  expandShadowedSeqs,
   rebuildBlockLedger,
   resolveSurfaceRange,
   runCompactionTransaction,
@@ -30,7 +32,8 @@ function statusText(env: ToolEnvironment, agent: Agent): string {
     `  estimated context: ${estimated} / ${limit} (${Math.round((estimated / limit) * 100)}%)`,
   ]
   for (const block of ledger.slice(0, 10)) {
-    lines.push(`  - ${block.blockId.slice(0, 8)}: seqs ${block.start}..${block.end} — ${block.summary.slice(0, 80)}`)
+    const tier = block.tier > 1 ? ` [T${block.tier}]` : ''
+    lines.push(`  - ${block.blockId.slice(0, 8)}${tier}: seqs ${block.start}..${block.end} — ${block.summary.slice(0, 80)}`)
   }
   return lines.join('\n')
 }
@@ -47,6 +50,12 @@ function compressText(env: ToolEnvironment, agent: Agent, args: string[]): strin
   }
   const session = agent.session
   const { start, end } = resolveSurfaceRange(session, startSeq, endSeq)
+  // A checkpoint summary node can only be distilled through the kernel (the
+  // compress tool); /acp compress is a plain T1 range transaction, so refuse
+  // rather than silently folding the summary as a message.
+  if (blockRefForSummarySeq(session, start) !== null || blockRefForSummarySeq(session, end) !== null) {
+    return '/acp compress: the range touches a compressed block summary node — distill it with the compress tool (seq-based batch), not /acp compress'
+  }
   const shadowed = shadowedSeqsOf(session, startSeq, endSeq)
   let shadowedTokens = 0
   for (const seq of shadowed) {
@@ -71,7 +80,8 @@ function decompressText(_env: ToolEnvironment, agent: Agent, args: string[]): st
   const ledger = rebuildBlockLedger(session.events)
   const block = ledger.find((entry) => entry.blockId.startsWith(args[0]!))
   if (block === undefined) return `block "${args[0]}" not found (see /acp status)`
-  const parts = block.shadowedSeqs
+  // Tier-2/3 blocks shadow parent checkpoint nodes: expand to the originals.
+  const parts = expandShadowedSeqs(session, block.blockId)
     .map((seq) => extractEventText(session.events[seq]!))
     .filter((text) => text.length > 0)
   return `Block ${block.blockId} — ${block.summary}\n\n${parts.join('\n\n') || '(no recoverable content)'}`
