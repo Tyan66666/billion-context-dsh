@@ -78,6 +78,7 @@ test('M4: range table is computed from the surface, skipping the protected tail'
   const session = buildTextSession(12)
   const text = rangeTable(session)
   assert.match(text, /Compressible ranges/)
+  assert.match(text, /Surface: 12 nodes, seqs 1\.\.12/, 'the range table also reports the surface span so edges are locatable')
   // The protected recent tail (last 5 messages) is skipped; older runs appear.
   assert.match(text, /seq \d+\.\.\d+ — \d+ messages/)
   assert.doesNotMatch(text, /65000/)

@@ -16,7 +16,7 @@ import { createUserMessage, type UserMessage } from '@deepseek-ai/dsh-llm'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { AcpStateStore } from './state.ts'
 import { eventsToCoreMessages, surfaceEventsOf } from './messages.ts'
-import { buildCompressibleSeqRanges, findOpenTurn } from './region.ts'
+import { buildCompressibleSeqRanges, findOpenTurn, surfaceSummary } from './region.ts'
 import { kernelConfigFor, type KernelConfigInput } from './config.ts'
 
 /** Kernel inputs the nudge path shares with the compress tool. */
@@ -41,6 +41,7 @@ export function rangeTable(session: import('@deepseek-ai/dsh-session').Session):
   const lines = ranges.map((range) => `  - seq ${range.start}..${range.end} — ${range.count} messages, ~${range.tokens} tokens`)
   return [
     '',
+    `Surface: ${surfaceSummary(session)}`,
     'Compressible ranges (refs are surface seqs):',
     ...lines,
     'Compress with: compress({ content: [{ startSeq, endSeq, summary }] })',

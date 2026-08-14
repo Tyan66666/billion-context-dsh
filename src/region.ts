@@ -304,3 +304,20 @@ export function buildCompressibleSeqRanges(
   }
   return out.sort((a, b) => b.tokens - a.tokens)
 }
+
+/**
+ * A compact human-readable description of the current surface for the model:
+ * node count plus the first/last message seqs. Surface seqs are sparse (the
+ * event log interleaves non-message events and expanded delta batches), so a
+ * model that never saw the nudge range table — e.g. low-pressure sessions
+ * where no nudge fires — cannot guess its own seq space. acp_status and the
+ * nudge's range table both surface this so compress edges can be located
+ * without blind probing.
+ */
+export function surfaceSummary(session: Session): string {
+  const nodes = session.surface.nodes
+  if (nodes.length === 0) return 'empty'
+  const first = nodes[0]!
+  const last = nodes[nodes.length - 1]!
+  return `${nodes.length} nodes, seqs ${first}..${last}`
+}

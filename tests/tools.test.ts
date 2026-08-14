@@ -122,6 +122,7 @@ test('M3: acp_status reports the block ledger and pressure', async () => {
   const status = toolOf(env, 'acp_status')
   const empty = await status.execute({}, fakeExec(session))
   assert.match((empty as { text: string }).text, /blocks: 0/)
+  assert.match((empty as { text: string }).text, /surface: 12 nodes, seqs 1\.\.12/, 'the surface summary lets the model locate seqs without a nudge')
 
   const compress = toolOf(env, 'compress')
   await compress.execute({
@@ -135,6 +136,7 @@ test('M3: acp_status reports the block ledger and pressure', async () => {
   const filled = await status.execute({}, fakeExec(session))
   assert.match((filled as { text: string }).text, /blocks: 1/)
   assert.match((filled as { text: string }).text, /estimated context:/)
+  assert.match((filled as { text: string }).text, /surface: 8 nodes/, '12 messages - 5 shadowed + 1 summary = 8 surface nodes')
 })
 
 test('M3: compress rejects ranges outside the assigned surface', async () => {

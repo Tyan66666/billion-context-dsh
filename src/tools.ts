@@ -20,6 +20,7 @@ import {
   resolveSurfaceRange,
   runCompactionTransaction,
   shadowedSeqsOf,
+  surfaceSummary,
 } from './region.ts'
 import { eventsToCoreMessages, extractEventText, surfaceEventsOf } from './messages.ts'
 
@@ -265,6 +266,7 @@ function handleStatus(env: ToolEnvironment, _args: StatusArgs, exec: ToolRunCont
     `  blocks: ${ledger.length}`,
     `  tokens compressed: ${totalTokens}`,
     `  estimated context: ${estimated} / ${limit} (${Math.round((estimated / limit) * 100)}%)`,
+    `  surface: ${surfaceSummary(session)}`,
   ]
   for (const block of ledger.slice(0, 10)) {
     lines.push(`  - ${block.blockId.slice(0, 8)}: seqs ${block.start}..${block.end} (${block.shadowedSeqs.length} msgs) — ${block.summary.slice(0, 80)}`)
