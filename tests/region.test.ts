@@ -128,3 +128,28 @@ test('M5: tool-call ranges are auto-adjusted to balanced edges', () => {
   // A range that can neither shrink nor expand still fails with guidance.
   assert.throws(() => resolveSurfaceRange(session, 99, 100), /not in the current surface/)
 })
+
+test('M5: ledger backfills shadowedTokenCount for legacy blocks written as 0', () => {
+  const session = buildTextSession(6)
+  // A legacy block: compaction/summary with shadowedTokenCount 0 (pre-fix).
+  session.append('compaction/start', { compactionId: 'legacy-1', turn: 1 })
+  session.append('compaction/summary', {
+    compactionId: 'legacy-1',
+    summary: [{ type: 'text', text: 'legacy summary with enough detail' }],
+    shadowedRange: { start: 1, end: 3 },
+    shadowedSeqs: [1, 2, 3],
+    shadowedTokenCount: 0,
+    provider: 'p',
+    model: 'm',
+  })
+  session.append('user/message', {
+    id: 'legacy-repl',
+    role: 'user',
+    content: [{ type: 'text', text: 'legacy summary' }],
+    source: { kind: 'plugin', plugin: 'compact', compactionId: 'legacy-1' },
+  } as never, { surfaceOp: { op: 'replace', start: 1, end: 3 }, sourceEventSeqs: [1, 2, 3] })
+  session.append('compaction/end', { compactionId: 'legacy-1', turn: 1 })
+  const ledger = rebuildBlockLedger(session.events)
+  assert.equal(ledger.length, 1)
+  assert.ok(ledger[0]!.shadowedTokenCount > 0, 'legacy 0 is backfilled from shadowed originals')
+})

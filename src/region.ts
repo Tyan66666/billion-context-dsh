@@ -20,7 +20,8 @@ import {
   toolPairingBalancedBefore,
 } from '@deepseek-ai/dsh-compaction'
 import { createUserMessage, type ContentBlock } from '@deepseek-ai/dsh-llm'
-import { extractText } from './messages.ts'
+import { defaultCountTokens } from 'acp-kernel'
+import { extractEventText, extractText } from './messages.ts'
 
 /** One durable ACP block as rebuilt from the session log. */
 export interface AcpBlockLedgerEntry {
@@ -171,11 +172,22 @@ export function rebuildBlockLedger(events: readonly SessionEvent[]): AcpBlockLed
   for (const event of events) {
     if (event.type !== 'compaction/summary') continue
     const data = event.data
+    // Blocks written before the token-accounting fix carry shadowedTokenCount
+    // 0; backfill from the shadowed originals still in the log so acp_status
+    // reports real reclaimed tokens.
+    let shadowedTokenCount = data.shadowedTokenCount
+    if (shadowedTokenCount === 0) {
+      shadowedTokenCount = 0
+      for (const seq of data.shadowedSeqs) {
+        const original = events[seq]
+        if (original !== undefined) shadowedTokenCount += defaultCountTokens(extractEventText(original))
+      }
+    }
     ledger.push({
       blockId: data.compactionId,
       summary: extractText(data.summary),
       shadowedSeqs: [...data.shadowedSeqs],
-      shadowedTokenCount: data.shadowedTokenCount,
+      shadowedTokenCount,
       start: data.shadowedRange.start,
       end: data.shadowedRange.end,
     })
