@@ -10,7 +10,7 @@ import {
   runCompactionTransaction,
   shadowedSeqsOf,
 } from '../src/region.ts'
-import { appendTurn, appendToolCall, appendToolResult, appendUser, appendAssistant, buildTextSession, longText } from './helpers.ts'
+import { appendTurn, appendToolCall, appendToolResult, appendMultiToolCall, appendUser, appendAssistant, buildTextSession, longText } from './helpers.ts'
 
 test('M2: AcpStateStore initialises one state per session', () => {
   const store = new AcpStateStore()
@@ -127,6 +127,28 @@ test('M5: tool-call ranges are auto-adjusted to balanced edges', () => {
   assert.deepEqual(resolveSurfaceRange(session, 3, 3), { start: 2, end: 3 }, 'lone tool-result expands to include its call')
   // A range that can neither shrink nor expand still fails with guidance.
   assert.throws(() => resolveSurfaceRange(session, 99, 100), /not in the current surface/)
+})
+
+test('M5: multi-tool-call boundaries are shifted to plain-ref cuts', () => {
+  const session = Session.create('multi')
+  appendTurn(session, 1)
+  appendUser(session, longText('msg', 0))                     // seq 1
+  appendMultiToolCall(session, 'plan', ['c1', 'c2'], 1, 1)   // seq 2 (2 calls: no bare ref)
+  appendToolResult(session, longText('res', 0), 'c1', 1, 1)  // seq 3
+  appendToolResult(session, longText('res', 1), 'c2', 1, 1)  // seq 4
+  appendUser(session, longText('msg', 1))                     // seq 5
+  // surface: [1 user, 2 multi-call, 3 res, 4 res, 5 user]
+  // An edge on the multi-call message (2) is NOT a valid boundary: it has no
+  // bare-seq ref. The start shrinks inward to the nearest clean cut (5); the
+  // request collapses to a single plain-ref message rather than crossing the
+  // unresolved multi-call round.
+  assert.deepEqual(resolveSurfaceRange(session, 2, 5), { start: 5, end: 5 })
+  assert.deepEqual(resolveSurfaceRange(session, 3, 5), { start: 5, end: 5 })
+  // A lone multi-call message cannot shrink at all, so it EXPANDS outward to
+  // the smallest clean enclosing pair — the whole call/result round (1..4).
+  assert.deepEqual(resolveSurfaceRange(session, 2, 2), { start: 1, end: 4 })
+  // A clean text range that merely CONTAINS the multi-call round is unchanged.
+  assert.deepEqual(resolveSurfaceRange(session, 1, 5), { start: 1, end: 5 })
 })
 
 test('M5: ledger backfills shadowedTokenCount for legacy blocks written as 0', () => {

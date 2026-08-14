@@ -114,17 +114,25 @@ async function handleCompress(env: ToolEnvironment, args: CompressArgs, exec: To
   const ranges = args.content.map((range) => {
     const startSeq = parseSeq(range.startSeq)
     const endSeq = parseSeq(range.endSeq)
-    const startRef = byRaw[String(startSeq)]
-    const endRef = byRaw[String(endSeq)]
+    // Balance edges FIRST: the requested edges may sit on multi-tool-call
+    // assistant messages, which project to `${seq}#${callId}` CoreMessage ids
+    // and therefore have NO bare-`${seq}` ref. resolveSurfaceRange shifts them
+    // to clean tool-pairing-balanced cuts that always carry a bare ref, so the
+    // resolved refs exist and the shadowed span matches the returned range.
+    const { start, end } = resolveSurfaceRange(session, startSeq, endSeq)
+    const startRef = byRaw[String(start)]
+    const endRef = byRaw[String(end)]
     if (startRef === undefined || endRef === undefined) {
       throw new Error(
-        `billion-context-dsh: seq ${startSeq}..${endSeq} has no assigned ref — `
+        `billion-context-dsh: seq ${start}..${end} has no assigned ref — `
         + 'the range must be on the current surface (run acp_status for the live seq list)',
       )
     }
     return {
       startSeq,
       endSeq,
+      start,
+      end,
       startRef,
       endRef,
       summary: range.summary,
@@ -147,9 +155,8 @@ async function handleCompress(env: ToolEnvironment, args: CompressArgs, exec: To
   for (let index = 0; index < ranges.length; index += 1) {
     const range = ranges[index]!
     const original = args.content[index]!
-    // The edges may have been nudged to the nearest tool-pairing-balanced cut;
-    // shadow exactly what resolveSurfaceRange approved.
-    const { start, end } = resolveSurfaceRange(session, range.startSeq, range.endSeq)
+    // The edges were already balanced above; shadow exactly that span.
+    const { start, end } = range
     const shadowed = shadowedSeqsOf(session, start, end)
     // Estimate the reclaimed tokens from the actual shadowed messages so the
     // durable ledger (compaction/summary.shadowedTokenCount) reports a real

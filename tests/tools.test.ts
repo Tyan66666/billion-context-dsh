@@ -4,10 +4,12 @@ import { Context } from '@deepseek-ai/cordis'
 import { createCore, type CompressionCore } from 'acp-kernel'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type { Agent } from '@deepseek-ai/dsh-agent'
+import { Session } from '@deepseek-ai/dsh-session'
 import { AcpStateStore } from '../src/state.ts'
 import { makeTools, type ToolEnvironment } from '../src/tools.ts'
 import { rebuildBlockLedger } from '../src/region.ts'
-import { buildTextSession } from './helpers.ts'
+import { rangeTable } from '../src/nudge.ts'
+import { appendTurn, appendToolResult, appendMultiToolCall, appendUser, appendAssistant, buildTextSession, longText } from './helpers.ts'
 
 function makeEnv(limit = 128000): ToolEnvironment {
   return {
@@ -174,4 +176,84 @@ test('M3: tools refuse to run without an agent context', async () => {
     compress.execute({ content: [] } as never, exec),
     /requires an agent execution context/,
   )
+})
+
+/** A session whose second node is a multi-tool-call assistant message. */
+function buildMultiCallSession(): Session {
+  const session = Session.create('multi')
+  appendTurn(session, 1)
+  appendUser(session, longText('msg', 0))                     // seq 1
+  appendMultiToolCall(session, 'plan', ['c1', 'c2'], 1, 1)   // seq 2 (2 calls: no bare ref)
+  appendToolResult(session, longText('res', 0), 'c1', 1, 1)  // seq 3
+  appendToolResult(session, longText('res', 1), 'c2', 1, 1)  // seq 4
+  appendUser(session, longText('msg', 1))                     // seq 5
+  appendAssistant(session, longText('reply', 1), 1, 2)        // seq 6
+  appendUser(session, longText('msg', 2))                     // seq 7
+  appendAssistant(session, longText('reply', 2), 1, 3)        // seq 8
+  appendUser(session, longText('msg', 3))                     // seq 9
+  appendAssistant(session, longText('reply', 3), 1, 4)        // seq 10
+  return session
+}
+
+test('M3: compress expands a lone multi-tool-call boundary to the clean pair', async () => {
+  const env = makeEnv()
+  const session = buildMultiCallSession()
+  const compress = toolOf(env, 'compress')
+  // seq 2 is a multi-tool-call assistant message: it has NO bare '2' ref (the
+  // projection keys are '2#c1' / '2#c2'), so a naive byRaw lookup fails. A lone
+  // request on it expands outward to the smallest clean enclosing pair — the
+  // whole call/result round (1..4) — whose edges are plain-ref messages.
+  const result = await compress.execute({
+    content: [{
+      startSeq: 2,
+      endSeq: 2,
+      summary: 'This summary is long enough to pass the kernel minimum length threshold of fifty characters for the compressible content range.',
+    }],
+  } as never, fakeExec(session))
+
+  assert.match((result as { text: string }).text, /Compressed 1 block/)
+  const ledger = rebuildBlockLedger(session.events)
+  assert.equal(ledger.length, 1)
+  assert.deepEqual(ledger[0]!.shadowedSeqs, [1, 2, 3, 4])
+})
+
+test('M3: compress shadows multi-tool-call messages inside a clean range', async () => {
+  const env = makeEnv()
+  const session = buildMultiCallSession()
+  const compress = toolOf(env, 'compress')
+  // Both edges (1, 5) are plain-ref messages; the multi-call round (2..4) sits
+  // inside the span and is shadowed with it — the real "nudge gave me a range"
+  // scenario.
+  const result = await compress.execute({
+    content: [{
+      startSeq: 1,
+      endSeq: 5,
+      summary: 'This summary is long enough to pass the kernel minimum length threshold of fifty characters for the compressible content range.',
+    }],
+  } as never, fakeExec(session))
+
+  assert.match((result as { text: string }).text, /Compressed 1 block/)
+  const ledger = rebuildBlockLedger(session.events)
+  assert.equal(ledger.length, 1)
+  assert.deepEqual(ledger[0]!.shadowedSeqs, [1, 2, 3, 4, 5])
+})
+
+test('M3: nudge range-table edges compress successfully (plain-ref boundaries)', async () => {
+  const env = makeEnv()
+  const session = buildMultiCallSession()
+  const table = rangeTable(session)
+  const match = /seq (\d+)\.\.(\d+)/.exec(table)
+  assert.ok(match, 'range table renders a compressible span')
+  const startSeq = Number(match![1])
+  const endSeq = Number(match![2])
+
+  const compress = toolOf(env, 'compress')
+  const result = await compress.execute({
+    content: [{
+      startSeq,
+      endSeq,
+      summary: 'This summary is long enough to pass the kernel minimum length threshold of fifty characters for the compressible content range.',
+    }],
+  } as never, fakeExec(session))
+  assert.match((result as { text: string }).text, /Compressed 1 block/)
 })

@@ -57,14 +57,48 @@ export function assertNoActiveCompaction(events: readonly SessionEvent[]): void 
 }
 
 /**
+ * Whether the surface node at `seq` projects to CoreMessage(s) whose ref key
+ * is the bare seq — user messages, tool results, and text-only or SINGLE
+ * tool-call assistant messages all do. Multi-tool-call assistant messages
+ * project to `${seq}#${callId}` ids (projectEvent) and therefore carry NO
+ * bare-`${seq}` ref, so compress's byRaw lookup can never resolve them as
+ * range edges. resolveSurfaceRange treats such edges as unbalanced and shifts
+ * them to the nearest clean cut.
+ */
+function hasPlainRef(session: Session, seq: number): boolean {
+  const event = session.events[seq]
+  if (event === undefined) return false
+  switch (event.type) {
+    case 'user/message':
+    case 'tool/result':
+      return extractEventText(event).trim().length > 0
+    case 'assistant/message': {
+      const content = (event.data as { message?: { content?: unknown } }).message?.content
+      const calls = Array.isArray(content)
+        ? content.filter(
+            (block) => block !== null && typeof block === 'object' && (block as { type?: string }).type === 'tool-call',
+          )
+        : []
+      if (calls.length > 1) return false
+      // One tool-call: projectEvent emits a bare-seq CoreMessage unconditionally.
+      // Zero: only when the text is non-empty.
+      return calls.length === 1 || extractEventText(event).trim().length > 0
+    }
+    default:
+      return false
+  }
+}
+
+/**
  * Validate one inclusive surface span and adjust its edges to a
- * tool-pairing-balanced range. Missing or reversed ranges still throw. An
- * edge that sits inside a tool-call/result pair is first nudged inward to the
- * nearest clean cut; if that collapses the range (e.g. the model asked for a
- * SINGLE tool result, which can never be balanced alone), the range EXPANDS
- * outward to the enclosing balanced pair instead — a lone tool message is
- * almost always a "consumed output" the model genuinely wants to compress.
- * The returned range is what a caller should actually shadow.
+ * tool-pairing-balanced range whose boundaries carry a bare-seq ref. Missing
+ * or reversed ranges still throw. An edge that sits inside a tool-call/result
+ * pair — or on a multi-tool-call assistant message that has no bare-seq ref —
+ * is first nudged inward to the nearest clean cut; if that collapses the range
+ * (e.g. the model asked for a SINGLE tool result, which can never be balanced
+ * alone), the range EXPANDS outward to the enclosing clean pair instead — a
+ * lone tool message is almost always a "consumed output" the model genuinely
+ * wants to compress. The returned range is what a caller should actually shadow.
  */
 export function resolveSurfaceRange(
   session: Session,
@@ -80,29 +114,34 @@ export function resolveSurfaceRange(
   if (requestedStartIdx > requestedEndIdx) {
     throw new Error(`billion-context-dsh: reversed range ${start}..${end}`)
   }
+  // A boundary must be BOTH tool-pairing-balanced AND carry a bare-seq ref.
+  const cleanBefore = (index: number): boolean =>
+    toolPairingBalancedBefore(session, nodes[index]!) && hasPlainRef(session, nodes[index]!)
+  const cleanAfter = (index: number): boolean =>
+    toolPairingBalancedAfter(session, nodes[index]!) && hasPlainRef(session, nodes[index]!)
   let startIdx = requestedStartIdx
   let endIdx = requestedEndIdx
-  // First pass: nudge inward to the nearest balanced cuts.
-  while (startIdx <= endIdx && !toolPairingBalancedBefore(session, nodes[startIdx]!)) {
+  // First pass: nudge inward to the nearest clean cuts.
+  while (startIdx <= endIdx && !cleanBefore(startIdx)) {
     startIdx += 1
   }
-  while (endIdx >= startIdx && !toolPairingBalancedAfter(session, nodes[endIdx]!)) {
+  while (endIdx >= startIdx && !cleanAfter(endIdx)) {
     endIdx -= 1
   }
   if (startIdx <= endIdx) {
     return { start: nodes[startIdx]!, end: nodes[endIdx]! }
   }
   // Second pass: the inward pass collapsed (a lone tool message) — expand
-  // outward from the REQUESTED span to the smallest balanced enclosing pair.
+  // outward from the REQUESTED span to the smallest clean enclosing pair.
   startIdx = requestedStartIdx
   endIdx = requestedEndIdx
-  while (startIdx > 0 && !toolPairingBalancedBefore(session, nodes[startIdx]!)) {
+  while (startIdx > 0 && !cleanBefore(startIdx)) {
     startIdx -= 1
   }
-  while (endIdx < nodes.length - 1 && !toolPairingBalancedAfter(session, nodes[endIdx]!)) {
+  while (endIdx < nodes.length - 1 && !cleanAfter(endIdx)) {
     endIdx += 1
   }
-  if (toolPairingBalancedBefore(session, nodes[startIdx]!) && toolPairingBalancedAfter(session, nodes[endIdx]!)) {
+  if (cleanBefore(startIdx) && cleanAfter(endIdx)) {
     return { start: nodes[startIdx]!, end: nodes[endIdx]! }
   }
   throw new Error(

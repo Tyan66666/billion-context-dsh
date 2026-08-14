@@ -64,6 +64,26 @@ export function appendToolResult(session: Session, text: string, callId: string,
   }, { surfaceOp: 'append' })
 }
 
+/**
+ * An assistant message carrying MULTIPLE tool-call blocks in one content list —
+ * the real DSH shape whose projection yields `${seq}#${callId}` CoreMessage
+ * ids (no bare `${seq}` ref, so it can never be a compress range edge).
+ */
+export function appendMultiToolCall(session: Session, text: string, callIds: readonly string[], turn = 1, step = 1): void {
+  session.append('assistant/message', {
+    turn,
+    step,
+    message: createAssistantMessage({
+      content: [
+        { type: 'text', text },
+        ...callIds.map((id) => ({ type: 'tool-call', id, name: 'bash', arguments: '{"command":"ls"}' })),
+      ],
+      provider: 'test-provider',
+      model: 'test-model',
+    }),
+  }, { surfaceOp: 'append' })
+}
+
 /** A session with `count` alternating user/assistant text messages inside one open turn. */
 export function buildTextSession(count: number): Session {
   const session = Session.create('test-session')
