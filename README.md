@@ -3,7 +3,7 @@
 [中文](./README.md) | [English](./README.en.md)
 
 > **⚠️ 测试版声明——请勿用于生产环境**
-> 本项目（**v0.1.5**）仍处于开发中的测试版。[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 本身也处于**公开测试版**阶段。**请勿将两者用于工程化 / 生产环境**——预期会有破坏性变更与粗糙之处。
+> 本项目（**v0.1.6**）仍处于开发中的测试版。[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 本身也处于**公开测试版**阶段。**请勿将两者用于工程化 / 生产环境**——预期会有破坏性变更与粗糙之处。
 
 <p align="center">
 <strong>衷心感谢以下项目——请给它们一个 ⭐：</strong>

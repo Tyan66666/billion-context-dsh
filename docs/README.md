@@ -2,7 +2,7 @@
 
 [English](./README.md) · [简体中文](../README.md) · [项目主页](https://github.com/Tyan66666/billion-context-dsh)
 
-> **⚠️ Beta** — this project (v0.1.5) and the [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) are both in **public beta**: do not use in engineering / production environments.
+> **⚠️ Beta** — this project (v0.1.6) and the [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) are both in **public beta**: do not use in engineering / production environments.
 
 Model-driven context management (Active Context Pruning / ACP) for the DeepSeek Harness, ported from [billion-context-pi](https://github.com/ranxianglei/billion-context-pi). The compression core ([acp-kernel](https://github.com/ranxianglei/acp-kernel)) is reused verbatim.
 
@@ -32,6 +32,7 @@ src/
 
 ## 📦 Releases
 
+- [v0.1.6](https://github.com/Tyan66666/billion-context-dsh/releases/tag/v0.1.6) — (feat) auto-detect the model context window from the LLM runtime (`agent.ctx.llm.resolveModelInfo`; explicit `modelContextLimit` wins, falls back to the default), (feat) engine nudge thresholds lowered to 0.70/0.85 (forced nudge before the host 80% compaction line; explicit values win), docs: clarify nudge trigger semantics — growth path has no percentage floor, + 3 regression tests (54 tests)
 - [v0.1.5](https://github.com/Tyan66666/billion-context-dsh/releases/tag/v0.1.5) — (feat) tier-2/3 block distillation: compressing a block's summary node distills it into a higher tier (T1→T2→T3), with recursive decompress, log rehydration of kernel blocks (restart-safe), tier-aware nudge/status, + 8 regression tests (42 tests)
 - [v0.1.4](https://github.com/Tyan66666/billion-context-dsh/releases/tag/v0.1.4) — (feat) guide the model toward multi-segment batch compression: the nudge range table, system prompt, and the compress tool description now point at batching multiple disjoint ranges in one call (each entry its own block), + regression test (34 tests)
 - [v0.1.3](https://github.com/Tyan66666/billion-context-dsh/releases/tag/v0.1.3) — compress / resolveSurfaceRange errors now point the model at `acp_status` for the current surface (sparse-node guidance)
