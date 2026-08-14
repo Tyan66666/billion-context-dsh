@@ -99,6 +99,11 @@ test('M5: resolveSurfaceRange rejects missing, reversed, and pair-broken ranges'
   const session = buildTextSession(6)
   assert.deepEqual(resolveSurfaceRange(session, 1, 4), { start: 1, end: 4 })
   assert.throws(() => resolveSurfaceRange(session, 99, 100), /not in the current surface/)
+  assert.throws(
+    () => resolveSurfaceRange(session, 99, 100),
+    /consult acp_status for the current surface range/,
+    'missing-boundary error should point the model at acp_status',
+  )
   assert.throws(() => resolveSurfaceRange(session, 4, 1), /reversed range/)
   assert.deepEqual(shadowedSeqsOf(session, 1, 3), [1, 2, 3])
 })

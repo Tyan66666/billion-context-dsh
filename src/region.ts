@@ -109,7 +109,11 @@ export function resolveSurfaceRange(
   const requestedStartIdx = nodes.indexOf(start)
   const requestedEndIdx = nodes.indexOf(end)
   if (requestedStartIdx < 0 || requestedEndIdx < 0) {
-    throw new Error(`billion-context-dsh: seq ${start}..${end} not in the current surface`)
+    throw new Error(
+      `billion-context-dsh: seq ${start}..${end} not in the current surface — `
+      + 'surface seqs are sparse message nodes (only user/message, assistant/message, '
+      + 'tool/result events); consult acp_status for the current surface range',
+    )
   }
   if (requestedStartIdx > requestedEndIdx) {
     throw new Error(`billion-context-dsh: reversed range ${start}..${end}`)
