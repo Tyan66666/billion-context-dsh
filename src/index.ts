@@ -83,9 +83,9 @@ export interface AcpConfig {
   readonly modelContextLimit?: number
   /** Probe the model's real context window from the LLM runtime. Default true. */
   readonly autoModelContextLimit: boolean
-  /** Nudge window lower bound (usage fraction). Kernel default 0.45 — same as billion-context-pi. */
+  /** Nudge window lower bound (usage fraction; validation only — the growth-driven trigger has no percentage floor). Kernel default 0.45 — same as billion-context-pi. */
   readonly nudgeMinContextLimitPct?: number
-  /** Nudge window upper bound (over-limit). Kernel default 0.75 — same as billion-context-pi. */
+  /** Nudge window upper bound — over-limit guarantee line. Kernel default 0.75 — same as billion-context-pi. */
   readonly nudgeMaxContextLimitPct?: number
   /** Emergency nudge threshold (bypasses per-turn dedup). Kernel default 0.95 — same as billion-context-pi. */
   readonly nudgeEmergencyThresholdPct?: number

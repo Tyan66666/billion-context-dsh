@@ -15,9 +15,9 @@ import { defaultConfig, type Config } from 'acp-kernel'
 /** The kernel-facing knobs shared by the nudge path and the compress tool. */
 export interface KernelConfigInput {
   readonly modelContextLimit: number
-  /** Nudge window lower bound (usage fraction). Kernel default: 0.45. */
+  /** Nudge window lower bound (usage fraction; validation only — the growth-driven trigger has no percentage floor). Kernel default: 0.45. */
   readonly nudgeMinContextLimitPct?: number
-  /** Nudge window upper bound — over-limit. Kernel default: 0.75. */
+  /** Nudge window upper bound — over-limit guarantee line. Kernel default: 0.75. */
   readonly nudgeMaxContextLimitPct?: number
   /** Emergency nudge threshold (bypasses per-turn dedup). Kernel default: 0.95. */
   readonly nudgeEmergencyThresholdPct?: number

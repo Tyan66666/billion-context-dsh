@@ -146,7 +146,7 @@ DSH 的每个模型请求都派生自其 append-only 会话日志（*surface*）
 |---|---|---|
 | `modelContextLimit` | 自动探测（回退 `128000`） | 用于内核压力决策的上下文窗口；显式配置时优先且跳过探测 |
 | `autoModelContextLimit` | `true` | 从模型 API 自动探测真实窗口（`agent.ctx.llm.resolveModelInfo`）；探测失败回退默认值，`acp_status` 展示窗口来源 |
-| `nudgeMinContextLimitPct` | 内核默认 `0.45` | Nudge 窗口下界（用量占比）——与 billion-context-pi 相同的默认值 |
+| `nudgeMinContextLimitPct` | 内核默认 `0.45` | Nudge 窗口下界（用量占比）——仅作配置校验，增长路径的触发没有百分比下限——与 billion-context-pi 相同的默认值 |
 | `nudgeMaxContextLimitPct` | 内核默认 `0.75` | 过限线：超过此值则无论增长与否都触发 nudge |
 | `nudgeEmergencyThresholdPct` | 内核默认 `0.95` | 紧急 nudge（绕过每轮去重） |
 | `coreOverrides` | — | 任何其他 acp-kernel `Config` 覆盖（billion-context-pi 的 `coreOverrides` 逃生口） |

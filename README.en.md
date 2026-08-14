@@ -144,7 +144,7 @@ This project reuses `acp-kernel`'s compression core and `billion-context-pi`'s d
 |---|---|---|
 | `modelContextLimit` | auto-detected (fallback `128000`) | Context window used for the kernel's pressure decisions; an explicit value wins and skips the probe |
 | `autoModelContextLimit` | `true` | Probe the model's real window from the model API (`agent.ctx.llm.resolveModelInfo`); fall back to the default on failure, `acp_status` shows the window source |
-| `nudgeMinContextLimitPct` | kernel default `0.45` | Nudge window lower bound (usage fraction) — same default as billion-context-pi |
+| `nudgeMinContextLimitPct` | kernel default `0.45` | Nudge window lower bound (usage fraction) — validation only; the growth-driven trigger has no percentage floor — same default as billion-context-pi |
 | `nudgeMaxContextLimitPct` | kernel default `0.75` | Over-limit line: above this the nudge fires regardless of growth |
 | `nudgeEmergencyThresholdPct` | kernel default `0.95` | Emergency nudge (bypasses the per-turn dedup) |
 | `coreOverrides` | — | Any other acp-kernel `Config` override (billion-context-pi's `coreOverrides` escape hatch) |
