@@ -50,6 +50,8 @@ This is the DeepSeek Harness port of [billion-context-pi](https://github.com/ran
 
 ## Install
 
+> 💡 **Want DeepSeek Harness to install it for you?** This repo itself runs on DSH: hand [docs/INSTALL.md](docs/INSTALL.md) to an agent in a session and it will read the guide, inspect your profile, wire the composition, and verify the mount. Two preconditions: ① the config lives under `~/.dsh`, so you approve one file-permission prompt; ② afterwards ask it to call `acp_status` as proof.
+
 ```bash
 npm install billion-context-dsh
 ```

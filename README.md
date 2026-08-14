@@ -50,6 +50,11 @@
 
 ## 安装
 
+> 💡 **想让 DeepSeek Harness 帮你装？** 本仓库本身就运行在 DSH 上：把
+> [docs/INSTALL.md](docs/INSTALL.md) 交给会话里的 agent，它会读取指南、解析
+> 你的 profile、编辑组合配置并验证挂载。前提：① 配置写在 `~/.dsh` 下，需要
+> 你批准一次文件权限；② 装完让它调用 `acp_status` 自证。
+
 ```bash
 npm install billion-context-dsh
 ```
