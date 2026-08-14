@@ -1,6 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { Session } from '@deepseek-ai/dsh-session'
+import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { AcpStateStore } from '../src/state.ts'
 import {
   assertNoActiveCompaction,
@@ -149,6 +150,37 @@ test('M5: multi-tool-call boundaries are shifted to plain-ref cuts', () => {
   assert.deepEqual(resolveSurfaceRange(session, 2, 2), { start: 1, end: 4 })
   // A clean text range that merely CONTAINS the multi-call round is unchanged.
   assert.deepEqual(resolveSurfaceRange(session, 1, 5), { start: 1, end: 5 })
+})
+
+test('M5: pass-2 expansion must not cross a checkpoint into value-reversed seqs', () => {
+  const session = Session.create('nonmono')
+  appendTurn(session, 1)
+  appendUser(session, longText('q0', 0))                           // seq 1
+  appendMultiToolCall(session, 'plan', ['c1', 'c2', 'c3', 'c4'])   // seq 2 (4 calls: no bare ref)
+  appendToolResult(session, longText('res', 0), 'c1')              // seq 3
+  appendToolResult(session, longText('res', 1), 'c2')              // seq 4
+  appendToolResult(session, longText('res', 2), 'c3')              // seq 5
+  appendToolResult(session, longText('res', 3), 'c4')              // seq 6
+  appendUser(session, longText('q1', 1))                           // seq 7
+  // nodes: [1, 2, 3, 4, 5, 6, 7]
+  // A later compaction replaces node 1 with a summary checkpoint at seq 8.
+  session.append('user/message', createUserMessage({
+    content: [{ type: 'text', text: longText('summary', 0) }],
+    source: { kind: 'user', plugin: 'compact' },
+  }), { surfaceOp: { op: 'replace', start: 1, end: 1 }, sourceEventSeqs: [1] })
+  // nodes: [8, 2, 3, 4, 5, 6, 7] — NON-monotonic: the newer checkpoint seq 8
+  // sits ahead of the older residual nodes 2..7 (the live production shape
+  // behind the '110295..106762' reversed nudge range).
+  // The whole multi-call round 2..6 has no clean inward cut, so pass-2 expands
+  // the start toward the checkpoint; the resulting span 8..6 is value-reversed
+  // and must be rejected instead of being shadowed.
+  assert.throws(() => resolveSurfaceRange(session, 2, 6), /balanced range|reversed/)
+  // The residual round alone (3..6) collapses too and must not cross the
+  // checkpoint either.
+  assert.throws(() => resolveSurfaceRange(session, 3, 6), /balanced range|reversed/)
+  // A span that does not touch the unresolved round still resolves cleanly:
+  // the trailing user message is a plain-ref boundary on both sides.
+  assert.deepEqual(resolveSurfaceRange(session, 6, 7), { start: 7, end: 7 })
 })
 
 test('M5: ledger backfills shadowedTokenCount for legacy blocks written as 0', () => {

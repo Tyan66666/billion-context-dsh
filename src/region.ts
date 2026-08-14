@@ -133,7 +133,7 @@ export function resolveSurfaceRange(
   while (endIdx >= startIdx && !cleanAfter(endIdx)) {
     endIdx -= 1
   }
-  if (startIdx <= endIdx) {
+  if (startIdx <= endIdx && nodes[startIdx]! <= nodes[endIdx]!) {
     return { start: nodes[startIdx]!, end: nodes[endIdx]! }
   }
   // Second pass: the inward pass collapsed (a lone tool message) — expand
@@ -146,7 +146,11 @@ export function resolveSurfaceRange(
   while (endIdx < nodes.length - 1 && !cleanAfter(endIdx)) {
     endIdx += 1
   }
-  if (cleanBefore(startIdx) && cleanAfter(endIdx)) {
+  // Value order guard: the surface is locally non-monotonic after replacements
+  // (a checkpoint seq inserted ahead of older residual nodes), so index order
+  // alone is not enough — never return a span whose end seq is numerically
+  // BEFORE its start seq. The caller (nudge / compress) skips such a span.
+  if (cleanBefore(startIdx) && cleanAfter(endIdx) && nodes[startIdx]! <= nodes[endIdx]!) {
     return { start: nodes[startIdx]!, end: nodes[endIdx]! }
   }
   throw new Error(
