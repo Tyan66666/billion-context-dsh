@@ -56,16 +56,19 @@ export function rangeTable(nudge: NudgeDecision, state: { messageRefs: { byRef: 
 }
 
 /**
- * The token count driving pressure decisions. Prefer the host's token meter
- * (anchored on real provider usage — matches the UI occupancy) and fall back
- * to the fast heuristic when the meter is absent (tests, minimal hosts).
+ * The token count driving pressure decisions. Prefer the host token meter's
+ * SURFACE tokens (the input-side heuristic total — matches acp_status and the
+ * UI's message-token view). `totalTokens` is request-AND-RESPONSE pressure and
+ * can far exceed the window in long sessions (observed 230% against a real
+ * ~20% occupancy), so it is not used. Falls back to the fast heuristic when
+ * the meter is absent (tests, minimal hosts).
  */
 function measuredTokenCount(agent: Agent, coreMessages: CoreMessage[]): number {
   const meter = agent.ctx?.get?.('tokenMeter') as
-    | { measure?: (session: unknown) => { totalTokens?: number } }
+    | { measure?: (session: unknown) => { surfaceTokens?: number } }
     | undefined
-  const measured = meter?.measure?.(agent.session)?.totalTokens
-  if (typeof measured === 'number' && measured > 0) return measured
+  const surface = meter?.measure?.(agent.session)?.surfaceTokens
+  if (typeof surface === 'number' && surface > 0) return surface
   return coreMessages.reduce((sum, message) => sum + estimateTokensFast(message.text ?? ''), 0)
 }
 
@@ -116,7 +119,9 @@ function buildNudgeText(
   emergency: boolean,
   state: { messageRefs: { byRef: Record<string, string> } },
 ): string {
-  const pct = Math.round(nudge.contextUsage * 100)
+  // Cap the reported percentage at 100: a broken measurement (e.g. response
+  // pressure folded in) must never surface as an absurd "230%" to the model.
+  const pct = Math.round(Math.min(nudge.contextUsage, 1) * 100)
   const frame = emergency
     ? `⚠️ Context usage is at ${pct}% of the window — nearly full. Consider compressing consumed ranges soon so working context stays available; the choice and timing are yours.`
     : `Context usage is at ${pct}%. This is a suggestion, not a requirement — you decide whether and when to compress.`
