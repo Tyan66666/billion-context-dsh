@@ -122,15 +122,45 @@ export class AcpCompactionEngine extends CompactionEngine {
       coreOverrides: this.config.coreOverrides,
     }
 
-    if (this.config.autoTools) {
-      const tools = ctx.get('tools')
-      if (tools !== undefined) {
-        for (const tool of makeTools(env)) tools.register(tool)
+    // Tools and commands may not be registered yet on cold start: cordis
+    // starts unrelated composition rows concurrently, so the first
+    // `ctx.get('tools')` can legitimately be undefined even though the row
+    // ships later in the file. HMR-style reloads always see them (already
+    // present), but a fresh process races — the tools silently vanished on
+    // restart. Register eagerly, then re-attempt when the service appears
+    // (`internal/service`) or the app finishes booting (`ready`); guard so a
+    // late callback never double-registers.
+    const tools = ctx.get('tools')
+    if (tools !== undefined) {
+      for (const tool of makeTools(env)) tools.register(tool)
+    } else {
+      let done = false
+      const registerTools = (): void => {
+        if (done) return
+        const registry = ctx.get('tools')
+        if (registry === undefined) return
+        done = true
+        for (const tool of makeTools(env)) registry.register(tool)
       }
+      ctx.on('internal/service', (name: unknown) => {
+        if (name === 'tools') registerTools()
+      })
     }
-    if (this.config.autoCommand) {
-      const commands = ctx.get('commands')
-      if (commands !== undefined) commands.register(acpCommand(env))
+    const commands = ctx.get('commands')
+    if (commands !== undefined) {
+      commands.register(acpCommand(env))
+    } else {
+      let done = false
+      const registerCommand = (): void => {
+        if (done) return
+        const registry = ctx.get('commands')
+        if (registry === undefined) return
+        done = true
+        registry.register(acpCommand(env))
+      }
+      ctx.on('internal/service', (name: unknown) => {
+        if (name === 'commands') registerCommand()
+      })
     }
     if (this.config.autoNudge) {
       ctx.on('agent/pre-step', async (payload, next) => {

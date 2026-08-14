@@ -114,6 +114,11 @@ export function resolveSurfaceRange(
   if (requestedStartIdx > requestedEndIdx) {
     throw new Error(`billion-context-dsh: reversed range ${start}..${end}`)
   }
+  // Belt-and-braces: the surface can be locally out of order after surface
+  // replacements, so index order alone does not guarantee value order.
+  if (start > end) {
+    throw new Error(`billion-context-dsh: reversed range ${start}..${end}`)
+  }
   // A boundary must be BOTH tool-pairing-balanced AND carry a bare-seq ref.
   const cleanBefore = (index: number): boolean =>
     toolPairingBalancedBefore(session, nodes[index]!) && hasPlainRef(session, nodes[index]!)
@@ -283,6 +288,14 @@ export function buildCompressibleSeqRanges(
     if (event === undefined || protectedSeqs.has(seq) || isCheckpointNode(event)) {
       flush()
       continue
+    }
+    // Surface nodes can be locally out of order after surface replacements in
+    // long sessions; a node with a SMALLER seq than the running segment would
+    // produce a reversed range (e.g. 110295..106762). Break the segment so
+    // ranges always stay start <= end.
+    if (cur !== null && seq < cur.start) {
+      flush()
+      cur = null
     }
     const tokens = defaultCountTokens(extractEventText(event))
     if (cur === null) {
