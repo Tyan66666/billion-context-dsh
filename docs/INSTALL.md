@@ -52,7 +52,21 @@ npm install --prefix ~/.dsh/profiles/web ./billion-context-dsh-0.0.0.tgz
 
 ### 2b. 单模式生效（agent preset 的 `compaction` realm）
 
-放进某个 preset 的 `compaction` isolate realm，并**用本引擎替换该 realm 的 `dsh-compaction-basic`**（见 README 的组合示例）。只对该模式生效，不是全局。此时本引擎的 `compactIfNeeded` 成为该 agent 的自动压缩策略（返回 null = 只 nudge 不自动摘要）。
+放进某个 preset 的 `compaction` isolate realm，并**用本引擎替换该 realm 的 `dsh-compaction-basic`**：先禁用（或删除）realm 内原有的 `dsh-compaction-basic` 行，再插入本引擎——同一 realm 内两个后端同时 provide `ctx.compaction` 会冲突：
+
+```yaml
+# 先禁用 realm 内默认后端（或直接删掉这一行）
+- id: compaction-basic
+  disabled: true
+
+# 再插入本引擎
+- id: compaction-acp
+  name: 'billion-context-dsh'
+  config:
+    modelContextLimit: 128000
+```
+
+只对该模式生效，不是全局。此时本引擎的 `compactIfNeeded` 成为该 agent 的自动压缩策略（返回 null = 只 nudge 不自动摘要）。
 
 ## 3. 重启
 

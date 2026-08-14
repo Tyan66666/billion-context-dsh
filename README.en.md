@@ -74,9 +74,14 @@ That's it. Then add a composition row where a compaction backend is expected —
         modelContextLimit: 128000   # default; the pressure window
 ```
 
-**Per-mode — an agent preset's `compaction` realm.** Mount this engine *instead of* `dsh-compaction-basic` inside the realm:
+**Per-mode — an agent preset's `compaction` realm.** First *disable (or delete) the realm's existing `dsh-compaction-basic` row*, then mount this engine — two backends cannot coexist in the same realm:
 
 ```yaml
+# First disable the realm's default backend (or just delete this row)
+- id: compaction-basic
+  disabled: true
+
+# Then mount this engine
 - id: compaction-acp
   name: 'billion-context-dsh'
   config:

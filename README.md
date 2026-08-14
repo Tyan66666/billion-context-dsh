@@ -73,9 +73,14 @@ npm install billion-context-dsh
         modelContextLimit: 128000   # 默认；压力窗口
 ```
 
-**单模式生效（agent preset 的 `compaction` realm）**。用本引擎*替换*该 realm 内的 `dsh-compaction-basic`：
+**单模式生效（agent preset 的 `compaction` realm）**。先在该 realm 内*禁用（或删除）原有的 `dsh-compaction-basic` 行*，再插入本引擎——同一 realm 内两个后端不能并存：
 
 ```yaml
+# 先禁用 realm 内默认后端（或直接删掉这一行）
+- id: compaction-basic
+  disabled: true
+
+# 再插入本引擎
 - id: compaction-acp
   name: 'billion-context-dsh'
   config:
