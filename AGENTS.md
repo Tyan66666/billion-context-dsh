@@ -65,6 +65,27 @@ npm run build       # tsup (inlines acp-kernel) + tsc --emitDeclarationOnly
 - Add a regression test for every bug fix (see tests/ for the battle-report tests: CJK estimation, stale-range filtering, lone tool expansion, legacy backfill).
 - Keep `@deepseek-ai/*` devDeps on the **0.1.0-rc.6 line** (aligned with `@deepseek-ai/dsh-compaction` peer). Do not mix rc lines.
 
+## 4b. acp-kernel upgrade policy (the kernel WILL move on)
+
+`acp-kernel` is pinned **exactly** (e.g. `0.0.23`, never `^`) because tsup inlines it — a caret range makes the resolved version drift when the lockfile regenerates, breaking reproducible builds. But pinning is **not** freezing: upgrades are a controlled, manual process.
+
+**When to check:** on any feature work, or monthly — `npm view acp-kernel version`.
+
+**Upgrade SOP (each step gates the next):**
+
+1. `npm view acp-kernel versions` — pick the target. Read its changelog / git diff for breaking changes.
+2. Watch these hot spots (kernel changes here have bit us before):
+   - `defaultCountTokens` / tokenizer behavior (CJK estimation, `createBpeTokenizer`) — tests/assert 100 CJK = 100 tokens
+   - `CompressionState` shape (`messageRefs`, blocks) — `state.ts`, `region.ts` read it structurally
+   - ref assignment / `compressibleRanges` — we deliberately self-compute the range table, so drift here is absorbed, but confirm
+   - `CoreMessage` / `NudgeDecision` types — `messages.ts`, `nudge.ts`
+3. Bump the exact version in `package.json`, run `npm install` (refreshes lock), then `npm run typecheck && npm test && npm run build`.
+4. **The test suite is the safety net**: 28 tests cover the battle-hardened behaviors (CJK estimation, lone-tool expansion, surface range table, ledger backfill, ref-tag projection). Any kernel behavior change that breaks one of those turns red here — do NOT release on red.
+5. Optionally enable new kernel features deliberately (e.g. `createBpeTokenizer()` behind a config flag) — never adopt silently.
+6. Release per the workflow below (bump own version, publish, `gh release create`).
+
+If a kernel major version breaks the seam contracts, treat it as a porting task: re-verify against docs/dsh-porting-verification.md before shipping.
+
 ## 5. Release workflow
 
 Pre-flight (ALL must pass): `npm run typecheck && npm test && npm run build`.
