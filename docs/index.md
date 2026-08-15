@@ -1,6 +1,6 @@
 # billion-context-dsh
 
-> **⚠️ Beta notice** — this project (v0.1.7) and the [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) are both in **public beta**: do not use in engineering / production environments.
+> **⚠️ Beta notice** — this project (v0.1.8) and the [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) are both in **public beta**: do not use in engineering / production environments.
 
 **Model-driven context management (Active Context Pruning / ACP) for the DeepSeek Harness.** The model decides *when* and *what* to compress — not a hard limit. Ported from [billion-context-pi](https://github.com/ranxianglei/billion-context-pi) (by [ranxianglei](https://github.com/ranxianglei), MIT); the compression core [acp-kernel](https://github.com/ranxianglei/acp-kernel) is reused verbatim.
 
@@ -19,6 +19,6 @@
 ## 🔗 Quick links
 
 - **Repository**: [github.com/Tyan66666/billion-context-dsh](https://github.com/Tyan66666/billion-context-dsh)
-- **npm**: [billion-context-dsh@0.1.7](https://www.npmjs.com/package/billion-context-dsh)
-- **Releases**: [v0.1.7](https://github.com/Tyan66666/billion-context-dsh/releases/tag/v0.1.7) · [v0.1.6](https://github.com/Tyan66666/billion-context-dsh/releases/tag/v0.1.6) · [v0.1.5](https://github.com/Tyan66666/billion-context-dsh/releases/tag/v0.1.5) · [v0.1.4](https://github.com/Tyan66666/billion-context-dsh/releases/tag/v0.1.4) · [v0.1.3](https://github.com/Tyan66666/billion-context-dsh/releases/tag/v0.1.3) · [v0.1.2](https://github.com/Tyan66666/billion-context-dsh/releases/tag/v0.1.2) · [v0.1.1](https://github.com/Tyan66666/billion-context-dsh/releases/tag/v0.1.1) · [v0.1.0](https://github.com/Tyan66666/billion-context-dsh/releases/tag/v0.1.0)
+- **npm**: [billion-context-dsh@0.1.8](https://www.npmjs.com/package/billion-context-dsh)
+- **Releases**: [v0.1.8](https://github.com/Tyan66666/billion-context-dsh/releases/tag/v0.1.8) · [v0.1.7](https://github.com/Tyan66666/billion-context-dsh/releases/tag/v0.1.7) · [v0.1.6](https://github.com/Tyan66666/billion-context-dsh/releases/tag/v0.1.6) · [v0.1.5](https://github.com/Tyan66666/billion-context-dsh/releases/tag/v0.1.5) · [v0.1.4](https://github.com/Tyan66666/billion-context-dsh/releases/tag/v0.1.4) · [v0.1.3](https://github.com/Tyan66666/billion-context-dsh/releases/tag/v0.1.3) · [v0.1.2](https://github.com/Tyan66666/billion-context-dsh/releases/tag/v0.1.2) · [v0.1.1](https://github.com/Tyan66666/billion-context-dsh/releases/tag/v0.1.1) · [v0.1.0](https://github.com/Tyan66666/billion-context-dsh/releases/tag/v0.1.0)
 - **Upstream**: [billion-context-pi](https://github.com/ranxianglei/billion-context-pi) · [acp-kernel](https://github.com/ranxianglei/acp-kernel) · [opencode-acp](https://github.com/ranxianglei/opencode-acp) · [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)
