@@ -2,7 +2,7 @@
 
 [English](./README.md) · [简体中文](../README.md) · [项目主页](https://github.com/Tyan66666/billion-context-dsh)
 
-> **⚠️ Beta** — this project (v0.2.0) and the [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) are both in **public beta**: do not use in engineering / production environments.
+> **⚠️ Beta** — this project (v0.2.1) and the [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) are both in **public beta**: do not use in engineering / production environments.
 
 Model-driven context management (Active Context Pruning / ACP) for the DeepSeek Harness, ported from [billion-context-pi](https://github.com/ranxianglei/billion-context-pi). The compression core ([acp-kernel](https://github.com/ranxianglei/acp-kernel)) is reused verbatim.
 
@@ -34,6 +34,7 @@ src/
 
 ## 📦 Releases
 
+- [v0.2.1](https://github.com/Tyan66666/billion-context-dsh/releases/tag/v0.2.1) — (feat) align nudge and system-prompt copy with acp-kernel/billion-context-pi (#14): default nudges now render through the kernel's `renderNudgeText` — efficiency-note frame ("not an overflow warning"), context breakdown, HOW_TO_COMPRESS_RULES, tier rules (TIER2/3), and batch tip — with only the ref-ID segments adapted to the surface-seq range table; the emergency tier says "compress now"; the system prompt gains WHEN TO COMPRESS / WHEN NOT TO COMPRESS lists and kernel rule placeholders; `config.prompts` overrides keep the template path (custom copy wins); + 3 regression tests (80 tests pass, no regression)
 - [v0.2.0](https://github.com/Tyan66666/billion-context-dsh/releases/tag/v0.2.0) — (feat) ship a `dsh.bundle` manifest: the package is now installable with `dsh plugin --profile web add billion-context-dsh` (the patch auto-inserts the composition row), which also unlocks listing in the awesome-dsh-plugin registry and the dsh-market plugin store; (chore) add npm keywords for search discoverability; docs: bundle install method in README (zh/en) and INSTALL.md 方式 C; 77 tests pass (no regression)
 - [v0.1.9](https://github.com/Tyan66666/billion-context-dsh/releases/tag/v0.1.9) — (feat) configurable per-stage prompts via `config.prompts` (nudge frames/range table/system prompt/tool descriptions as validated templates; fail-fast on unknown placeholders), (chore) bump acp-kernel 0.0.23 → 0.0.24 (inline-dependency upgrade), docs: update acp-kernel version reference in AGENTS.md; 77 tests pass (no regression)
 - [v0.1.8](https://github.com/Tyan66666/billion-context-dsh/releases/tag/v0.1.8) — (fix) system prompt section cold-start retry: the ACP guidance section is now registered even when the `systemPrompt` service activates after the engine — matches the same retry pattern used by tools and commands; (fix) nudge context pressure now reads from `sessionProjections.contextPressure.projectedTokens` (matches the UI context-occupancy display; includes fixed overhead) instead of `tokenMeter.measure(session).surfaceTokens`; docs: INSTALL.md 2a notes that disabling compaction-basic is redundant on dsh 0.1.0-rc.6+; + 3 regression tests (62 tests)

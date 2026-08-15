@@ -17,9 +17,9 @@ ln -s /Users/yintianan/GitHub/billion-context-dsh ~/.dsh/profiles/web/node_modul
 
 ```bash
 cd /Users/yintianan/GitHub/billion-context-dsh
-npm pack                        # 产出 billion-context-dsh-0.2.0.tgz
+npm pack                        # 产出 billion-context-dsh-0.2.1.tgz
 mkdir -p ~/.dsh/profiles/web/node_modules
-npm install --prefix ~/.dsh/profiles/web ./billion-context-dsh-0.2.0.tgz
+npm install --prefix ~/.dsh/profiles/web ./billion-context-dsh-0.2.1.tgz
 ```
 
 ### 方式 C：bundle 安装（v0.2.0+，`dsh plugin` 一键装）
@@ -146,7 +146,7 @@ cd /Users/yintianan/GitHub/billion-context-dsh
 npm run typecheck && npm test && npm run build
 ```
 
-77 个测试覆盖：seam 挂载、窗口探测、CJK 感知 token 估算、消息投影、压缩事务（事件序列 + surface 遮蔽）、日志重建账本、四工具端到端、nudge 注入/去重/紧急绕过、可配置提示词模板与校验。
+80 个测试覆盖：seam 挂载、窗口探测、CJK 感知 token 估算、消息投影、压缩事务（事件序列 + surface 遮蔽）、日志重建账本、四工具端到端、nudge 注入/去重/紧急绕过、可配置提示词模板与校验。
 
 ## 6. 回滚
 
