@@ -100,8 +100,9 @@ test('M4/prompts 1: default system prompt contains key sections in correct order
 
 test('M4/prompts 2: default normal nudge — efficiency note + HOW_TO_COMPRESS_RULES + tip', () => {
   const text = buildNudgeText(fakeDecision(7, false), false, buildTextSession(4))
-  // Frame: efficiency note with philosophy embedded
-  assert.ok(text.startsWith('Context usage is at 7%. This is an efficiency nudge to compress early and keep context lean — not an overflow warning.'), 'frame starts with efficiency note')
+  // Frame: kernel EFFICIENCY_NOTE verbatim (no "Context usage is at X%" statement)
+  assert.ok(text.startsWith('This is an efficiency nudge to compress early and keep context lean — not an overflow warning.'), 'frame starts with efficiency note')
+  assert.ok(!text.includes('Context usage is at'), 'no "Context usage is at" usage statement in the nudge')
   assert.ok(text.includes('Compression Philosophy:\n- All compression serves the primary task'), 'philosophy embedded in frame')
   // No "suggestion, not a requirement"
   assert.ok(!text.includes('suggestion, not a requirement'), 'no "suggestion, not a requirement"')
@@ -197,7 +198,7 @@ test('M4/prompts 10: empty guidance removes the line cleanly (frame + newline + 
       tip: '',
     },
   })
-  const frame = 'Context usage is at 7%. This is an efficiency nudge to compress early and keep context lean — not an overflow warning. A separate, stronger alert will appear if the context is actually full.\n\nCompression Philosophy:\n- All compression serves the primary task, but be frugal.\n- Context capacity is precious. Save context by compressing consumed outputs, not by avoiding tools.\n- Compress by need, not by percentage.\n- Work from summaries, not raw tool outputs. All listed ranges (user prompts, tool outputs, code, logs, exploration, intermediate steps) should be compressed to summary format — the ONLY exceptions are protected content, content the current step is actively using, or critical content you cannot reconstruct.'
+  const frame = 'This is an efficiency nudge to compress early and keep context lean — not an overflow warning. A separate, stronger alert will appear if the context is actually full.\n\nCompression Philosophy:\n- All compression serves the primary task, but be frugal.\n- Context capacity is precious. Save context by compressing consumed outputs, not by avoiding tools.\n- Compress by need, not by percentage.\n- Work from summaries, not raw tool outputs. All listed ranges (user prompts, tool outputs, code, logs, exploration, intermediate steps) should be compressed to summary format — the ONLY exceptions are protected content, content the current step is actively using, or critical content you cannot reconstruct.'
   const text = buildNudgeText(fakeDecision(7, false), false, session, prompts)
   assert.equal(text, `${frame}\n${rangeTable(session)}`)
   assert.ok(!text.includes('HOW TO COMPRESS'))

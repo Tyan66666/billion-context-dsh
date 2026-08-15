@@ -188,7 +188,9 @@ export function renderSystemPrompt(prompts: ResolvedPrompts): string {
  */
 export const DEFAULT_PROMPTS: ResolvedPrompts = {
   nudge: {
-    normal: 'Context usage is at {pct}%. This is an efficiency nudge to compress early and keep context lean — not an overflow warning. A separate, stronger alert will appear if the context is actually full.\n\n{philosophy}',
+    // 与 kernel nudge-text.ts EFFICIENCY_NOTE 逐字对齐——不含 "Context usage is at X%"
+    // 陈述(usage 只通过 breakdown 传达);{pct} 仍可用作自定义占位符。
+    normal: 'This is an efficiency nudge to compress early and keep context lean — not an overflow warning. A separate, stronger alert will appear if the context is actually full.\n\n{philosophy}',
     emergency: '⚠️ Context limit reached — compress now. Prioritize consumed tool outputs.\n\n{philosophy}',
     guidance: HOW_TO_COMPRESS_RULES,
     tier: 'Tier {tier}: {count} tier-{prevTier} block(s) distillable ({tokens} tokens) — compress their summary node(s) [seqs {seqs}] to reclaim the original messages.',

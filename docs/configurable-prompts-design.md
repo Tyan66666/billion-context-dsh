@@ -53,7 +53,7 @@ billion-context-dsh 目前所有"模型可见"的提示词文本都是硬编码�
 
 | # | 阶段 | 当前位置 | 内容 | 可用占位符 |
 |---|---|---|---|---|
-| P1 | nudge 普通档首句 | `src/prompts.ts`(DEFAULT_PROMPTS.nudge.normal) | "Context usage is at X%. This is an efficiency nudge to compress early and keep context lean — not an overflow warning. …"(内嵌 philosophy) | `{pct}` `{philosophy}` |
+| P1 | nudge 普通档首句 | `src/prompts.ts`(DEFAULT_PROMPTS.nudge.normal) | kernel `EFFICIENCY_NOTE` 逐字——"This is an efficiency nudge to compress early and keep context lean — not an overflow warning. …"(内嵌 philosophy;**不含 "Context usage is at X%" 陈述**,usage 只通过 breakdown 传达) | `{pct}` `{philosophy}` |
 | P2 | nudge 紧急档首句 | `src/prompts.ts`(DEFAULT_PROMPTS.nudge.emergency) | "⚠️ Context limit reached — compress now. Prioritize consumed tool outputs."(内嵌 philosophy) | `{pct}` `{philosophy}` |
 | P3 | nudge 指导行 | `src/prompts.ts`(DEFAULT_PROMPTS.nudge.guidance) | kernel `HOW_TO_COMPRESS_RULES` 全文(KEEP/DROP/PRIORITY/格式) | 无 |
 | P4 | nudge tier 蒸馏行 | `src/nudge.ts`(buildNudgeText) | "Tier 2: 1 tier-1 block(s) distillable (4750 tokens) — compress their summary node(s) [seqs …]…" | `{tier} {count} {prevTier} {tokens} {seqs}` |
@@ -243,7 +243,7 @@ nudge 装配(v5,对齐 kernel renderNudgeText 的顺序):
 
 ```ts
 nudge: {
-  normal:    'Context usage is at {pct}%. This is an efficiency nudge to compress early and keep context lean — not an overflow warning. A separate, stronger alert will appear if the context is actually full.\n\n{philosophy}',
+  normal:    'This is an efficiency nudge to compress early and keep context lean — not an overflow warning. A separate, stronger alert will appear if the context is actually full.\n\n{philosophy}',
   emergency: '⚠️ Context limit reached — compress now. Prioritize consumed tool outputs.\n\n{philosophy}',
   guidance:  HOW_TO_COMPRESS_RULES,   // kernel 导入,见 acp-kernel/src/compression-rules.ts
   tier:      'Tier {tier}: {count} tier-{prevTier} block(s) distillable ({tokens} tokens) — compress their summary node(s) [seqs {seqs}] to reclaim the original messages.',

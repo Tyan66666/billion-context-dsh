@@ -83,7 +83,7 @@ That's it. Then add a composition row where a compaction backend is expected —
         modelContextLimit: 128000
         prompts:
           nudge:
-            normal: 'Context usage is at {pct}%. This is an efficiency nudge to compress early and keep context lean.'  # custom nudge opener
+            normal: 'This is an efficiency nudge to compress early and keep context lean.'  # custom nudge opener
           tools:
             acpStatus: 'Report the ACP block ledger: compressed blocks, reclaimed tokens, and current context pressure.'  # custom tool description
 ```
@@ -190,6 +190,7 @@ src/
 ├── nudge.ts        # M4: kernel pressure decision → injected advisory nudge
 ├── system-prompt.ts# M4: one-time ACP guidance section (keeps nudges short)
 ├── config.ts       # kernel config assembly (thresholds + coreOverrides)
+├── window.ts       # auto context-window detection (LLM runtime probe, fallback 128000)
 └── commands.ts     # M4: /acp slash command
 ```
 
