@@ -76,6 +76,20 @@ That's it. Then add a composition row where a compaction backend is expected —
         modelContextLimit: 128000   # optional; omit to auto-detect the model's real window (fallback 128000)
 ```
 
+**(Optional) Custom prompt copy — `config.prompts`.** Every model-visible prompt (normal/emergency nudge opener, tier line, range table, the ACP system-prompt section, the four tool descriptions) ships with built-in copy that you can override per slot through the composition row's `config`. Templates support named placeholders (e.g. `{pct}` for nudges, `{surface}` for the range table) and are **validated at construction**: a misspelled placeholder fails engine startup (fail-fast) instead of leaking a literal `{pct}` into the model context:
+
+```yaml
+      config:
+        modelContextLimit: 128000
+        prompts:
+          nudge:
+            normal: 'Context usage is at {pct}%. This is a suggestion, not a requirement — you decide.'  # custom nudge opener
+          tools:
+            acpStatus: 'Report the ACP block ledger: compressed blocks, reclaimed tokens, and current context pressure.'  # custom tool description
+```
+
+See [docs/configurable-prompts-design.md](docs/configurable-prompts-design.md) for the full slot list, per-slot placeholders, and the empty-string/`null` semantics. Deployments that omit `prompts` behave exactly as before (default copy byte-identical).
+
 **Per-mode — an agent preset's `compaction` realm.** First *disable (or delete) the realm's existing `dsh-compaction-basic` row*, then mount this engine — two backends cannot coexist in the same realm:
 
 ```yaml
@@ -151,6 +165,7 @@ This project reuses `acp-kernel`'s compression core and `billion-context-pi`'s d
 | `autoTools` | `true` | Register the four model tools on `ctx.tools` |
 | `autoCommand` | `true` | Register the `/acp` command on `ctx.commands` |
 | `autoNudge` | `true` | Inject the nudge into `agent/pre-step` |
+| `prompts` | — | (optional) Custom prompt copy: per-slot overrides for nudge / range table / system prompt / tool descriptions (template + named placeholders, validated at construction; see “Custom prompt copy” above and [docs/configurable-prompts-design.md](docs/configurable-prompts-design.md)) |
 
 ## Development
 

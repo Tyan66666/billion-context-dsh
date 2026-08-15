@@ -78,6 +78,20 @@ npm install billion-context-dsh
         modelContextLimit: 128000   # 可选；省略时自动探测模型真实窗口（回退 128000）
 ```
 
+**（可选）自定义提示词文案 —— `config.prompts`。** 所有模型可见的提示词（普通/紧急 nudge 首句、tier 蒸馏行、范围表、ACP system prompt 段、四个工具描述）默认是内置文案，可通过组合行的 `config` 按槽位覆盖。模板支持命名占位符（如 nudge 的 `{pct}`、范围表的 `{surface}`），**构造期校验**：占位符拼写错误会在引擎启动时抛错（fail-fast），而不是把字面 `{pct}` 漏进模型上下文：
+
+```yaml
+      config:
+        modelContextLimit: 128000
+        prompts:
+          nudge:
+            normal: '上下文使用率 {pct}%。这是建议而非命令——由你决定是否压缩。'  # 中文 nudge 首句
+          tools:
+            acpStatus: '报告 ACP 块账本：压缩块数、回收 token、当前上下文压力。'  # 自定义工具描述
+```
+
+可配置槽位清单、每槽可用占位符、空串/`null` 语义见 [docs/configurable-prompts-design.md](docs/configurable-prompts-design.md)。未配置 `prompts` 的部署行为与以往完全一致（默认文案逐字节不变）。
+
 **单模式生效（agent preset 的 `compaction` realm）**。先在该 realm 内*禁用（或删除）原有的 `dsh-compaction-basic` 行*，再插入本引擎——同一 realm 内两个后端不能并存：
 
 ```yaml
@@ -153,6 +167,7 @@ DSH 的每个模型请求都派生自其 append-only 会话日志（*surface*）
 | `autoTools` | `true` | 在 `ctx.tools` 注册四个模型工具 |
 | `autoCommand` | `true` | 在 `ctx.commands` 注册 `/acp` 命令 |
 | `autoNudge` | `true` | 当内核建议时向 `agent/pre-step` 注入 nudge |
+| `prompts` | — | （可选）自定义提示词文案：nudge / 范围表 / system prompt / 工具描述按槽位覆盖（模板 + 命名占位符，构造期校验；见上文「自定义提示词文案」与 [docs/configurable-prompts-design.md](docs/configurable-prompts-design.md)） |
 
 ## 开发
 

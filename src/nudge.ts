@@ -18,11 +18,14 @@ import { AcpStateStore } from './state.ts'
 import { allLogMessages, eventsToCoreMessages, surfaceEventsOf } from './messages.ts'
 import { buildCompressibleSeqRanges, findOpenTurn, summarySeqOfKernelBlock, surfaceSummary } from './region.ts'
 import { kernelConfigFor, type KernelConfigInput } from './config.ts'
+import { DEFAULT_RESOLVED, renderTemplate, type ResolvedPrompts } from './prompts.ts'
 
 /** Kernel inputs the nudge path shares with the compress tool. */
 export interface NudgeEnvironment extends KernelConfigInput {
   readonly kernel: CompressionCore
   readonly store: AcpStateStore
+  /** Resolved prompt templates (optional: falls back to DEFAULT_RESOLVED). */
+  readonly prompts?: ResolvedPrompts
 }
 
 export interface NudgeOutcome {
@@ -67,17 +70,28 @@ export function resolveTokenCount(agent: Agent, coreMessages: CoreMessage[]): nu
  * Computed directly from the surface (not the kernel's ref map, which can
  * drift and hide large tool results) — see buildCompressibleSeqRanges.
  */
-export function rangeTable(session: import('@deepseek-ai/dsh-session').Session): string {
+export function rangeTable(
+  session: import('@deepseek-ai/dsh-session').Session,
+  prompts: ResolvedPrompts = DEFAULT_RESOLVED,
+): string {
   const ranges = buildCompressibleSeqRanges(session).slice(0, 6)
+  // 零范围:整块省略(保留现状的提前返回与 nudge 尾部 '\n')。
   if (ranges.length === 0) return ''
-  const lines = ranges.map((range) => `  - seq ${range.start}..${range.end} — ${range.count} messages, ~${range.tokens} tokens`)
+  const lines = ranges.map((range) =>
+    renderTemplate(prompts.rangeTable.line, {
+      start: range.start,
+      end: range.end,
+      count: range.count,
+      tokens: range.tokens,
+    }),
+  )
   return [
+    // 前导空串元素产生 nudge 中范围表前的唯一空行(§4:parts 层不再加分隔)。
     '',
-    `Surface: ${surfaceSummary(session)}`,
-    'Compressible ranges (suggestions only — compress any consumed span; refs are surface seqs):',
+    renderTemplate(prompts.rangeTable.header, { surface: surfaceSummary(session) }),
+    renderTemplate(prompts.rangeTable.title, { count: ranges.length }),
     ...lines,
-    'Compress with: compress({ content: [{ startSeq, endSeq, summary }] }) — content is an array: batch multiple unrelated segments in one call, each entry its own block. Keep ranges disjoint.',
-    'Snapshot taken at nudge time: the seqs go stale once the surface moves (a later compress shadows them), so re-run acp_status for fresh refs before compressing.',
+    prompts.rangeTable.footer,
   ].join('\n')
 }
 
@@ -124,7 +138,7 @@ export function buildNudge(
   if (alreadyShown) return null
   lastNudgeTurn.set(session.id, turnNumber)
 
-  const text = buildNudgeText(nudge, emergency, session)
+  const text = buildNudgeText(nudge, emergency, session, env.prompts)
   const message = createUserMessage({
     content: [{ type: 'text', text }],
     source: { kind: 'plugin', plugin: 'acp-nudge' },
@@ -141,15 +155,19 @@ export function buildNudgeText(
   nudge: NudgeDecision,
   emergency: boolean,
   session: import('@deepseek-ai/dsh-session').Session,
+  prompts: ResolvedPrompts = DEFAULT_RESOLVED,
 ): string {
   // Cap the reported percentage at 100: a broken measurement (e.g. response
   // pressure folded in) must never surface as an absurd "230%" to the model.
   const pct = Math.round(Math.min(nudge.contextUsage, 1) * 100)
-  const frame = emergency
-    ? `⚠️ Context usage is at ${pct}% of the window — nearly full. Consider compressing consumed ranges soon so working context stays available; the choice and timing are yours.`
-    : `Context usage is at ${pct}%. This is a suggestion, not a requirement — you decide whether and when to compress.`
-  const guidance = 'Compress by need, not by percentage: replace only ranges you have genuinely consumed, with dense self-contained summaries.'
-  const parts = [frame, '', guidance]
+  const frame = renderTemplate(
+    emergency ? prompts.nudge.emergency : prompts.nudge.normal,
+    { pct },
+  )
+  // §4 装配规则(逐字节复现现状):frame → guidance(带空行分隔)→ tier(紧跟单换行)
+  // → 范围表(无条件 push,零范围 '' 也 push,保留尾部 '\n')。
+  const parts: string[] = [frame]
+  if (prompts.nudge.guidance !== '') parts.push('', prompts.nudge.guidance)
   if ((nudge.tier === 2 || nudge.tier === 3) && (nudge.tierTargetBlocks?.length ?? 0) > 0) {
     const targets = nudge.tierTargetBlocks!
     const summarySeqs = targets
@@ -157,10 +175,16 @@ export function buildNudgeText(
       .filter((seq): seq is number => seq !== null)
     const pending = nudge.tier === 2 ? nudge.breakdown?.pendingT2 : nudge.breakdown?.pendingT3
     const tokens = typeof pending === 'number' ? pending : 0
-    parts.push(
-      `Tier ${nudge.tier}: ${targets.length} tier-${nudge.tier - 1} block(s) distillable (${tokens} tokens) — compress their summary node(s) [seqs ${summarySeqs.join(', ')}] to reclaim the original messages.`,
-    )
+    const tierLine = renderTemplate(prompts.nudge.tier, {
+      tier: nudge.tier,
+      count: targets.length,
+      prevTier: nudge.tier - 1,
+      tokens,
+      seqs: summarySeqs.join(', '),
+    })
+    // tier 空串 = 删除该行(W1):默认模板恒渲染非空,对默认字节零影响。
+    if (tierLine !== '') parts.push(tierLine)
   }
-  parts.push(rangeTable(session))
+  parts.push(rangeTable(session, prompts))
   return parts.join('\n')
 }

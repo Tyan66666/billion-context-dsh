@@ -212,6 +212,8 @@ nudge 装配(精确复现现状 src/nudge.ts:125-138):
 ## 5. 默认值(DEFAULT_PROMPTS)—— 从现有源码逐字搬迁
 
 > 硬约束:以下默认模板渲染结果必须与当前源码输出**逐字节相同**;现有测试(`tests/nudge.test.ts` 断言 `/Tier 2: 1 tier-1 block\(s\) distillable \(4750 tokens\)/`、`/Surface: 12 nodes, seqs 1\.\.12/` 等)全部保持绿色。
+>
+> **实现时与 main v0.1.8 对齐**:本设计定稿于 main v0.1.7 时代,实现 rebase 到 v0.1.8 后,默认文案已同步 main 的新增内容——范围表 footer 追加 stale-seq 提示行(提交 `ea1de6a`)、compress 工具描述追加 stale-remap 句(同提交)、system prompt 的 compress/acp_status 描述行更新(同提交)。下方示例即实现 `DEFAULT_PROMPTS` 的逐字内容。
 
 ### 5.1 nudge
 
@@ -241,7 +243,8 @@ rangeTable: {
   header: 'Surface: {surface}',
   title:  'Compressible ranges (suggestions only — compress any consumed span; refs are surface seqs):',
   line:   '  - seq {start}..{end} — {count} messages, ~{tokens} tokens',
-  footer: 'Compress with: compress({ content: [{ startSeq, endSeq, summary }] }) — content is an array: batch multiple unrelated segments in one call, each entry its own block. Keep ranges disjoint.',
+  footer: 'Compress with: compress({ content: [{ startSeq, endSeq, summary }] }) — content is an array: batch multiple unrelated segments in one call, each entry its own block. Keep ranges disjoint.\n'
+    + 'Snapshot taken at nudge time: the seqs go stale once the surface moves (a later compress shadows them), so re-run acp_status for fresh refs before compressing.',
 }
 ```
 
@@ -273,7 +276,7 @@ systemPromptTemplate:
 
 ```ts
 tools: {
-  compress:      'Replace older conversation ranges with dense summaries you write. Each message seq is a surface reference. Single range: compress({ content: [{ startSeq, endSeq, summary }] }). Batch multiple unrelated ranges in one call (each content entry becomes its own block); keep ranges disjoint. Never compress content the current step is actively using.',
+  compress:      'Replace older conversation ranges with dense summaries you write. Each message seq is a surface reference. Single range: compress({ content: [{ startSeq, endSeq, summary }] }). Batch multiple unrelated ranges in one call (each content entry becomes its own block); keep ranges disjoint. Never compress content the current step is actively using. Seq refs must come from the CURRENT surface (acp_status or the latest nudge): a span whose edges were shadowed by an earlier compress is auto-remapped to its still-live content, a fully compressed span is reported as already compressed, and invented/other-session seqs fail with guidance.',
   decompress:    'Recover the original content of a compressed block by its blockId (read-only; does not unshadow the range).',
   searchContext: 'Search inside compressed blocks (summaries and original content) for information the model no longer sees in context.',
   acpStatus:     'Report the ACP block ledger: compressed blocks, reclaimed tokens, and current context pressure.',
@@ -303,6 +306,8 @@ tools: {
 - 未配置 `prompts` 的部署:行为与现在完全相同(默认模板渲染 = 现文案)。
 
 ## 8. 测试计划(新增 13 条 + 现有 54 条回归)
+
+> **实现落地**:新增 **15 条**(13 条单元对应下编 #1–#13,另加 2 条引擎级接线)——#14 用 `ctx.provide` 伪造 `systemPrompt`/`tools` + `agent/pre-step` waterfall 验证自定义文案进入注入消息、段落注册恰一次、工具描述自定义;#15 验证引擎构造器对未知占位符同步抛错(fail-fast)、组级 null 容忍。对应提交 `5fff5ae` / `832cbc4`。
 
 > **快照原则(I3/I4):** 所有"逐字节回归"断言用**硬编码在测试里的字面量**(实现改造前抄下来的当前输出),与实现分离——测试与实现不同源,改造引入的字节差异(em-dash、⚠️、尾部空格、换行)都会被抓住。不依赖"改造后的 ACP_SYSTEM_PROMPT 导出"作比较(那是循环论证)。
 
