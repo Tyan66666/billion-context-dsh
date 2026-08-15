@@ -1,0 +1,11 @@
+# dsh bundle patch: inserts the ACP compaction backend into a profile's layer stack.
+#
+# This is what makes the package installable via `dsh plugin --profile web add
+# billion-context-dsh` (declared in package.json as `dsh.bundle.patch`). The row
+# below is exactly the manual composition row documented in docs/INSTALL.md (§2a),
+# minus config: omitting `modelContextLimit` means auto-detection (fallback 128000),
+# and the built-in prompt copy (config.prompts) is used. Users who want custom
+# config can still write the row by hand in their profile patch.
+- insert:
+    - id: compaction-acp
+      name: 'billion-context-dsh'

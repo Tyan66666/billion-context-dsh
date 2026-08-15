@@ -1,7 +1,19 @@
 {
 	"name": "billion-context-dsh",
-	"version": "0.1.9",
+	"version": "0.2.0",
 	"description": "Active Context Pruning (ACP) for the DeepSeek Harness — model-driven context management as a CompactionEngine backend.",
+	"keywords": [
+		"deepseek",
+		"harness",
+		"dsh",
+		"dsh-plugin",
+		"acp",
+		"context-management",
+		"context-compression",
+		"llm",
+		"agent",
+		"compaction"
+	],
 	"type": "module",
 	"main": "dist/index.js",
 	"types": "dist/index.d.ts",
@@ -13,11 +25,17 @@
 	},
 	"files": [
 		"dist",
+		"cordis.patch.yml",
 		"README.md",
 		"README.en.md",
 		"LICENSE"
 	],
 	"sideEffects": false,
+	"dsh": {
+		"bundle": {
+			"patch": "./cordis.patch.yml"
+		}
+	},
 	"license": "MIT",
 	"engines": {
 		"node": ">=20"

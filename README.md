@@ -3,7 +3,7 @@
 [中文](./README.md) | [English](./README.en.md)
 
 > **⚠️ 测试版声明——请勿用于生产环境**
-> 本项目（**v0.1.9**）仍处于开发中的测试版。[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 本身也处于**公开测试版**阶段。**请勿将两者用于工程化 / 生产环境**——预期会有破坏性变更与粗糙之处。
+> 本项目（**v0.2.0**）仍处于开发中的测试版。[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 本身也处于**公开测试版**阶段。**请勿将两者用于工程化 / 生产环境**——预期会有破坏性变更与粗糙之处。
 
 <p align="center">
 <strong>衷心感谢以下项目——请给它们一个 ⭐：</strong>
@@ -58,6 +58,17 @@
 ```bash
 npm install billion-context-dsh
 ```
+
+> 💡 **v0.2.0 起支持 `dsh plugin` 一键安装（bundle）**。包已声明 `dsh.bundle`
+> manifest，DSH 的插件命令会把它装进 profile 并自动应用补丁（等价于下面的组合行）：
+
+```bash
+dsh plugin --profile web add billion-context-dsh
+```
+
+装完重启 `dsh`（bundle 层在启动时组合）。需要自定义 `config`（如
+`modelContextLimit` / `prompts`）时仍建议手写组合行——bundle 补丁
+（[cordis.patch.yml](cordis.patch.yml)）只插入无 `config` 的默认行。
 
 就这样。然后在需要压缩后端的位置加组合配置——两种范围，按需选择：
 
