@@ -1,57 +1,55 @@
 # Contributing — billion-context-dsh
 
-> 完整开发规范见 [AGENTS.md](AGENTS.md)（最高优先级）。本文只讲协作流程。
+> The full development specification lives in [AGENTS.md](AGENTS.md) (highest priority). This file covers the collaboration workflow only.
 
-## 开发准备
+## Getting started
 
 ```bash
 npm install
-npm run typecheck   # 严格 TS 检查
-npm test            # 单元测试（node --import tsx --test）
-npm run build       # tsup 打包
+npm run typecheck   # strict TypeScript check
+npm test            # unit tests (node --import tsx --test)
+npm run build       # tsup bundle
 ```
 
-- 不用 `as any` / `@ts-ignore`，测试用 ESM 静态导入。
-- **每个 bug 修复都要带回归测试**（AGENTS.md §4）。
-- `acp-kernel` 升级走 AGENTS.md §4b 的手动 SOP，不要自行改版本号。
+- No `as any`, no `@ts-ignore`; tests use ESM static imports.
+- Every bug fix ships with a regression test (AGENTS.md §4).
+- `acp-kernel` upgrades follow the manual SOP in AGENTS.md §4b — don't bump the version yourself.
 
-## 提交规范（Commit Convention）
+## Commit convention
 
-主分支只接受 **squash 合并**：合并进 main 的提交信息 = **PR 标题**，必须符合下面的格式。
-**PR 内部的提交不做任何约束**（你们自己定），最终 squash 时以 PR 标题为准。
+`main` only accepts **squash merges**: the commit landed on main IS the **PR title**, which must match one of the formats below. **Commits inside a PR are intentionally unconstrained** — the squash subject is what matters.
 
-| 类型 | 格式 | 用途 |
+| Kind | Format | Use |
 |---|---|---|
-| 功能 | `(feat) <summary>` | 新功能（如 `(feat) tier-2/3 block distillation — …`） |
-| 修复 | `(fix) <summary>` | bug 修复 |
-| 重构 | `(refactor) <summary>` | 内部结构调整，不改行为 |
-| 测试 | `(test) <summary>` | 只改测试 |
-| 工具 | `(chore) <summary>` | CI / 依赖 / 脚本等流程性改动 |
-| 文档 | `docs: <summary>` | 只改 README / docs/ / AGENTS.md |
-| 发布 | `release vX.Y.Z` | 发布提交（严格按 AGENTS.md §5） |
+| Feature | `(feat) <summary>` | new functionality (e.g. `(feat) tier-2/3 block distillation — …`) |
+| Fix | `(fix) <summary>` | bug fixes |
+| Refactor | `(refactor) <summary>` | internal restructuring, no behavior change |
+| Test | `(test) <summary>` | tests only |
+| Chore | `(chore) <summary>` | tooling / process (CI, deps, scripts) |
+| Docs | `docs: <summary>` | docs only (README / docs/ / AGENTS.md) |
+| Release | `release vX.Y.Z` | the release commit (strictly per AGENTS.md §5) |
 
-`<summary>` 用一句话描述，信息要有用，结尾不带句号。
+`<summary>` is a single informative sentence without a trailing period.
 
-PR 标题由 CI 强制校验（`.github/workflows/pr-lint.yml`，规则在 `scripts/check-pr-title.mjs`），
-标题不合格 PR 无法合并。
+PR titles are enforced by CI (`.github/workflows/pr-lint.yml`, rule in `scripts/check-pr-title.mjs`); a PR whose title doesn't match cannot be merged.
 
-## 提 PR 的流程
+## Opening a PR
 
-1. 从 `main` 切一个分支（`git switch -c <your-branch> main`）。
-2. 在分支里提交（内部随便怎么写）。
-3. 打开 PR，**标题**按上面的规范写——它会成为合并到 main 的提交信息。
-4. CI 必须全绿：`ci`（typecheck + test + build）+ `pr-title`（标题校验），这是合并前置条件。
-5. 合并由**人工**执行。AGENTS.md §5：PR 合并永远由人来点，Agent 禁止合并任何 PR。
+1. Branch off `main` (`git switch -c <your-branch> main`).
+2. Commit freely inside the branch.
+3. Open the PR with a **title** following the convention above — it becomes the main-branch commit message.
+4. CI must be green: `ci` (typecheck + test + build) and `pr-title` (title check) are required to merge.
+5. Merging is **human-only**. Per AGENTS.md §5, an Agent must never merge any PR.
 
-## 主分支保护（已启用）
+## Branch protection on main (enabled)
 
-`main` 已启用分支保护：
+`main` is branch-protected:
 
-- 禁止直接 push，只能通过 PR 合并；
-- 要求 PR 通过 CI（`ci`）与标题校验（`pr-title`）两个状态检查；
-- 禁止 force push、禁止删除分支；
-- 不要求 reviewer 批准（单人维护时作者无法批准自己的 PR）。
+- Direct pushes are blocked; all changes land via PRs;
+- PRs must pass the `ci` and `pr-title` status checks;
+- Force pushes and branch deletion are disabled;
+- No reviewer approval required (solo maintainer can't approve their own PR).
 
-## 发布流程
+## Releasing
 
-见 AGENTS.md §5：`npm version` 升版本 → 同步文档版本号 → `npm publish` → `release vX.Y.Z` 提交 → `gh release create` → Pages 自动重建。
+See AGENTS.md §5: `npm version` bump → sync version refs in docs → `npm publish` → `release vX.Y.Z` commit → `gh release create` → Pages rebuilds automatically.
