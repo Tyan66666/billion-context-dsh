@@ -30,12 +30,15 @@ import {
   type ResolvedSurfaceRange,
 } from './region.ts'
 import { allLogMessages, eventsToCoreMessages, extractEventText, surfaceEventsOf } from './messages.ts'
+import { DEFAULT_RESOLVED, type ResolvedPrompts } from './prompts.ts'
 
 export interface ToolEnvironment extends KernelConfigInput {
   readonly kernel: CompressionCore
   readonly store: AcpStateStore
   /** Resolve the effective context window for an agent (optional: status falls back to modelContextLimit). */
   readonly windowFor?: (agent: Agent) => Promise<AcpWindow>
+  /** Resolved prompt templates (optional: falls back to DEFAULT_RESOLVED). */
+  readonly prompts?: ResolvedPrompts
 }
 
 interface TextOutput {
@@ -396,17 +399,11 @@ async function handleStatus(env: ToolEnvironment, _args: StatusArgs, exec: ToolR
 
 /** Build the four ACP model tools bound to one engine. */
 export function makeTools(env: ToolEnvironment): ToolDefinition[] {
+  const prompts = env.prompts ?? DEFAULT_RESOLVED
   return [
     defineTool({
       name: 'compress',
-      description:
-        'Replace older conversation ranges with dense summaries you write. '
-        + 'Each message seq is a surface reference. Single range: compress({ content: [{ startSeq, endSeq, summary }] }). '
-        + 'Batch multiple unrelated ranges in one call (each content entry becomes its own block); keep ranges disjoint. '
-        + 'Never compress content the current step is actively using. '
-        + 'Seq refs must come from the CURRENT surface (acp_status or the latest nudge): a span whose edges were shadowed '
-        + 'by an earlier compress is auto-remapped to its still-live content, a fully compressed span is reported as '
-        + 'already compressed, and invented/other-session seqs fail with guidance.',
+      description: prompts.tools.compress,
       parameters: compressParameters,
       output: textOutput(),
       async execute(args, exec) {
@@ -415,7 +412,7 @@ export function makeTools(env: ToolEnvironment): ToolDefinition[] {
     }),
     defineTool({
       name: 'decompress',
-      description: 'Recover the original content of a compressed block by its blockId (read-only; does not unshadow the range).',
+      description: prompts.tools.decompress,
       parameters: decompressParameters,
       output: textOutput(),
       execute(args, exec) {
@@ -424,7 +421,7 @@ export function makeTools(env: ToolEnvironment): ToolDefinition[] {
     }),
     defineTool({
       name: 'search_context',
-      description: 'Search inside compressed blocks (summaries and original content) for information the model no longer sees in context.',
+      description: prompts.tools.searchContext,
       parameters: searchParameters,
       output: textOutput(),
       execute(args, exec) {
@@ -433,7 +430,7 @@ export function makeTools(env: ToolEnvironment): ToolDefinition[] {
     }),
     defineTool({
       name: 'acp_status',
-      description: 'Report the ACP block ledger: compressed blocks, reclaimed tokens, and current context pressure.',
+      description: prompts.tools.acpStatus,
       parameters: statusParameters,
       output: textOutput(),
       execute(args, exec) {

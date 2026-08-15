@@ -29,6 +29,7 @@ src/
 ├── tools.ts        # M3: compress / decompress / search_context / acp_status
 ├── nudge.ts        # M4: advisory nudge (surface-computed range table)
 ├── system-prompt.ts# M4: one-time ACP guidance section
+├── prompts.ts      # M4: configurable prompt templates + render/validate (config.prompts)
 ├── config.ts       # kernel config assembly (thresholds + coreOverrides)
 └── commands.ts     # M4: /acp slash command
 ```
@@ -66,6 +67,8 @@ npm run build       # tsup (inlines acp-kernel) + tsc --emitDeclarationOnly
 - Add a regression test for every bug fix (see tests/ for the battle-report tests: CJK estimation, stale-range filtering, lone tool expansion, legacy backfill).
 - Keep `@deepseek-ai/*` devDeps on the **0.1.0-rc.6 line** (aligned with `@deepseek-ai/dsh-compaction` peer). Do not mix rc lines.
 - **Git worktrees MUST be created inside `worktrees/`** in the project root (e.g. `git worktree add worktrees/<branch> <branch>`). The `worktrees/` directory is gitignored and never pushed. Never create worktrees outside the project.
+- **Docs must stay in sync with every PR** — before opening a PR, review the diff against the documentation: any behavior the change alters must match what the docs describe, and docs that state the old behavior must be updated in the same PR. A PR that changes behavior without touching docs is incomplete.
+- **Feature work MUST document itself** — every feature (any behavior addition or change) must add an explanation of the new capability in the relevant docs: user-facing config/options in `README.md` / `README.en.md`, install-time composition options in `docs/INSTALL.md`, design decisions in `docs/*-design.md`, and the module map / hard-won rules in `AGENTS.md` itself. Precedent: the `config.prompts` feature shipped its README section, INSTALL note, config table row, and design doc in the same PR.
 
 ### Commit messages
 

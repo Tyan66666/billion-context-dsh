@@ -49,6 +49,15 @@ npm install --prefix ~/.dsh/profiles/web ./billion-context-dsh-0.0.0.tgz
         # 显式配置则优先且跳过探测。分母配小（如百万窗口模型配 128K）
         # 会让使用率虚高 8 倍、nudge 过频。growth 触发阈值（50000）不随此值变化。
         modelContextLimit: 128000
+        # （可选）自定义提示词文案：按槽位覆盖 nudge / 范围表 / system prompt /
+        # 工具描述，模板 + 命名占位符，构造期校验（拼写错误启动即抛）。未配置时
+        # 用内置默认文案（逐字节不变）。槽位与占位符清单见
+        # docs/configurable-prompts-design.md。
+        # prompts:
+        #   nudge:
+        #     normal: '上下文使用率 {pct}%。这是建议而非命令——由你决定是否压缩。'
+        #   tools:
+        #     acpStatus: '报告 ACP 块账本：压缩块数、回收 token、当前上下文压力。'
 ```
 
 作用：host 平面注册 `ctx.compaction` + 四个模型工具 + `/acp` 命令 + `agent/pre-step` nudge 监听，所有模式共享一份。
