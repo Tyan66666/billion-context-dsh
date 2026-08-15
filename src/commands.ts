@@ -7,6 +7,7 @@
 import type { CommandDefinition } from '@deepseek-ai/dsh-commands'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { ToolEnvironment } from './tools.ts'
+import { resolveTokenCount } from './nudge.ts'
 import {
   blockRefForSummarySeq,
   expandShadowedSeqs,
@@ -24,7 +25,7 @@ async function statusText(env: ToolEnvironment, agent: Agent): Promise<string> {
   const ledger = rebuildBlockLedger(session.events)
   const totalTokens = ledger.reduce((sum, block) => sum + block.shadowedTokenCount, 0)
   const coreMessages = eventsToCoreMessages(surfaceEventsOf(session))
-  const estimated = coreMessages.reduce((sum, message) => sum + defaultCountTokens(message.text ?? ''), 0)
+  const estimated = resolveTokenCount(agent, coreMessages)
   const window = env.windowFor === undefined
     ? { limit: env.modelContextLimit, source: 'explicit' as const }
     : await env.windowFor(agent)
