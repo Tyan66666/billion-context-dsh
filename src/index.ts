@@ -216,13 +216,34 @@ export class AcpCompactionEngine extends CompactionEngine {
       })
     }
     // The load-bearing ACP guidance lives in the system prompt ONCE; nudges
-    // stay short and advisory (model-driven: the model decides).
+    // stay short and advisory (model-driven: the model decides). The
+    // systemPrompt service may not be registered yet on cold start (cordis
+    // starts unrelated composition rows concurrently), so apply the same
+    // retry pattern as tools and commands: eager registration, then
+    // re-attempt when the service appears via `internal/service`; guard so a
+    // late callback never double-registers.
     const systemPrompt = ctx.get('systemPrompt')
     if (systemPrompt !== undefined) {
       systemPrompt.section({
         name: 'billion-context-dsh',
         order: ACP_SYSTEM_PROMPT_ORDER,
         text: ACP_SYSTEM_PROMPT,
+      })
+    } else {
+      let done = false
+      const registerSystemPrompt = (): void => {
+        if (done) return
+        const registry = ctx.get('systemPrompt')
+        if (registry === undefined) return
+        done = true
+        registry.section({
+          name: 'billion-context-dsh',
+          order: ACP_SYSTEM_PROMPT_ORDER,
+          text: ACP_SYSTEM_PROMPT,
+        })
+      }
+      ctx.on('internal/service', (name: unknown) => {
+        if (name === 'systemPrompt') registerSystemPrompt()
       })
     }
   }

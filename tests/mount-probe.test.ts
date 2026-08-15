@@ -1,7 +1,9 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { Context } from '@deepseek-ai/cordis'
+import { SystemPrompt } from '@deepseek-ai/dsh-system-prompt'
 import AcpCompactionEngine, { AcpCompactionEngine as Named } from '../src/index.ts'
+import { ACP_SYSTEM_PROMPT } from '../src/system-prompt.ts'
 import { eventsToCoreMessages, projectEvent } from '../src/messages.ts'
 
 test('M0: AcpCompactionEngine mounts on a bare Cordis context', async () => {
@@ -93,4 +95,36 @@ test('M1: non-surface events project to nothing', () => {
   ] as never[]
   const projected = events.map((event) => projectEvent(event as never))
   assert.deepEqual(projected, [[], []])
+})
+
+// Regression: issue #5 — ACP systemPrompt section must not be silently dropped
+// on cold start when the engine activates before the systemPrompt service.
+// Verifies the `internal/service` retry listener registers the section once
+// the service appears later.
+test('M4: ACP system prompt section registers when systemPrompt service appears after engine', async () => {
+  const ctx = new Context()
+  // Mount the engine FIRST — systemPrompt is not yet available, so the retry
+  // listener is registered in the else branch.
+  ctx.plugin(AcpCompactionEngine as never)
+  await new Promise((resolve) => setTimeout(resolve, 20))
+
+  // Confirm engine mounted and systemPrompt is still absent.
+  const engine = ctx.compaction as Named
+  assert.ok(engine instanceof Named, 'engine mounted before systemPrompt')
+  assert.equal(ctx.get('systemPrompt'), undefined, 'systemPrompt not yet available')
+
+  // Now mount the systemPrompt service — this should trigger internal/service
+  // and the retry listener should register the ACP section.
+  ctx.plugin(SystemPrompt, {})
+  await new Promise((resolve) => setTimeout(resolve, 20))
+
+  // Verify the section is registered by assembling the prompt.
+  const sp = ctx.get('systemPrompt')
+  assert.ok(sp !== undefined, 'systemPrompt is now available')
+  const assembly = await sp.assemble()
+  assert.ok(assembly.sections.length >= 1, 'at least one section in the assembly')
+  const acpSection = assembly.sections.find((s) => s.name === 'billion-context-dsh')
+  assert.ok(acpSection !== undefined, 'ACP section "billion-context-dsh" is present in the assembly')
+  assert.ok(acpSection!.text.includes('Active Context Pruning'), 'ACP section text is the real guidance prompt')
+  assert.ok(acpSection!.text === ACP_SYSTEM_PROMPT, 'ACP section text matches the exported constant')
 })
