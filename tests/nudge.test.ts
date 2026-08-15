@@ -1,11 +1,11 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { Context } from '@deepseek-ai/cordis'
-import { createCore, type CompressionCore, type NudgeDecision } from 'acp-kernel'
+import { createCore, defaultCountTokens, type CompressionCore, type NudgeDecision } from 'acp-kernel'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { AcpStateStore } from '../src/state.ts'
-import { buildNudge, buildNudgeText, rangeTable } from '../src/nudge.ts'
+import { buildNudge, buildNudgeText, rangeTable, resolveTokenCount } from '../src/nudge.ts'
 import { makeTools, type ToolEnvironment } from '../src/tools.ts'
 import { rebuildBlockLedger } from '../src/region.ts'
 import { buildTextSession } from './helpers.ts'
@@ -162,4 +162,79 @@ test('M4: buildNudgeText renders the distillable tier-2 line with surface seqs',
   const summarySeq = rebuildBlockLedger(session.events)[0]!.summarySeq
   assert.ok(summarySeq !== undefined, 'the checkpoint seq is derivable from the log')
   assert.match(text, new RegExp(`seqs ${summarySeq}`), 'the line carries the surface seq of the block summary node')
+})
+
+test('M4: resolveTokenCount prefers projectedTokens over surfaceTokens over character heuristic', () => {
+  const session = buildTextSession(2)
+  const coreMessages = [
+    { id: '1', role: 'user' as const, contentType: 'text' as const, text: 'hello' },
+    { id: '2', role: 'assistant' as const, contentType: 'text' as const, text: 'world' },
+  ]
+
+  // 1. Falls back to character heuristic when no services are available.
+  const bareAgent = { session, ctx: new Context() } as unknown as Agent
+  const heuristic = defaultCountTokens('hello') + defaultCountTokens('world')
+  assert.equal(resolveTokenCount(bareAgent, coreMessages), heuristic)
+
+  // 2. Uses surfaceTokens when tokenMeter is available but sessionProjections is not.
+  const withMeter = {
+    session,
+    ctx: {
+      get(name: string) {
+        if (name === 'tokenMeter') {
+          return {
+            measure: () => ({ surfaceTokens: 99999 }),
+          }
+        }
+        return undefined
+      },
+    },
+  } as unknown as Agent
+  assert.equal(resolveTokenCount(withMeter, coreMessages), 99999)
+
+  // 3. Uses projectedTokens when sessionProjections is available (highest priority).
+  const withProjections = {
+    session,
+    ctx: {
+      get(name: string) {
+        if (name === 'sessionProjections') {
+          return {
+            snapshot: () => ({
+              values: { contextPressure: { projectedTokens: 123456 } },
+            }),
+          }
+        }
+        if (name === 'tokenMeter') {
+          return {
+            measure: () => ({ surfaceTokens: 99999 }),
+          }
+        }
+        return undefined
+      },
+    },
+  } as unknown as Agent
+  assert.equal(resolveTokenCount(withProjections, coreMessages), 123456)
+
+  // 4. Rejects zero or negative from projectedTokens, falls through to surfaceTokens.
+  const withZeroProjected = {
+    session,
+    ctx: {
+      get(name: string) {
+        if (name === 'sessionProjections') {
+          return {
+            snapshot: () => ({
+              values: { contextPressure: { projectedTokens: 0 } },
+            }),
+          }
+        }
+        if (name === 'tokenMeter') {
+          return {
+            measure: () => ({ surfaceTokens: 77777 }),
+          }
+        }
+        return undefined
+      },
+    },
+  } as unknown as Agent
+  assert.equal(resolveTokenCount(withZeroProjected, coreMessages), 77777, 'zero projectedTokens falls through to surfaceTokens')
 })

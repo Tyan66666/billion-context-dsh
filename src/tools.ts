@@ -15,6 +15,7 @@ import { defaultCountTokens, type CompressionCore } from 'acp-kernel'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { AcpStateStore } from './state.ts'
 import { kernelConfigFor, type KernelConfigInput } from './config.ts'
+import { resolveTokenCount } from './nudge.ts'
 import { windowSourceLabel, type AcpWindow } from './window.ts'
 import {
   AlreadyCompressedRangeError,
@@ -114,10 +115,11 @@ async function handleCompress(env: ToolEnvironment, args: CompressArgs, exec: To
   // The kernel gets the FULL log (visible + shadowed): syncBlocks deactivates
   // a block whose consumed messages are absent, and resolveBoundaries refuses
   // to anchor a block ref it cannot find, so tier-2/3 distillation needs the
-  // originals present. The token count stays a surface measurement.
+  // originals present. The token count uses the same priority chain as the
+  // nudge (projectedTokens → surfaceTokens → character heuristic).
   const coreMessages = allLogMessages(session)
   const surfaceMessages = eventsToCoreMessages(surfaceEventsOf(session))
-  const tokenCount = surfaceMessages.reduce((sum, message) => sum + defaultCountTokens(message.text ?? ''), 0)
+  const tokenCount = resolveTokenCount(agent, surfaceMessages)
   const config = kernelConfigFor(env)
 
   // Assign refs / advance state exactly like a turn would.
@@ -373,7 +375,7 @@ async function handleStatus(env: ToolEnvironment, _args: StatusArgs, exec: ToolR
   const ledger = rebuildBlockLedger(session.events)
   const totalTokens = ledger.reduce((sum, block) => sum + block.shadowedTokenCount, 0)
   const coreMessages = eventsToCoreMessages(surfaceEventsOf(session))
-  const estimated = coreMessages.reduce((sum, message) => sum + defaultCountTokens(message.text ?? ''), 0)
+  const estimated = resolveTokenCount(agent, coreMessages)
   const window = env.windowFor === undefined
     ? { limit: env.modelContextLimit, source: 'explicit' as const }
     : await env.windowFor(agent)

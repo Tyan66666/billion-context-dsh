@@ -49,7 +49,7 @@ export { kernelConfigFor, type KernelConfigInput } from './config.ts'
 export { ACP_SYSTEM_PROMPT, ACP_SYSTEM_PROMPT_ORDER } from './system-prompt.ts'
 export { makeTools, type ToolEnvironment } from './tools.ts'
 export { acpCommand } from './commands.ts'
-export { buildNudge, type NudgeEnvironment, type NudgeOutcome } from './nudge.ts'
+export { buildNudge, resolveTokenCount, type NudgeEnvironment, type NudgeOutcome } from './nudge.ts'
 export {
   DEFAULT_CONTEXT_WINDOW,
   detectContextWindow,
@@ -104,6 +104,18 @@ export interface AcpConfig {
   readonly nudgeEmergencyThresholdPct?: number
   /** Any other acp-kernel Config override (billion-context-pi's `coreOverrides` escape hatch). */
   readonly coreOverrides?: Partial<import('acp-kernel').Config>
+  /**
+   * Custom token-count function for the kernel's internal estimation.
+   * Defaults to the kernel's `defaultCountTokens` (CJK: 1 char = 1 token,
+   * other: 4 chars = 1 token — aligns with billion-context-pi).
+   * Can be overridden for provider-specific tokenization, e.g. DeepSeek's
+   * official coefficient: 1 CJK char ≈ 0.6 tokens, 1 other char ≈ 0.3 tokens.
+   * Only affects the kernel's internal estimation (compressible range sizing,
+   * nudge text, growth branch pending); the `projectedTokens` reading from
+   * `sessionProjections` (used for nudge pressure decisions and acp_status)
+   * is provider-anchored and unaffected by this function.
+   */
+  readonly countTokens?: (text: string) => number
   /** Register the four model tools on `ctx.tools`. Default true. */
   readonly autoTools: boolean
   /** Register the `/acp` command on `ctx.commands`. Default true. */
@@ -150,7 +162,8 @@ export class AcpCompactionEngine extends CompactionEngine {
   constructor(ctx: Context, config: Partial<AcpConfig> = {}) {
     super(ctx)
     this.config = resolveAcpConfig(config)
-    this.kernel = createCore({})
+    const ports = this.config.countTokens !== undefined ? { countTokens: this.config.countTokens } : {}
+    this.kernel = createCore(ports)
     this.store = new AcpStateStore()
 
     const env: ToolEnvironment = {

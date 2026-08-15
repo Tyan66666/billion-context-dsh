@@ -31,6 +31,38 @@ export interface NudgeOutcome {
 }
 
 /**
+ * Resolve the best available token count for ACP pressure decisions.
+ *
+ * Priority chain:
+ * 1. `sessionProjections.contextPressure.projectedTokens` — matches the UI's
+ *    context-occupancy display (includes fixed overhead: system prompt, tool
+ *    definitions, AGENTS.md, etc.). Provider-anchored; reacts to compaction.
+ * 2. `tokenMeter.measure(session).surfaceTokens` — heuristic surface-only
+ *    estimate (pure conversation messages, no fixed overhead). Falls back
+ *    when sessionProjections is unavailable or has no provider anchor yet.
+ * 3. `defaultCountTokens` character heuristic — last resort for tests and
+ *    minimal hosts that lack the token-meter service.
+ */
+export function resolveTokenCount(agent: Agent, coreMessages: CoreMessage[]): number {
+  // 1. Prefer sessionProjections.contextPressure.projectedTokens (matches UI).
+  const projections = agent.ctx?.get?.('sessionProjections') as
+    | { snapshot?: (session: unknown) => { values?: { contextPressure?: { projectedTokens?: number } } } }
+    | undefined
+  const projected = projections?.snapshot?.(agent.session)?.values?.contextPressure?.projectedTokens
+  if (typeof projected === 'number' && projected > 0) return projected
+
+  // 2. Fallback to tokenMeter surfaceTokens (heuristic, no fixed overhead).
+  const meter = agent.ctx?.get?.('tokenMeter') as
+    | { measure?: (session: unknown) => { surfaceTokens?: number } }
+    | undefined
+  const surface = meter?.measure?.(agent.session)?.surfaceTokens
+  if (typeof surface === 'number' && surface > 0) return surface
+
+  // 3. Last resort: character heuristic.
+  return coreMessages.reduce((sum, message) => sum + defaultCountTokens(message.text ?? ''), 0)
+}
+
+/**
  * Render the compressible-range table as seq refs for the model.
  * Computed directly from the surface (not the kernel's ref map, which can
  * drift and hide large tool results) — see buildCompressibleSeqRanges.
@@ -50,20 +82,14 @@ export function rangeTable(session: import('@deepseek-ai/dsh-session').Session):
 }
 
 /**
- * The token count driving pressure decisions. Prefer the host token meter's
- * SURFACE tokens (the input-side heuristic total — matches acp_status and the
- * UI's message-token view). `totalTokens` is request-AND-RESPONSE pressure and
- * can far exceed the window in long sessions (observed 230% against a real
- * ~20% occupancy), so it is not used. Falls back to the fast heuristic when
- * the meter is absent (tests, minimal hosts).
+ * The token count driving pressure decisions. Prefer `resolveTokenCount` which
+ * uses `sessionProjections.contextPressure.projectedTokens` (matches the UI's
+ * context-occupancy display, including fixed overhead). Falls back to
+ * `tokenMeter.measure(session).surfaceTokens`, then `defaultCountTokens`
+ * character heuristic for tests and minimal hosts.
  */
 function measuredTokenCount(agent: Agent, coreMessages: CoreMessage[]): number {
-  const meter = agent.ctx?.get?.('tokenMeter') as
-    | { measure?: (session: unknown) => { surfaceTokens?: number } }
-    | undefined
-  const surface = meter?.measure?.(agent.session)?.surfaceTokens
-  if (typeof surface === 'number' && surface > 0) return surface
-  return coreMessages.reduce((sum, message) => sum + defaultCountTokens(message.text ?? ''), 0)
+  return resolveTokenCount(agent, coreMessages)
 }
 
 /**
