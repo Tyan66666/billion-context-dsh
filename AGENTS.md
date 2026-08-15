@@ -31,6 +31,7 @@ src/
 ├── system-prompt.ts# M4: one-time ACP guidance section
 ├── prompts.ts      # M4: configurable prompt templates + render/validate (config.prompts)
 ├── config.ts       # kernel config assembly (thresholds + coreOverrides)
+├── window.ts       # auto context-window detection (LLM runtime probe, fallback 128000)
 └── commands.ts     # M4: /acp slash command
 ```
 
@@ -99,7 +100,7 @@ The PR title is enforced by CI (`.github/workflows/pr-lint.yml` → `scripts/che
    - ref assignment / `compressibleRanges` — we deliberately self-compute the range table, so drift here is absorbed, but confirm
    - `CoreMessage` / `NudgeDecision` types — `messages.ts`, `nudge.ts`
 3. Bump the exact version in `package.json`, run `npm install` (refreshes lock), then `npm run typecheck && npm test && npm run build`.
-4. **The test suite is the safety net**: 28 tests cover the battle-hardened behaviors (CJK estimation, lone-tool expansion, surface range table, ledger backfill, ref-tag projection). Any kernel behavior change that breaks one of those turns red here — do NOT release on red.
+4. **The test suite is the safety net**: 77 tests cover the battle-hardened behaviors (CJK estimation, lone-tool expansion, surface range table, ledger backfill, ref-tag projection). Any kernel behavior change that breaks one of those turns red here — do NOT release on red.
 5. Optionally enable new kernel features deliberately (e.g. `createBpeTokenizer()` behind a config flag) — never adopt silently.
 6. Release per the workflow below (bump own version, publish, `gh release create`).
 
@@ -123,5 +124,5 @@ Pre-flight (ALL must pass): `npm run typecheck && npm test && npm run build`.
 ## 6. Upstream & attribution
 
 - Always credit upstream in README/docs: **billion-context-pi**, **acp-kernel**, **opencode-acp** (ranxianglei, MIT) and **DeepSeek Harness** (DeepSeek AI).
-- Do not change kernel default behavior without an explicit reason — defaults intentionally match billion-context-pi (nudge window 45%–75%, emergency 95%, `defaultCountTokens`).
+- Do not change kernel default behavior without an explicit reason — kernel defaults match billion-context-pi (nudge window 45%–75%, emergency 95%, `defaultCountTokens`), but the engine deliberately ships lower nudge thresholds (max 0.70, emergency 0.85) so the forced nudge fires before the host compaction-basic 80% line (see `src/index.ts` `DEFAULT_CONFIG` and `src/config.ts` NOTE).
 - Keep the Beta notice prominent (project and host are both public beta; not for production).
