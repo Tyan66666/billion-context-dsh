@@ -65,6 +65,7 @@ npm run build       # tsup (inlines acp-kernel) + tsc --emitDeclarationOnly
 - **No `as any`**, **No `@ts-ignore`**, No `require` in tests (ESM; use static imports).
 - Add a regression test for every bug fix (see tests/ for the battle-report tests: CJK estimation, stale-range filtering, lone tool expansion, legacy backfill).
 - Keep `@deepseek-ai/*` devDeps on the **0.1.0-rc.6 line** (aligned with `@deepseek-ai/dsh-compaction` peer). Do not mix rc lines.
+- **Git worktrees MUST be created inside `worktrees/`** in the project root (e.g. `git worktree add worktrees/<branch> <branch>`). The `worktrees/` directory is gitignored and never pushed. Never create worktrees outside the project.
 
 ### Commit messages
 
