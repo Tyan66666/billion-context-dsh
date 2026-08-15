@@ -78,7 +78,7 @@ The convention applies to the **squash-merge subject on main**, which IS the PR 
 - `docs: <summary>` — documentation only (README, docs/, AGENTS.md)
 - `release vX.Y.Z` — the release commit, exactly as in §5 (unchanged)
 
-The PR title is enforced by CI (`.github/workflows/pr-lint.yml` → `scripts/check-pr-title.mjs`), since a squash merge turns it into the main-branch commit (e.g. `(feat) guide multi-segment batch compress + regression test`). Contributor guidance lives in CONTRIBUTING.md. PR merges stay human-only (§5).
+The PR title is enforced by CI (`.github/workflows/pr-lint.yml` → `scripts/check-pr-title.mjs`), since a squash merge turns it into the main-branch commit (e.g. `(feat) guide multi-segment batch compress + regression test`). PR titles automatically carry a `(#N)` suffix (`.github/workflows/pr-title-suffix.yml`) so squash subjects on main link back to the PR (e.g. `(chore) add CI (#3)`); `release vX.Y.Z` titles are excluded. Contributor guidance lives in CONTRIBUTING.md. PR merges stay human-only (§5).
 
 ## 4b. acp-kernel upgrade policy (the kernel WILL move on)
 

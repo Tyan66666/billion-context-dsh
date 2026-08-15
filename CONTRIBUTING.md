@@ -31,7 +31,7 @@ npm run build       # tsup bundle
 
 `<summary>` is a single informative sentence without a trailing period.
 
-PR titles are enforced by CI (`.github/workflows/pr-lint.yml`, rule in `scripts/check-pr-title.mjs`); a PR whose title doesn't match cannot be merged.
+PR titles are enforced by CI (`.github/workflows/pr-lint.yml`, rule in `scripts/check-pr-title.mjs`); a PR whose title doesn't match cannot be merged. A separate workflow (`.github/workflows/pr-title-suffix.yml`) automatically appends `(#<PR number>)` to the title when the PR is opened, so the squash-merge commit on `main` carries a direct link back to the PR (e.g. `(chore) add CI (#3)`). `release vX.Y.Z` titles are left untouched.
 
 ## Opening a PR
 
