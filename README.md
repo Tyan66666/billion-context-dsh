@@ -78,19 +78,19 @@ npm install billion-context-dsh
         modelContextLimit: 128000   # 可选；省略时自动探测模型真实窗口（回退 128000）
 ```
 
-**（可选）自定义提示词文案 —— `config.prompts`。** 所有模型可见的提示词（普通/紧急 nudge 首句、tier 蒸馏行、范围表、ACP system prompt 段、四个工具描述）默认是内置文案，可通过组合行的 `config` 按槽位覆盖。模板支持命名占位符（如 nudge 的 `{pct}`、范围表的 `{surface}`），**构造期校验**：占位符拼写错误会在引擎启动时抛错（fail-fast），而不是把字面 `{pct}` 漏进模型上下文：
+**（可选）自定义提示词文案 —— `config.prompts`。** 所有模型可见的提示词（普通/紧急 nudge 首句、上下文分解、增长行、批量提示、tier 蒸馏行、范围表、ACP system prompt 段、四个工具描述）默认是内置文案（已对齐 acp-kernel / billion-context-pi 的 nudge 风格：效率提示 + 上下文分解 + 压缩规则），可通过组合行的 `config` 按槽位覆盖。模板支持命名占位符（如 nudge 的 `{pct}`、`{philosophy}`、范围表的 `{surface}`），**构造期校验**：占位符拼写错误会在引擎启动时抛错（fail-fast），而不是把字面 `{pct}` 漏进模型上下文：
 
 ```yaml
       config:
         modelContextLimit: 128000
         prompts:
           nudge:
-            normal: '上下文使用率 {pct}%。这是建议而非命令——由你决定是否压缩。'  # 中文 nudge 首句
+            normal: '上下文使用率 {pct}%。这是效率提示——请尽早压缩保持上下文精简。'  # 中文 nudge 首句
           tools:
             acpStatus: '报告 ACP 块账本：压缩块数、回收 token、当前上下文压力。'  # 自定义工具描述
 ```
 
-可配置槽位清单、每槽可用占位符、空串/`null` 语义见 [docs/configurable-prompts-design.md](docs/configurable-prompts-design.md)。未配置 `prompts` 的部署行为与以往完全一致（默认文案逐字节不变）。
+可配置槽位清单、每槽可用占位符、空串/`null` 语义见 [docs/configurable-prompts-design.md](docs/configurable-prompts-design.md)。未配置 `prompts` 的部署使用内置默认文案（对齐 kernel/pi，见设计文档 v5）。
 
 **单模式生效（agent preset 的 `compaction` realm）**。先在该 realm 内*禁用（或删除）原有的 `dsh-compaction-basic` 行*，再插入本引擎——同一 realm 内两个后端不能并存：
 
@@ -116,14 +116,14 @@ DSH 的每个模型请求都派生自其 append-only 会话日志（*surface*）
 |---|---|
 | `compress` 工具遮蔽一段范围 | 持久化 `surfaceOp: { op: 'replace' }`——模型书写的摘要成为 checkpoint 节点；原文保留在日志中 |
 | refs（`m00001` 标签） | surface seq，由 nudge 的可压缩范围表携带 |
-| nudge（"考虑压缩一下"） | 由内核的压力决策在 `agent/pre-step` 注入——简短建议，绝非命令 |
+| nudge（"效率提示——尽早压缩保持精简"） | 由内核的压力决策在 `agent/pre-step` 注入——效率通知 + 上下文分解 + 压缩规则，语气对齐 kernel/pi；绝非命令 |
 | `decompress` | 从日志只读恢复被遮蔽的原文 |
 | `search_context` | 对从日志重建的块摘要与原文打分 |
 | `acp_status` | 块账本与上下文压力 |
 | 块状态 | 内存内核状态 + **日志重建账本**（无旁车文件） |
 | 分层蒸馏（T2/T3） | 再次压缩某块的摘要节点 = 蒸馏该块（tier 2），蒸馏 tier-2 块得 tier 3；tier 与内核块 id 持久化进日志，重启后内核状态从日志再水合、可继续蒸馏 |
 
-承载性的压缩指引（工具、哲学、摘要规则）注册为一次性系统提示段，因此 nudge 保持简短。刻意**不做自动摘要**：自动策略只 nudge 模型（`compactIfNeeded` 返回 null）。
+承载性的压缩指引（工具、哲学、摘要规则、tier 蒸馏/浓缩规则）注册为一次性系统提示段；每条 nudge 携带精简版（效率提示 + 哲学 + 上下文分解 + 压缩规则 + 范围表 + 批量提示）。刻意**不做自动摘要**：自动策略只 nudge 模型（`compactIfNeeded` 返回 null）。
 
 ## 视频讲解
 

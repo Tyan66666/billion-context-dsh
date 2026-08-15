@@ -38,7 +38,7 @@ Design decisions (see docs/dsh-porting-verification.md for the full evidence):
 
 1. **Durable surface model** — DSH has NO in-memory message rewrite hook (`llm/stream` is read-only, `deriveMessages` is a pure projection). All compression is a durable `surfaceOp: { op: 'replace' }`; originals stay in the append-only log (decompress/search rebuild from the log).
 2. **Seq is the ref** — no `<acp>` tags; the nudge's range table carries surface seqs.
-3. **No automatic summarization** — `compactIfNeeded` returns null; nudges are advisory, never imperative ("the choice and timing are yours").
+3. **No automatic summarization** — `compactIfNeeded` returns null; nudges are advisory, never imperative (default copy aligned with kernel/pi: efficiency note, not "suggestion, not a requirement"; the emergency tier alone says "compress now").
 4. **Model-driven summaries** — the model writes the summary via `compress`; no second LLM summarization call.
 5. **`acp-kernel` pinned to an exact version** (e.g. `"acp-kernel": "0.0.24"`, NEVER `^`). It is inlined by tsup; a caret range breaks reproducibility.
 

@@ -65,47 +65,65 @@ function fakeDecision(pct: number, emergency: boolean): NudgeDecision {
   } as never
 }
 
-/** 快照 1:改造前 ACP_SYSTEM_PROMPT 的逐字节字面量(与实现分离,防循环论证)。 */
-const SYSTEM_PROMPT_SNAPSHOT = `Active Context Pruning — model-driven context management
+/** 快照前段:system prompt 去掉"Nothing forces you"后的首段。 */
+const SYSTEM_PROMPT_HEAD = `Active Context Pruning — model-driven context management
 
-YOU decide whether and when to compress context. Nothing forces you: the injected "nudge" is a suggestion, not an order, and you may ignore it when compression would not help. Compress only ranges you have genuinely consumed (read tool outputs, finished explorations, superseded steps) that the current work no longer needs verbatim.
+YOU decide whether and when to compress context. The nudge is an efficiency notification: when you see one, consider which ranges you have genuinely consumed and could summarise to keep working context lean.`
 
-Compression Philosophy:
-- All compression serves the primary task, but be frugal.
-- Context capacity is precious. Save context by compressing consumed outputs, not by avoiding tools.
-- Compress by need, not by percentage.
-- Work from summaries, not raw tool outputs. All listed ranges (user prompts, tool outputs, code, logs, exploration, intermediate steps) should be compressed to summary format — the ONLY exceptions are protected content, content the current step is actively using, or critical content you cannot reconstruct.
-
-Compression tools (refs are SURFACE SEQS, not ids):
-- compress: replace one or more seq ranges, each with your own dense summary. Single range: compress({ content: [{ startSeq, endSeq, summary }] }). Batch multiple unrelated segments in one call (each entry becomes its own block): compress({ content: [{ startSeq: 1, endSeq: 5, summary: '...' }, { startSeq: 12, endSeq: 18, summary: '...' }] }). Keep ranges disjoint — overlapping entries in one batch are skipped. Edges are auto-balanced to tool-call/result boundaries; a trailing #callId fragment in a seq is ignored. Seq refs must be on the current surface: seqs from older nudges or earlier compresses go stale as the surface moves, so a stale span is auto-remapped to its still-live remainder (the result reports the adjusted span), a fully compressed span is reported as already compressed, and invented/other-session seqs fail with guidance.
-- decompress: recover a compressed block's original content, read-only. decompress({ blockId }).
-- search_context: find information inside compressed blocks BEFORE decompressing. search_context({ query }).
-- acp_status: current context usage and the live compressible-range list. Run it right before compressing — the only seqs that never go stale are the ones you just read.
-
-Tiered compression: each compressed block appears on the surface as one summary node. Compressing that node again DISTILLS the block (tier 2): the parent summary folds into your new summary and the original messages are freed. Distilling a tier-2 block yields tier 3. Distill when a summary itself is consumed — decompress on the tier-2 block recovers the full originals.
-
-When you write a summary, it becomes the ONLY record of that range: keep file paths, signatures, exact values, decisions, and error strings verbatim so a later reader (or you, after decompress) can continue without the original. Never reuse historical seqs — the surface moves as messages land and compress; verify with acp_status.`
-
-test('M4/prompts 1: default system prompt renders byte-identical to the pre-change literal', () => {
-  assert.equal(renderSystemPrompt(resolvePrompts()), SYSTEM_PROMPT_SNAPSHOT)
+test('M4/prompts 1: default system prompt contains key sections in correct order', () => {
+  const rendered = renderSystemPrompt(resolvePrompts())
+  // Head
+  assert.ok(rendered.startsWith(SYSTEM_PROMPT_HEAD), 'system prompt starts with the new efficiency-notification framing')
+  // Philosophy
+  assert.ok(rendered.includes('Compression Philosophy:\n- All compression serves the primary task'), 'philosophy section present')
+  // WHEN TO / WHEN NOT
+  assert.ok(rendered.includes('WHEN TO COMPRESS:'), 'WHEN TO COMPRESS section present')
+  assert.ok(rendered.includes('WHEN NOT TO COMPRESS:'), 'WHEN NOT TO COMPRESS section present')
+  assert.ok(rendered.includes('A task phase has ended'), 'WHEN TO bullet present')
+  assert.ok(rendered.includes('Protected tool outputs'), 'WHEN NOT bullet present')
+  // HOW_TO_COMPRESS_RULES
+  assert.ok(rendered.includes('HOW TO COMPRESS'), 'HOW_TO_COMPRESS_RULES section present')
+  assert.ok(rendered.includes('KEEP VERBATIM'), 'KEEP VERBATIM section present')
+  assert.ok(rendered.includes('Write dense, scannable bullets'), 'formatting guidance present')
+  // Tool descriptions (DSH-specific: seq-based)
+  assert.ok(rendered.includes('Compression tools (refs are SURFACE SEQS, not ids):'), 'tool section present')
+  assert.ok(rendered.includes('compress: replace one or more seq ranges'), 'compress tool description present')
+  assert.ok(rendered.includes('Tiered compression:'), 'tiered compression section present')
+  // Tier rules
+  assert.ok(rendered.includes('TIER 2 COMPRESSION — DISTILLATION'), 'TIER2_DISTILL_RULES present')
+  assert.ok(rendered.includes('TIER 3 COMPRESSION — ULTRA-CONDENSATION'), 'TIER3_CONDENSE_RULES present')
+  assert.ok(rendered.includes('When you write a summary, it becomes the ONLY record'), 'summary writing rules present')
+  // No "suggestion, not an order" language
+  assert.ok(!rendered.includes('suggestion, not an order'), 'no "suggestion, not an order" language')
+  assert.ok(!rendered.includes('Nothing forces you'), 'no "Nothing forces you" language')
 })
 
-test('M4/prompts 2: default normal nudge snapshot — zero-range session, trailing newline is part of the bytes', () => {
+test('M4/prompts 2: default normal nudge — efficiency note + HOW_TO_COMPRESS_RULES + tip', () => {
   const text = buildNudgeText(fakeDecision(7, false), false, buildTextSession(4))
-  assert.equal(
-    text,
-    'Context usage is at 7%. This is a suggestion, not a requirement — you decide whether and when to compress.\n\n'
-      + 'Compress by need, not by percentage: replace only ranges you have genuinely consumed, with dense self-contained summaries.\n',
-  )
+  // Frame: efficiency note with philosophy embedded
+  assert.ok(text.startsWith('Context usage is at 7%. This is an efficiency nudge to compress early and keep context lean — not an overflow warning.'), 'frame starts with efficiency note')
+  assert.ok(text.includes('Compression Philosophy:\n- All compression serves the primary task'), 'philosophy embedded in frame')
+  // No "suggestion, not a requirement"
+  assert.ok(!text.includes('suggestion, not a requirement'), 'no "suggestion, not a requirement"')
+  // HOW_TO_COMPRESS_RULES as guidance
+  assert.ok(text.includes('HOW TO COMPRESS'), 'HOW_TO_COMPRESS_RULES present')
+  assert.ok(text.includes('KEEP VERBATIM'), 'KEEP VERBATIM section present')
+  // Tip at end
+  assert.ok(text.endsWith('💡 Compress all ranges in one call (pass multiple content entries: `content: [{...}, {...}]`).'), 'tip at end')
 })
 
-test('M4/prompts 3: default emergency nudge snapshot — ⚠️ frame, trailing newline', () => {
+test('M4/prompts 3: default emergency nudge — ⚠️ frame + HOW_TO_COMPRESS_RULES + tip', () => {
   const text = buildNudgeText(fakeDecision(96, true), true, buildTextSession(4))
-  assert.equal(
-    text,
-    '⚠️ Context usage is at 96% of the window — nearly full. Consider compressing consumed ranges soon so working context stays available; the choice and timing are yours.\n\n'
-      + 'Compress by need, not by percentage: replace only ranges you have genuinely consumed, with dense self-contained summaries.\n',
-  )
+  // Frame: emergency style with philosophy embedded
+  assert.ok(text.startsWith('⚠️ Context limit reached — compress now. Prioritize consumed tool outputs.'), 'emergency frame starts with compress now')
+  assert.ok(text.includes('Compression Philosophy:\n- All compression serves the primary task'), 'philosophy embedded in emergency frame')
+  // No "choice and timing are yours"
+  assert.ok(!text.includes('choice and timing are yours'), 'no "choice and timing are yours"')
+  // HOW_TO_COMPRESS_RULES
+  assert.ok(text.includes('HOW TO COMPRESS'), 'HOW_TO_COMPRESS_RULES present in emergency')
+  assert.ok(text.includes('KEEP VERBATIM'), 'KEEP VERBATIM present in emergency')
+  // Tip at end
+  assert.ok(text.endsWith('💡 Compress all ranges in one call (pass multiple content entries: `content: [{...}, {...}]`).'), 'tip at end in emergency')
 })
 
 test('M4/prompts 4: range table snapshot (with ranges) and zero-range early return', () => {
@@ -169,13 +187,21 @@ test('M4/prompts 9: renderTemplate throws on a missing value for a known placeho
   )
 })
 
-test('M4/prompts 10: empty guidance removes the line cleanly (frame + newline + table)', () => {
+test('M4/prompts 10: empty guidance removes the line cleanly (frame + newline + table + tip)', () => {
   const session = buildTextSession(12)
-  const prompts = resolvePrompts({ nudge: { guidance: '' } })
-  const frame = 'Context usage is at 7%. This is a suggestion, not a requirement — you decide whether and when to compress.'
+  const prompts = resolvePrompts({
+    nudge: {
+      guidance: '',
+      breakdown: '',
+      growth: '',
+      tip: '',
+    },
+  })
+  const frame = 'Context usage is at 7%. This is an efficiency nudge to compress early and keep context lean — not an overflow warning. A separate, stronger alert will appear if the context is actually full.\n\nCompression Philosophy:\n- All compression serves the primary task, but be frugal.\n- Context capacity is precious. Save context by compressing consumed outputs, not by avoiding tools.\n- Compress by need, not by percentage.\n- Work from summaries, not raw tool outputs. All listed ranges (user prompts, tool outputs, code, logs, exploration, intermediate steps) should be compressed to summary format — the ONLY exceptions are protected content, content the current step is actively using, or critical content you cannot reconstruct.'
   const text = buildNudgeText(fakeDecision(7, false), false, session, prompts)
   assert.equal(text, `${frame}\n${rangeTable(session)}`)
-  assert.ok(!text.includes('Compress by need'))
+  assert.ok(!text.includes('HOW TO COMPRESS'))
+  assert.ok(!text.includes('Compress all ranges'))
 })
 
 test('M4/prompts 11: tier line renders (0 tokens) when pending is missing (B2 fallback)', () => {
@@ -226,10 +252,13 @@ test('M4/prompts 12: buildNudge forwards env.prompts into the injected message (
 test('M4/prompts 13: Chinese override smoke (i18n scenario)', () => {
   const prompts = resolvePrompts({
     nudge: {
-      normal: '上下文使用率 {pct}%。这是建议,不是要求 —— 是否压缩、何时压缩,由你决定。',
-      emergency: '⚠️ 上下文使用率已达窗口的 {pct}% —— 几乎满了。',
-      guidance: '按需压缩,而不是按百分比:只替换你真正消费过的范围。',
+      normal: '上下文使用率 {pct}%。这是效率提示，不是溢出警告。',
+      emergency: '⚠️ 上下文已达上限，立即压缩。',
+      guidance: '压缩规则：保持路径、签名、错误原文。',
       tier: '第 {tier} 层:{count} 个第 {prevTier} 层块可蒸馏({tokens} tokens)。',
+      breakdown: '上下文分解：{system}K 系统 | {tool}K 工具 | {summaries}K 摘要 | {code}K 代码 | {text}K 文本',
+      growth: '+{growth}K 自上次提示',
+      tip: '💡 一次调用压缩多个范围。',
     },
     rangeTable: {
       header: '表面:{surface}',
@@ -237,15 +266,16 @@ test('M4/prompts 13: Chinese override smoke (i18n scenario)', () => {
       line: '  - seq {start}..{end} — {count} 条消息,约 {tokens} tokens',
       footer: '用 compress 压缩;批量条目各成一个块。',
     },
-    systemPrompt: '主动上下文剪枝 —— 模型驱动。\n{philosophy}\n压缩工具:compress/decompress/search_context/acp_status。',
+    systemPrompt: '主动上下文剪枝 —— 模型驱动。\n{philosophy}\n{howToCompressRules}\n压缩工具:compress/decompress/search_context/acp_status。',
   })
   const session = buildTextSession(12)
   const text = buildNudgeText(fakeDecision(7, false), false, session, prompts)
   assert.ok(text.includes('上下文使用率 7%'))
   assert.ok(text.includes('表面:12 nodes, seqs 1..12'))
   assert.ok(text.includes('可压缩范围(仅供参考):'))
+  assert.ok(text.includes('💡 一次调用压缩多个范围'))
   const emerg = buildNudgeText(fakeDecision(96, true), true, session, prompts)
-  assert.ok(emerg.includes('已达窗口的 96%'))
+  assert.ok(emerg.includes('上下文已达上限'))
   const sys = renderSystemPrompt(prompts)
   assert.ok(sys.includes('主动上下文剪枝'))
   assert.ok(sys.includes('Compression Philosophy:'))
