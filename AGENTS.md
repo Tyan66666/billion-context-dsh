@@ -68,14 +68,17 @@ npm run build       # tsup (inlines acp-kernel) + tsc --emitDeclarationOnly
 
 ### Commit messages
 
-Single-line subjects, prefix by change kind (the description after the prefix is free-form, keep it informative):
+The convention applies to the **squash-merge subject on main**, which IS the PR title (main is branch-protected; see §5). **Commits inside a PR are free-form** — only the final squash subject is constrained. Single-line subject, prefix by change kind (the description after the prefix is free-form, keep it informative):
 
 - `(feat) <summary>` — feature work (e.g. `(feat) tier-2/3 block distillation — …`)
 - `(fix) <summary>` — bug fixes
+- `(refactor) <summary>` — internal restructuring without behavior change
+- `(test) <summary>` — tests only
+- `(chore) <summary>` — tooling / process (CI, deps, scripts)
 - `docs: <summary>` — documentation only (README, docs/, AGENTS.md)
 - `release vX.Y.Z` — the release commit, exactly as in §5 (unchanged)
 
-A multi-commit feature may use a bare squash subject on merge (e.g. `(feat) guide multi-segment batch compress + regression test`). PR merges stay human-only (§5).
+The PR title is enforced by CI (`.github/workflows/pr-lint.yml` → `scripts/check-pr-title.mjs`), since a squash merge turns it into the main-branch commit (e.g. `(feat) guide multi-segment batch compress + regression test`). Contributor guidance lives in CONTRIBUTING.md. PR merges stay human-only (§5).
 
 ## 4b. acp-kernel upgrade policy (the kernel WILL move on)
 
@@ -110,6 +113,8 @@ Pre-flight (ALL must pass): `npm run typecheck && npm test && npm run build`.
 6. GitHub Pages rebuilds automatically (workflow `pages.yml`).
 
 > PR merges are **human-only**. The Agent MUST NEVER merge any PR.
+>
+> **`main` is branch-protected**: direct pushes are blocked — every commit, including `release vX.Y.Z`, lands via a PR that passed the required checks (`ci`, `pr-title`). No reviewer approval is required (solo maintainer). See CONTRIBUTING.md.
 
 ## 6. Upstream & attribution
 

@@ -1,0 +1,17 @@
+name: PR Lint
+
+on:
+  pull_request:
+    types: [opened, edited, reopened, synchronize]
+
+permissions:
+  contents: read
+
+jobs:
+  pr-title:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check PR title against commit convention
+        run: node scripts/check-pr-title.mjs "${{ github.event.pull_request.title }}"

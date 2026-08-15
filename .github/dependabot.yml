@@ -1,0 +1,19 @@
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-limit: 5
+    groups:
+      tooling:
+        patterns:
+          - "tsup"
+          - "tsx"
+          - "typescript"
+          - "@types/node"
+    ignore:
+      # Pinned exactly; upgrades are a controlled manual process (AGENTS.md §4b).
+      - dependency-name: "acp-kernel"
+      # Stay on the 0.1.0-rc.6 line (AGENTS.md §4).
+      - dependency-name: "@deepseek-ai/*"
