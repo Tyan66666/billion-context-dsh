@@ -16,7 +16,7 @@
  * @module billion-context-dsh/prompts
  */
 
-import { COMPRESS_PHILOSOPHY } from 'acp-kernel'
+import { COMPRESS_PHILOSOPHY, HOW_TO_COMPRESS_RULES, TIER2_DISTILL_RULES, TIER3_CONDENSE_RULES } from 'acp-kernel'
 
 /** 用户可写值:字符串模板,或 null(= 用默认,等价于不写)。YAML 宿主写 null 是合法输入。 */
 export type PromptInput = string | null
@@ -25,14 +25,20 @@ export type PromptInput = string | null
 export type PromptOverride<T> = { [K in keyof T]?: PromptInput }
 
 export interface NudgePrompts {
-  /** 普通档首句。占位符:{pct} */
+  /** 普通档首句。占位符:{pct} {philosophy} */
   normal: string
-  /** 紧急档首句。占位符:{pct} */
+  /** 紧急档首句。占位符:{pct} {philosophy} */
   emergency: string
-  /** 指导行。无占位符 */
+  /** 指导行（HOW_TO_COMPRESS_RULES）。无占位符 */
   guidance: string
   /** tier 蒸馏行。占位符:{tier} {count} {prevTier} {tokens} {seqs} */
   tier: string
+  /** 上下文分解。占位符:{system} {tool} {summaries} {code} {text} */
+  breakdown: string
+  /** 增长行。占位符:{growth} */
+  growth: string
+  /** 溢出提示。无占位符 */
+  tip: string
 }
 
 export interface RangeTablePrompts {
@@ -73,10 +79,13 @@ export interface ResolvedPrompts {
 
 /** 每槽允许的占位符名集合(构建期校验用)。 */
 const NUDGE_ALLOWED: { [K in keyof NudgePrompts]: ReadonlySet<string> } = {
-  normal: new Set(['pct']),
-  emergency: new Set(['pct']),
+  normal: new Set(['pct', 'philosophy']),
+  emergency: new Set(['pct', 'philosophy']),
   guidance: new Set(),
   tier: new Set(['tier', 'count', 'prevTier', 'tokens', 'seqs']),
+  breakdown: new Set(['system', 'tool', 'summaries', 'code', 'text']),
+  growth: new Set(['growth']),
+  tip: new Set(),
 }
 const RANGE_TABLE_ALLOWED: { [K in keyof RangeTablePrompts]: ReadonlySet<string> } = {
   header: new Set(['surface']),
@@ -90,7 +99,7 @@ const TOOLS_ALLOWED: { [K in keyof ToolPrompts]: ReadonlySet<string> } = {
   searchContext: new Set(),
   acpStatus: new Set(),
 }
-const SYSTEM_ALLOWED = new Set(['philosophy'])
+const SYSTEM_ALLOWED = new Set(['philosophy', 'howToCompressRules', 'tier2DistillRules', 'tier3CondenseRules'])
 
 /** 校验单个模板:未知 `{ident}` → throw(带槽位路径)。默认模板开发期已核验,不重扫。 */
 function validateTemplate(template: string, allowed: ReadonlySet<string>, path: string): string {
@@ -163,9 +172,14 @@ export function resolvePrompts(input?: AcpPrompts): ResolvedPrompts {
   }
 }
 
-/** 渲染 system prompt 模板(注入 kernel 压缩哲学)。 */
+/** 渲染 system prompt 模板(注入 kernel 压缩哲学、压缩规则、蒸馏规则)。 */
 export function renderSystemPrompt(prompts: ResolvedPrompts): string {
-  return renderTemplate(prompts.systemPromptTemplate, { philosophy: COMPRESS_PHILOSOPHY })
+  return renderTemplate(prompts.systemPromptTemplate, {
+    philosophy: COMPRESS_PHILOSOPHY,
+    howToCompressRules: HOW_TO_COMPRESS_RULES,
+    tier2DistillRules: TIER2_DISTILL_RULES,
+    tier3CondenseRules: TIER3_CONDENSE_RULES,
+  })
 }
 
 /**
@@ -174,10 +188,15 @@ export function renderSystemPrompt(prompts: ResolvedPrompts): string {
  */
 export const DEFAULT_PROMPTS: ResolvedPrompts = {
   nudge: {
-    normal: 'Context usage is at {pct}%. This is a suggestion, not a requirement — you decide whether and when to compress.',
-    emergency: '⚠️ Context usage is at {pct}% of the window — nearly full. Consider compressing consumed ranges soon so working context stays available; the choice and timing are yours.',
-    guidance: 'Compress by need, not by percentage: replace only ranges you have genuinely consumed, with dense self-contained summaries.',
+    // 与 kernel nudge-text.ts EFFICIENCY_NOTE 逐字对齐——不含 "Context usage is at X%"
+    // 陈述(usage 只通过 breakdown 传达);{pct} 仍可用作自定义占位符。
+    normal: 'This is an efficiency nudge to compress early and keep context lean — not an overflow warning. A separate, stronger alert will appear if the context is actually full.\n\n{philosophy}',
+    emergency: '⚠️ Context limit reached — compress now. Prioritize consumed tool outputs.\n\n{philosophy}',
+    guidance: HOW_TO_COMPRESS_RULES,
     tier: 'Tier {tier}: {count} tier-{prevTier} block(s) distillable ({tokens} tokens) — compress their summary node(s) [seqs {seqs}] to reclaim the original messages.',
+    breakdown: 'Context breakdown: {system}K system | {tool}K tool | {summaries}K summaries | {code}K code | {text}K text',
+    growth: '+{growth}K since last nudge',
+    tip: '💡 Compress all ranges in one call (pass multiple content entries: `content: [{...}, {...}]`).',
   },
   rangeTable: {
     header: 'Surface: {surface}',
@@ -194,9 +213,25 @@ export const DEFAULT_PROMPTS: ResolvedPrompts = {
   },
   systemPromptTemplate: `Active Context Pruning — model-driven context management
 
-YOU decide whether and when to compress context. Nothing forces you: the injected "nudge" is a suggestion, not an order, and you may ignore it when compression would not help. Compress only ranges you have genuinely consumed (read tool outputs, finished explorations, superseded steps) that the current work no longer needs verbatim.
+YOU decide whether and when to compress context. The nudge is an efficiency notification: when you see one, consider which ranges you have genuinely consumed and could summarise to keep working context lean.
 
 {philosophy}
+
+WHEN TO COMPRESS:
+- A sub-agent or delegated task has returned a large result that you have already extracted the key facts from.
+- Verbose command output (build/test logs, git diff, directory listings) where you have already used the information you need.
+- Exploration that led nowhere.
+- Repeated reads of the same file or repeated status checks once the decision is recorded.
+- Resolved discussion threads where a decision has been captured in summary or in code.
+- Intermediate steps of a completed multi-step task, once the final result is recorded.
+- A task phase has ended — bug hunt complete, root cause found, exploration done, research sprint wrapped.
+
+WHEN NOT TO COMPRESS:
+- Content the current step is actively reading or reasoning about.
+- Important user messages — preserve their exact intent, constraints, and acceptance criteria.
+- Protected tool outputs — hard-excluded from compression ranges, survive intact in visible context.
+
+{howToCompressRules}
 
 Compression tools (refs are SURFACE SEQS, not ids):
 - compress: replace one or more seq ranges, each with your own dense summary. Single range: compress({ content: [{ startSeq, endSeq, summary }] }). Batch multiple unrelated segments in one call (each entry becomes its own block): compress({ content: [{ startSeq: 1, endSeq: 5, summary: '...' }, { startSeq: 12, endSeq: 18, summary: '...' }] }). Keep ranges disjoint — overlapping entries in one batch are skipped. Edges are auto-balanced to tool-call/result boundaries; a trailing #callId fragment in a seq is ignored. Seq refs must be on the current surface: seqs from older nudges or earlier compresses go stale as the surface moves, so a stale span is auto-remapped to its still-live remainder (the result reports the adjusted span), a fully compressed span is reported as already compressed, and invented/other-session seqs fail with guidance.
@@ -205,6 +240,10 @@ Compression tools (refs are SURFACE SEQS, not ids):
 - acp_status: current context usage and the live compressible-range list. Run it right before compressing — the only seqs that never go stale are the ones you just read.
 
 Tiered compression: each compressed block appears on the surface as one summary node. Compressing that node again DISTILLS the block (tier 2): the parent summary folds into your new summary and the original messages are freed. Distilling a tier-2 block yields tier 3. Distill when a summary itself is consumed — decompress on the tier-2 block recovers the full originals.
+
+{tier2DistillRules}
+
+{tier3CondenseRules}
 
 When you write a summary, it becomes the ONLY record of that range: keep file paths, signatures, exact values, decisions, and error strings verbatim so a later reader (or you, after decompress) can continue without the original. Never reuse historical seqs — the surface moves as messages land and compress; verify with acp_status.`,
 }

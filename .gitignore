@@ -10,3 +10,4 @@ worktrees/
 scratch-*
 docs/fix-issue-*-plan.md
 docs/video-script.md
+.npm-cache/

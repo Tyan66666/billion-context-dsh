@@ -236,6 +236,40 @@ test('M3: tools refuse to run without an agent context', async () => {
   )
 })
 
+test('M3: compress tolerates the wrapped-arguments form ({ arguments: "..." } double-nesting)', async () => {
+  // Some models emit `{ "arguments": "{\"content\": [...]}" }` (double-nested)
+  // instead of the unwrapped `{ "content": [...] }`. The old DSH validator
+  // surfaced this as `"arguments" must be an object` and sent the model into a
+  // retry loop; the schema now accepts `arguments` as an optional JSON node
+  // and handleCompress unwraps it before range resolution.
+  const env = makeEnv()
+  const session = buildTextSession(12)
+  const compress = toolOf(env, 'compress')
+  const wrapped = {
+    arguments: JSON.stringify({
+      content: [{
+        startSeq: 1,
+        endSeq: 3,
+        summary: 'Authentication: JWT access tokens with 15 minute expiry, refresh tokens in Redis with 30 day TTL, login flow in src/auth/login.ts with sliding-window rate limiting at 10 requests per minute, bcrypt at cost 12.',
+      }],
+    }),
+  }
+  const result = await compress.execute(wrapped as never, fakeExec(session))
+  const text = (result as { text: string }).text
+  assert.match(text, /Compressed 1 block/, 'the wrapped form unwraps and compresses the same content')
+  const ledger = rebuildBlockLedger(session.events)
+  assert.equal(ledger.length, 1, 'the wrapped form lands the durable block')
+})
+
+test('M3: compress reports a clear error when neither form carries content', async () => {
+  const env = makeEnv()
+  const session = buildTextSession(4)
+  const compress = toolOf(env, 'compress')
+  const result = await compress.execute({ arguments: 'not even json' } as never, fakeExec(session))
+  assert.match((result as { text: string }).text, /missing content/, 'no content in either form yields the guidance message')
+  assert.equal(rebuildBlockLedger(session.events).length, 0, 'no block lands without content')
+})
+
 /** A session whose second node is a multi-tool-call assistant message. */
 function buildMultiCallSession(): Session {
   const session = Session.create('multi')
