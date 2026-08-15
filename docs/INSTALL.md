@@ -33,9 +33,10 @@ npm install --prefix ~/.dsh/profiles/web ./billion-context-dsh-0.0.0.tgz
 ```yaml
 # ACP 作为全局压缩后端：四个模型工具 + `/acp` 命令 + nudge + ACP 提示词段，
 # 对每个模式（standard / code / minimal / cordis / 自定义预设）都生效。
-# 必须同时禁用 host 的 compaction-basic：同一 realm 内两个后端同时
-# provide `ctx.compaction` 会冲突（README 的 "One context manager per
-# agent" 警告），默认 web profile 的 host 层本来就挂着 compaction-basic。
+# 通常应禁用 host 的 compaction-basic（同一 realm 内两个后端同时
+# provide `ctx.compaction` 会冲突），但注意：dsh 0.1.0-rc.6+ 上 web-app
+# bundle 已自带该行的 disabled: true，此处显式禁用是冗余的（无害，保留
+# 仅作兼容提醒；若 bundle 默认值跟踪变化，可省略此段）。
 - id: compaction-basic
   disabled: true
 
@@ -129,5 +130,6 @@ npm run typecheck && npm test && npm run build
 rm ~/.dsh/profiles/web/node_modules/billion-context-dsh   # 或对应 tarball 安装
 # 从 cordis.patch.yml 删除 compaction-acp 插入行；若按 2a 全局方案装的，
 # 还要删除对 compaction-basic 的 disabled: true（恢复默认自动压缩）。
+# 注意：dsh 0.1.0-rc.6+ 上 bundle 自带该 disabled: true，如未显式添加则无需删除。
 # 视热加载/重启策略生效。
 ```
