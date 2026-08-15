@@ -40,7 +40,7 @@ Design decisions (see docs/dsh-porting-verification.md for the full evidence):
 2. **Seq is the ref** — no `<acp>` tags; the nudge's range table carries surface seqs.
 3. **No automatic summarization** — `compactIfNeeded` returns null; nudges are advisory, never imperative ("the choice and timing are yours").
 4. **Model-driven summaries** — the model writes the summary via `compress`; no second LLM summarization call.
-5. **`acp-kernel` pinned to an exact version** (e.g. `"acp-kernel": "0.0.23"`, NEVER `^`). It is inlined by tsup; a caret range breaks reproducibility.
+5. **`acp-kernel` pinned to an exact version** (e.g. `"acp-kernel": "0.0.24"`, NEVER `^`). It is inlined by tsup; a caret range breaks reproducibility.
 
 ## 3. Hard-won rules (from v0.1.1 long-session battle)
 
@@ -86,7 +86,7 @@ The PR title is enforced by CI (`.github/workflows/pr-lint.yml` → `scripts/che
 
 ## 4b. acp-kernel upgrade policy (the kernel WILL move on)
 
-`acp-kernel` is pinned **exactly** (e.g. `0.0.23`, never `^`) because tsup inlines it — a caret range makes the resolved version drift when the lockfile regenerates, breaking reproducible builds. But pinning is **not** freezing: upgrades are a controlled, manual process.
+`acp-kernel` is pinned **exactly** (e.g. `0.0.24`, never `^`) because tsup inlines it — a caret range makes the resolved version drift when the lockfile regenerates, breaking reproducible builds. But pinning is **not** freezing: upgrades are a controlled, manual process.
 
 **When to check:** on any feature work, or monthly — `npm view acp-kernel version`.
 

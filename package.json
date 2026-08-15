@@ -28,7 +28,7 @@
 		"test": "node --import tsx --test tests/*.test.ts"
 	},
 	"dependencies": {
-		"acp-kernel": "0.0.23"
+		"acp-kernel": "0.0.24"
 	},
 	"peerDependencies": {
 		"@deepseek-ai/cordis": "^4.0.1",
