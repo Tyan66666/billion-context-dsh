@@ -11,6 +11,7 @@ import {
   TIER2_DISTILL_RULES,
   TIER3_CONDENSE_RULES,
   defaultCountTokens,
+  renderNudgeText,
   type CompressionCore,
   type CoreMessage,
   type NudgeDecision,
@@ -150,17 +151,128 @@ export function buildNudge(
 }
 
 /**
- * Render the nudge message text — aligned with the kernel/billion-context-pi
- * style: efficiency note + philosophy, context breakdown, HOW_TO_COMPRESS_RULES,
- * then the DSH-specific seq-based range table and the batch-compress tip.
- * The range table is our own (seq-based, not ref-ID-based) because DSH has no
- * in-memory message rewrite hook — see docs/dsh-porting-verification.md.
+ * Render the nudge message text. DEFAULT (no `config.prompts.nudge` override)
+ * calls the kernel's own `renderNudgeText` — EFFICIENCY_NOTE/EMERGENCY_HEADER,
+ * context breakdown, HOW_TO_COMPRESS_RULES, tier rules, and the batch tip all
+ * come from acp-kernel verbatim (the kernel-alignment principle). Only the
+ * ref-ID-oriented segments are replaced with our seq-based equivalents,
+ * because DSH has no `<acp>` ref tags — see docs/dsh-porting-verification.md:
+ * - `rangesStr` (mNNNNN refs) → the surface-seq range table;
+ * - the emergency JSON example (startId/endId) → a seq example;
+ * - the tier trigger block (block ids bN) → our tier line with surface seqs.
+ * When a host overrides any `prompts.nudge` slot, the template path is used so
+ * `config.prompts` keeps full control (custom copy wins over kernel defaults).
  */
 export function buildNudgeText(
   nudge: NudgeDecision,
   emergency: boolean,
   session: import('@deepseek-ai/dsh-session').Session,
   prompts: ResolvedPrompts = DEFAULT_RESOLVED,
+): string {
+  // A host override of any nudge slot → template rendering (config.prompts
+  // keeps its v0.1.9 contract: custom copy wins). Only the pristine default
+  // reference reaches the kernel path.
+  if (prompts.nudge !== DEFAULT_RESOLVED.nudge) {
+    return renderNudgeFromTemplates(nudge, emergency, session, prompts)
+  }
+  const rendered = renderNudgeText(nudge)
+  return adaptKernelNudgeToSeq(rendered.text, nudge, session, prompts)
+}
+
+/**
+ * Take the kernel-rendered nudge text and replace its ref-ID-oriented segments
+ * with our surface-seq equivalents. Everything else (frame, philosophy,
+ * breakdown, HOW_TO_COMPRESS_RULES, tier rules, tip) stays kernel verbatim.
+ */
+function adaptKernelNudgeToSeq(
+  text: string,
+  nudge: NudgeDecision,
+  session: import('@deepseek-ai/dsh-session').Session,
+  prompts: ResolvedPrompts,
+): string {
+  let out = text
+  // Tier nudges: replace the kernel trigger block (block ids bN) with our tier
+  // line carrying surface seqs. The kernel's TIER2/3 rules stay in the tail.
+  if ((nudge.tier === 2 || nudge.tier === 3) && (nudge.tierTargetBlocks?.length ?? 0) > 0) {
+    out = replaceTierTrigger(out, nudge, session, prompts)
+  } else if (out.includes('"startId"')) {
+    // Emergency nudges: replace the ref-ID JSON example with a seq example.
+    out = replaceEmergencyExample(out)
+  }
+  // Replace the ref-ID range table (mNNNNN) with the surface-seq table.
+  // A zero-range table leaves the kernel's own "[No specific ranges detected]"
+  // notice intact — it is a better prompt than an empty table.
+  const seqTable = rangeTable(session, prompts)
+  if (seqTable !== '') out = replaceRangesStr(out, seqTable)
+  return out
+}
+
+/** Replace the kernel rangesStr segment (`Compressible ranges (N, oldest first):…`) with our seq table. */
+function replaceRangesStr(text: string, seqTable: string): string {
+  const match = text.match(/\n\n(?:Compressible ranges \(|\[No specific ranges detected)/)
+  if (!match) return text
+  const start = match.index!
+  const rest = text.slice(start + 2)
+  const next = rest.match(/\n\n/)
+  const end = next !== null ? start + 2 + next.index! : text.length
+  const before = text.slice(0, start)
+  const after = text.slice(end)
+  // seqTable starts with '\n' (the range table's leading blank line), so
+  // `before` + '\n' + seqTable yields one blank line before the table.
+  return before + '\n' + seqTable + after
+}
+
+/** Replace the kernel tier trigger segment (`[TIER n …TRIGGER]…Example: compress(…)`) with our tier line. */
+function replaceTierTrigger(
+  text: string,
+  nudge: NudgeDecision,
+  session: import('@deepseek-ai/dsh-session').Session,
+  prompts: ResolvedPrompts,
+): string {
+  const start = text.search(/\n\n(?:\[TIER \d|\[EMERGENCY — TIER \d)/)
+  if (start === -1) return text
+  const rest = text.slice(start + 2)
+  const next = rest.match(/\n\nHOW TO COMPRESS/)
+  const end = next !== null ? start + 2 + next.index! : text.length
+  const targets = nudge.tierTargetBlocks!
+  const summarySeqs = targets
+    .map((block) => summarySeqOfKernelBlock(session, block.blockId))
+    .filter((seq): seq is number => seq !== null)
+  const pending = nudge.tier === 2 ? nudge.breakdown?.pendingT2 : nudge.breakdown?.pendingT3
+  const tokens = typeof pending === 'number' ? pending : 0
+  const tierValue = nudge.tier === null ? 2 : nudge.tier
+  const tierLine = renderTemplate(prompts.nudge.tier, {
+    tier: tierValue,
+    count: targets.length,
+    prevTier: tierValue - 1,
+    tokens,
+    seqs: summarySeqs.join(', '),
+  })
+  return text.slice(0, start) + '\n\n' + tierLine + text.slice(end)
+}
+
+/** Replace the kernel emergency JSON example (startId/endId) with a seq example. */
+function replaceEmergencyExample(text: string): string {
+  const start = text.search(/\n\n\{ "topic":/)
+  if (start === -1) return text
+  const rest = text.slice(start + 2)
+  const next = rest.match(/\n\nCompressible ranges |\n\n\[No specific/)
+  const end = next !== null ? start + 2 + next.index! : text.length
+  return text.slice(0, start)
+    + '\n\ncompress({ content: [{ startSeq, endSeq, summary }] }) — use the seqs from the range table above.'
+    + text.slice(end)
+}
+
+/**
+ * Template rendering path (used only when a host overrides a `prompts.nudge`
+ * slot). Kept byte-compatible with the pre-refactor assembly: frame → breakdown
+ * → growth → guidance → tier(+rules)/range table → tip.
+ */
+function renderNudgeFromTemplates(
+  nudge: NudgeDecision,
+  emergency: boolean,
+  session: import('@deepseek-ai/dsh-session').Session,
+  prompts: ResolvedPrompts,
 ): string {
   // Cap the reported percentage at 100: a broken measurement (e.g. response
   // pressure folded in) must never surface as an absurd "230%" to the model.

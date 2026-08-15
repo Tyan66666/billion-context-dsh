@@ -78,7 +78,7 @@ npm install billion-context-dsh
         modelContextLimit: 128000   # 可选；省略时自动探测模型真实窗口（回退 128000）
 ```
 
-**（可选）自定义提示词文案 —— `config.prompts`。** 所有模型可见的提示词（普通/紧急 nudge 首句、上下文分解、增长行、批量提示、tier 蒸馏行、范围表、ACP system prompt 段、四个工具描述）默认是内置文案（已对齐 acp-kernel / billion-context-pi 的 nudge 风格：效率提示 + 上下文分解 + 压缩规则），可通过组合行的 `config` 按槽位覆盖。模板支持命名占位符（如 nudge 的 `{pct}`、`{philosophy}`、范围表的 `{surface}`），**构造期校验**：占位符拼写错误会在引擎启动时抛错（fail-fast），而不是把字面 `{pct}` 漏进模型上下文：
+**（可选）自定义提示词文案 —— `config.prompts`。** 所有模型可见的提示词（普通/紧急 nudge 首句、上下文分解、增长行、批量提示、tier 蒸馏行、范围表、ACP system prompt 段、四个工具描述）默认**直接复用 acp-kernel 的 `renderNudgeText`**——效率提示、上下文分解、压缩规则、批量提示全部来自 kernel 原文，仅范围表换成 surface-seq 版（kernel 用 mNNNNN 引用，我们架构没有 `<acp>` 标签）。覆盖任一 nudge 槽位后自动切换到模板渲染。模板支持命名占位符（如 nudge 的 `{pct}`、`{philosophy}`、范围表的 `{surface}`），**构造期校验**：占位符拼写错误会在引擎启动时抛错（fail-fast），而不是把字面 `{pct}` 漏进模型上下文：
 
 ```yaml
       config:
@@ -90,7 +90,7 @@ npm install billion-context-dsh
             acpStatus: '报告 ACP 块账本：压缩块数、回收 token、当前上下文压力。'  # 自定义工具描述
 ```
 
-可配置槽位清单、每槽可用占位符、空串/`null` 语义见 [docs/configurable-prompts-design.md](docs/configurable-prompts-design.md)。未配置 `prompts` 的部署使用内置默认文案（对齐 kernel/pi，见设计文档 v5）。
+可配置槽位清单、每槽可用占位符、空串/`null` 语义见 [docs/configurable-prompts-design.md](docs/configurable-prompts-design.md)。未配置 `prompts` 的部署直接使用 kernel 渲染（对齐 kernel/pi，见设计文档 v6）。
 
 **单模式生效（agent preset 的 `compaction` realm）**。先在该 realm 内*禁用（或删除）原有的 `dsh-compaction-basic` 行*，再插入本引擎——同一 realm 内两个后端不能并存：
 

@@ -67,11 +67,22 @@ function requireAgent(exec: ToolRunContext): Agent {
 }
 
 const compressParameters = {
+  // Tolerated wrapped-arguments form: some models emit
+  // `{ "arguments": "{\"content\": [...]}" }` (double-nested) or
+  // `{ "arguments": { "content": [...] } }` instead of the unwrapped
+  // `{ "content": [...] }`. The old DSH validator surfaced this as
+  // `invalid arguments: "arguments" must be an object` and the model retried
+  // forever. `arguments` is accepted as an optional JSON node so the wrapped
+  // shape passes schema validation; `handleCompress` unwraps it and falls back
+  // to a clear runtime error when neither form carries content. `content` is
+  // intentionally NOT `required: true` — a required property would reject the
+  // wrapped shape before `handleCompress` can see it. The tool description
+  // still tells the model content is mandatory.
+  arguments: { type: 'json', description: 'Tolerated wrapped-arguments form (model-generated); unwrapped in handleCompress. Prefer passing content directly.' },
   topic: { type: 'string' as const, description: 'Fallback topic for entries without their own.' },
   content: {
     type: 'array' as const,
-    required: true,
-    description: 'One or more ranges to compress, each with startSeq/endSeq boundaries (surface seqs) and a dense summary.',
+    description: 'One or more ranges to compress, each with startSeq/endSeq boundaries (surface seqs) and a dense summary. Required — pass it directly, not wrapped in an arguments key.',
     items: {
       type: 'object' as const,
       properties: {
@@ -106,8 +117,33 @@ function parseSeq(value: number | string): number {
 }
 
 interface CompressArgs {
+  /** Tolerated wrapped-arguments form (model-generated double-nesting). */
+  arguments?: string | { content?: CompressArgs['content'] }
   topic?: string
-  content: Array<{ startSeq: number | string; endSeq: number | string; summary: string; topic?: string }>
+  content?: Array<{ startSeq: number | string; endSeq: number | string; summary: string; topic?: string }>
+}
+
+/**
+ * Unwrap the tolerated wrapped-arguments forms back to the canonical shape:
+ * `{ arguments: "{\"content\": [...]}" }` or `{ arguments: { content: [...] } }`
+ * → `{ content: [...] }`. The direct `{ content: [...] }` form passes through
+ * untouched. Returns null when no form carries content (caller raises).
+ */
+function unwrapCompressArgs(args: CompressArgs): CompressArgs | null {
+  if (args.content !== undefined) return args
+  if (args.arguments === undefined) return null
+  let inner: unknown = args.arguments
+  if (typeof inner === 'string') {
+    try {
+      inner = JSON.parse(inner)
+    } catch {
+      return null
+    }
+  }
+  if (typeof inner !== 'object' || inner === null || Array.isArray(inner)) return null
+  const content = (inner as { content?: unknown }).content
+  if (content === undefined) return null
+  return { ...args, content: content as CompressArgs['content'] }
 }
 
 /** Resolve seq → kernel ref, then applyCompression and land the transaction. */
@@ -130,6 +166,17 @@ async function handleCompress(env: ToolEnvironment, args: CompressArgs, exec: To
   env.store.set(session, turn.state)
   const byRaw = turn.state.messageRefs.byRaw
 
+  // Tolerate the wrapped-arguments forms some models emit (double-nested
+  // `{ arguments: "..." }`), which the old DSH validator surfaced as
+  // `"arguments" must be an object` and sent the model into a retry loop.
+  const unwrapped = unwrapCompressArgs(args)
+  if (unwrapped === null) {
+    return {
+      text: 'compress: missing content — pass the content array directly: compress({ content: [{ startSeq, endSeq, summary }] })',
+    }
+  }
+  args = unwrapped
+
   const ranges: Array<
     ResolvedSurfaceRange & {
       startSeq: number
@@ -143,7 +190,7 @@ async function handleCompress(env: ToolEnvironment, args: CompressArgs, exec: To
   // Ranges whose whole span was already shadowed by earlier compressions.
   // They land as advisory warnings, never as errors or phantom blocks.
   const alreadyCompressedNotes: string[] = []
-  for (const range of args.content) {
+  for (const range of args.content!) {
     const startSeq = parseSeq(range.startSeq)
     const endSeq = parseSeq(range.endSeq)
     let resolved: ResolvedSurfaceRange

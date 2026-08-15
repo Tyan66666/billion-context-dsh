@@ -27,7 +27,7 @@ src/
 ├── state.ts        # M2: per-session kernel state
 ├── region.ts       # M5: durable region transaction + log-rebuilt ledger + surface range solving
 ├── tools.ts        # M3: compress / decompress / search_context / acp_status
-├── nudge.ts        # M4: advisory nudge (surface-computed range table)
+├── nudge.ts        # M4: kernel renderNudgeText (default) + seq-range-table adaptation; template path on prompts override
 ├── system-prompt.ts# M4: one-time ACP guidance section
 ├── prompts.ts      # M4: configurable prompt templates + render/validate (config.prompts)
 ├── config.ts       # kernel config assembly (thresholds + coreOverrides)

@@ -1,5 +1,11 @@
-# 可配置提示词设计(Configurable Prompts Design)— v5
+# 可配置提示词设计(Configurable Prompts Design)— v6
 
+> **修订记录(v6,默认 nudge 渲染改走 kernel `renderNudgeText`;compress 工具参数包裹容错):**
+> - **R1**:默认(无 `prompts.nudge` 覆盖)`buildNudgeText` 直接调用 kernel `renderNudgeText(nudge)`——EFFICIENCY_NOTE/EMERGENCY_HEADER、breakdown、HOW_TO_COMPRESS_RULES、TIER2/3 规则、`💡` tip **全部来自 acp-kernel 原文**,不再手抄模板。仅把 ref-ID 导向的段替换为 surface-seq 版本:`rangesStr`(mNNNNN)→ 我们的范围表;紧急档 JSON example(startId/endId)→ seq 示例;tier 触发块(bN block ids)→ 我们的 tier 行。零范围时保留 kernel 的 "[No specific ranges detected]" 提示。
+> - **R2**:**双路径分派**——`prompts.nudge !== DEFAULT_RESOLVED.nudge`(宿主覆盖了任何 nudge 槽位)→ 走模板渲染路径(`renderNudgeFromTemplates`,v5 装配原样保留,config.prompts 定制优先);否则走 kernel 路径。默认引用(未覆盖)与模板路径按引用相等判断。
+> - **R3**:kernel 路径下紧急档**无 `💡 tip`**(kernel 紧急分支没有批量提示行)——这是与 kernel 对齐的行为变化,测试 #3 断言同步更新。
+> - **R4**:**compress 工具参数包裹容错**——部分模型把参数写成 `{ "arguments": "{\"content\": [...]}" }`(双重嵌套)或 `{ "arguments": { "content": [...] } }`;旧 DSH 校验器报 `invalid arguments: "arguments" must be an object` 导致模型无限重试。修复:schema 增加可选 `arguments`(type: `json`)节点 + `content` 去掉 `required: true`(required 会在解包前拒绝包裹形态),`handleCompress` 用 `unwrapCompressArgs` 解包;两种形态都不带 content 时报清晰错误。
+>
 > **修订记录(v5,对齐 kernel/billion-context-pi 的 nudge 文案与装配):**
 > - **K1**:默认 nudge 文案对齐 kernel——普通档首句从"suggestion, not a requirement"改为"efficiency nudge to compress early and keep context lean";紧急档从"Consider…the choice is yours"改为"⚠️ Context limit reached — compress now";两档均在模板中嵌入 `{philosophy}`(kernel `COMPRESS_PHILOSOPHY`)。
 > - **K2**:`NudgePrompts` 新增 3 个槽位——`breakdown`(上下文分解,占位符 `{system} {tool} {summaries} {code} {text}`)、`growth`(增长行,`{growth}`)、`tip`(批量压缩提示,无占位符);默认值逐字对齐 kernel `nudge-text.ts` 的 `formatBreakdown` / `formatRanges` 尾部 `💡` 行。
@@ -199,10 +205,26 @@ export function renderSystemPrompt(prompts: ResolvedPrompts): string { … }
 - **组级 null 防御(W3)**:YAML 宿主可能写 `prompts: { nudge: null }`(键级 null 在 TS 下合法,组级 null 过不了类型但 YAML 无类型检查);`resolvePrompts` 对组级 null 视为**整组用默认**——逐键比较前先做组级归一化;
 - 类型层面 `PromptInput = string | null`,`ResolvedPrompts` 全是 `string`——null 只存在于输入侧,解析后被归一化,消费方永远看到 string。
 
-**空串删除的精确装配语义(I5/N1 定案,叠加 K3 对齐 kernel 后的装配顺序)——以 nudge 为例:**
+**双路径装配(R1/R2 定案,v6)——默认走 kernel 渲染,覆盖走模板:**
 
 ```
-nudge 装配(v5,对齐 kernel renderNudgeText 的顺序):
+buildNudgeText(nudge, emergency, session, prompts):
+  if (prompts.nudge !== DEFAULT_RESOLVED.nudge):        // R2:宿主覆盖了 nudge 槽位
+    return renderNudgeFromTemplates(...)                 // 模板路径(v5 装配,见下)
+  // 默认:kernel renderNudgeText + seq 段适配(R1)
+  rendered = renderNudgeText(nudge)                      // EFFICIENCY_NOTE/EMERGENCY_HEADER、
+                                                         // breakdown、HOW_TO_COMPRESS_RULES、
+                                                         // TIER2/3 规则、💡 tip 全部来自 kernel 原文
+  return adaptKernelNudgeToSeq(rendered.text, ...):
+    if (tier 2/3 && tierTargetBlocks 非空)  replaceTierTrigger(...)   // bN 块 id 段 → 我们的 tier 行(seqs)
+    else if (text 含 '"startId"')           replaceEmergencyExample(...) // startId/endId 示例 → seq 示例
+    if (rangeTable(session, prompts) !== '') replaceRangesStr(...)      // mNNNNN 范围表 → surface-seq 表
+    // 零范围:保留 kernel 的 "[No specific ranges detected]" 提示(比空表好)
+```
+
+模板路径(仅覆盖时)装配顺序(v5 原样,config.prompts 定制优先):
+
+```
   parts = [frame]                       // frame = normal/emergency 模板渲染({pct} + {philosophy} 内嵌)
   if (breakdown 渲染非空)  push('', breakdown)   // P8,来自 nudge.contextBreakdown
   if (growth 渲染非空)     push(growth)          // P9,仅 contextBreakdown.growth > 0 时渲染
@@ -217,16 +239,15 @@ nudge 装配(v5,对齐 kernel renderNudgeText 的顺序):
   return parts.join('\n')
 ```
 
-字节对照表(v5;K3 后装配顺序与 v4 不同,tier 分支不再渲染范围表):
+字节对照表(v6;R3 后默认紧急档**无 `💡 tip`**——kernel 紧急分支本来就没有批量提示行):
 
 | 情形 | 完整字节 |
 |---|---|
-| 默认有范围(非 tier) | `frame` `\n\n` `breakdown` `\n` `growth` `\n\n` `guidance` `\n\n` `Surface: …` `\n\n` `tip`(breakdown/growth/guidance 各带分隔;表前空行由范围表内部前导元素提供) |
-| 无 breakdown/growth | `frame` `\n\n` `guidance` `\n\n` `Surface: …` `\n\n` `tip` |
-| tier nudge | `frame` `\n\n` `breakdown` … `\n\n` `guidance` `\n` `tierLine` `\n\n` `TIER2_DISTILL_RULES…` `\n\n` `tip`(**无范围表**,K3) |
-| 零范围(非 tier) | `frame` `\n\n` `guidance` `\n` `\n` `tip`(范围表返回 `''` 仍被 push,尾部换行是字节的一部分) |
-| `guidance: ''`(有范围) | `frame` `\n\n` `breakdown`… `\n\n` `Surface: …` `\n\n` `tip`(干净删除 guidance;表前空行仍由范围表前导元素提供) |
-| `normal: ''` | 输出以 `\n\n` 开头(实测,S4;允许,文档如此定义) |
+| 默认有范围(非 tier) | kernel 渲染,`rangesStr` 段替换为 `\n` + 我们的范围表;尾部 `💡 tip` 保留 |
+| 默认紧急档 | kernel 渲染,JSON example 段替换为 seq 示例 + `rangesStr` 段替换为范围表;**无 tip**(R3,kernel 对齐) |
+| 默认 tier | kernel 渲染,`[TIER n TRIGGER]` 段替换为我们的 tier 行;TIER2/3 规则保留 |
+| 默认零范围 | kernel 渲染,保留 "[No specific ranges detected]" 提示(R1,不替换为空) |
+| 覆盖路径 | 模板装配(v5 字节表原样) |
 
 **三个最容易写错的细节(N1/W1):**
 1. 范围表**不在 parts 层再加 `''` 分隔**——表前空行完全由范围表内部前导元素提供(§5.2),再加就是双分隔;
@@ -240,6 +261,8 @@ nudge 装配(v5,对齐 kernel renderNudgeText 的顺序):
 > **实现时与 main v0.1.8 对齐**:本设计定稿于 main v0.1.7 时代,实现 rebase 到 v0.1.8 后,默认文案已同步 main 的新增内容——范围表 footer 追加 stale-seq 提示行(提交 `ea1de6a`)、compress 工具描述追加 stale-remap 句(同提交)、system prompt 的 compress/acp_status 描述行更新(同提交)。下方示例即实现 `DEFAULT_PROMPTS` 的逐字内容。
 
 ### 5.1 nudge
+
+> **R1 注**:默认(无覆盖)渲染**不经过这些模板**——`buildNudgeText` 直接调用 kernel `renderNudgeText`,帧/breakdown/规则/tip 全部来自 kernel 原文。下方 DEFAULT_PROMPTS.nudge 的模板值仅用于**宿主覆盖时**的模板路径(`renderNudgeFromTemplates`),作为"未覆盖槽位"的基线;它们的文本与 kernel 逐字对齐,保证覆盖路径与 kernel 路径输出一致。
 
 ```ts
 nudge: {
@@ -326,8 +349,8 @@ tools: {
 |---|---|
 | `src/prompts.ts`(新) | 类型 + `DEFAULT_PROMPTS` + `DEFAULT_RESOLVED` + `resolvePrompts` + `renderTemplate` + `renderSystemPrompt` |
 | `src/index.ts` | 新增实例字段 `readonly prompts: ResolvedPrompts`(赋值先于 env 构建,S5);`AcpConfig` 加 `readonly prompts?: AcpPrompts`;构造器 `this.prompts = resolvePrompts(config.prompts)`(**fail-fast**);env 带 `prompts: this.prompts`;system prompt section 用 `renderSystemPrompt(this.prompts)`;**顺带修复(I-建议4)**:systemPrompt.section 注册补 `internal/service` 冷启动重试(与同文件 tools/commands 的 registerTools 模式一致,现状 `ctx.get('systemPrompt')` 缺席时 ACP 段落会永久丢失) |
-| `src/nudge.ts` | `NudgeEnvironment` 加 `readonly prompts?: ResolvedPrompts`;**B1 关键行**:`buildNudge` 内 `nudge.ts:100` 的调用改为 `buildNudgeText(nudge, emergency, session, env.prompts)`——这是配置进入 nudge 的**唯一转发点**,漏掉 = 配置被接受但静默失效;`buildNudgeText(nudge, emergency, session, prompts = DEFAULT_RESOLVED)`(可选末参);`rangeTable(session, prompts = DEFAULT_RESOLVED)`;拼装改用模板渲染(**K3 装配顺序**:frame → breakdown → growth → guidance → tier(+tier 规则)/范围表 → tip) |
-| `src/tools.ts` | `ToolEnvironment` 加 `readonly prompts?: ResolvedPrompts`;`makeTools` 里四个 description 从 `env.prompts.tools.*` 取,缺省 `DEFAULT_RESOLVED` |
+| `src/nudge.ts` | `NudgeEnvironment` 加 `readonly prompts?: ResolvedPrompts`;**B1 关键行**:`buildNudge` 内 `nudge.ts:100` 的调用改为 `buildNudgeText(nudge, emergency, session, env.prompts)`——这是配置进入 nudge 的**唯一转发点**,漏掉 = 配置被接受但静默失效;`buildNudgeText(nudge, emergency, session, prompts = DEFAULT_RESOLVED)`(可选末参);`rangeTable(session, prompts = DEFAULT_RESOLVED)`;**R1/R2 双路径**:默认引用 → kernel `renderNudgeText` + `adaptKernelNudgeToSeq`(replaceRangesStr / replaceTierTrigger / replaceEmergencyExample);覆盖 → `renderNudgeFromTemplates`(模板装配) |
+| `src/tools.ts` | `ToolEnvironment` 加 `readonly prompts?: ResolvedPrompts`;`makeTools` 里四个 description 从 `env.prompts.tools.*` 取,缺省 `DEFAULT_RESOLVED`;**R4 容错**:compress schema 增加可选 `arguments`(type: `json`)节点、`content` 去掉 `required: true`;`handleCompress` 开头用 `unwrapCompressArgs` 解包 `{ arguments: "..." }` / `{ arguments: {...} }` 两种包裹形态,两种形态都不带 content 时报清晰错误 |
 | `src/system-prompt.ts` | `ACP_SYSTEM_PROMPT` 改为"默认模板渲染结果"导出(名称与语义不变);模板/渲染逻辑留在 `prompts.ts` |
 | `src/prompts.ts` | **K2**:`NudgePrompts` 新增 `breakdown` / `growth` / `tip` 槽位与默认模板;**K1**:normal/emergency 默认模板对齐 kernel(内嵌 `{philosophy}`);`guidance` 默认 = `HOW_TO_COMPRESS_RULES`;**K4**:systemPromptTemplate 新增 `{howToCompressRules}` / `{tier2DistillRules}` / `{tier3CondenseRules}` 占位符 + WHEN TO/WHEN NOT 段落;**K5**:`renderSystemPrompt` 注入 4 个 kernel 变量 |
 | `AGENTS.md` | 模块图加 `prompts.ts`(M4) |
@@ -341,9 +364,14 @@ tools: {
 - `rangeTable(session)` 不变(第二参可选);
 - `ACP_SYSTEM_PROMPT` / `ACP_SYSTEM_PROMPT_ORDER` 导出不变(`index.ts` 原样 re-export);
 - `AcpConfig` 现有字段全部不动,只新增 `prompts`;
-- 未配置 `prompts` 的部署:行为与 v5 的默认模板渲染一致(默认文案已对齐 kernel,见 K1–K4;这是**有意的**默认文案变更,不是兼容性破坏——`prompts` 槽位结构向后兼容,v4 部署写的 `nudge.normal` 覆盖仍然有效)。
+- 未配置 `prompts` 的部署:行为与 v5 的默认模板渲染一致(默认文案已对齐 kernel,见 K1–K4;这是**有意的**默认文案变更,不是兼容性破坏——`prompts` 槽位结构向后兼容,v4 部署写的 `nudge.normal` 覆盖仍然有效);
+- **R1/R2**:默认渲染从"模板装配"改为"kernel `renderNudgeText` + seq 段适配"——输出内容与 v5 默认模板渲染等价(EFFICIENCY_NOTE/breakdown/规则/tip 同源),但来源变为 kernel 原文;宿主覆盖任何 nudge 槽位时自动回退模板路径,覆盖语义不变;
+- **R3**:默认紧急档不再有 `💡 tip`(kernel 紧急分支没有批量提示行)——与 kernel 对齐的预期变化;
+- **R4**:compress 参数 schema 增加可选 `arguments`、`content` 不再 required——`{ content: [...] }` 与 `{ arguments: "..." }` 均接受,后者由 handleCompress 解包;旧的"包裹形态被拒"行为移除。
 
-## 8. 测试计划(v5:77 条回归全绿;§4/§5 快照按新默认文案重写)
+## 8. 测试计划(v6:80 条回归全绿;新增 kernel 路径 + 容错回归)
+
+> **v6 实现落地**:`tests/prompts.test.ts` #2 之后新增 #2b(kernel 路径验证——默认 nudge 含 EFFICIENCY_NOTE 帧、kernel HOW_TO_COMPRESS_RULES、💡 tip,ref 范围表被 surface-seq 表替换、无 "oldest first"、无 "Context usage is at");#3 紧急档断言改为"seq 示例替换 startId + 无 💡 tip(R3)";#11 tier fixture 补齐 kernel 需要的 block 字段(`effectiveMessageIds` 等);`tests/tools.test.ts` 新增 2 条容错回归(包裹字符串形态解包压缩成功、无 content 报清晰错误)。
 
 > **v5 实现落地**:`tests/prompts.test.ts` 的 #1/#2/#3/#10/#13 快照按新默认文案重写——#1 由整串字节对比改为"关键段落存在 + 旧语气缺席"(system prompt 变长且含 kernel 规则,整串快照维护成本高);#2/#3 改为断言 efficiency-note 首句、philosophy 内嵌、HOW_TO_COMPRESS_RULES 存在、💡 tip 结尾、旧文案缺席;#10 空串删除用例同时置空 breakdown/growth/tip 以验证干净装配;新增 breakdown/growth 槽位渲染断言(中文覆盖冒烟 #13 同步扩展)。
 

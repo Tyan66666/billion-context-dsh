@@ -76,7 +76,7 @@ That's it. Then add a composition row where a compaction backend is expected —
         modelContextLimit: 128000   # optional; omit to auto-detect the model's real window (fallback 128000)
 ```
 
-**(Optional) Custom prompt copy — `config.prompts`.** Every model-visible prompt (normal/emergency nudge opener, context breakdown, growth line, batch tip, tier line, range table, the ACP system-prompt section, the four tool descriptions) ships with built-in copy (aligned with acp-kernel / billion-context-pi's nudge style: efficiency note + context breakdown + compression rules) that you can override per slot through the composition row's `config`. Templates support named placeholders (e.g. `{pct}` and `{philosophy}` for nudges, `{surface}` for the range table) and are **validated at construction**: a misspelled placeholder fails engine startup (fail-fast) instead of leaking a literal `{pct}` into the model context:
+**(Optional) Custom prompt copy — `config.prompts`.** Every model-visible prompt (normal/emergency nudge opener, context breakdown, growth line, batch tip, tier line, range table, the ACP system-prompt section, the four tool descriptions) defaults to **acp-kernel's own `renderNudgeText`** — the efficiency note, context breakdown, compression rules, and batch tip all come from the kernel verbatim; only the range table is swapped for the surface-seq version (the kernel uses mNNNNN refs, and DSH has no `<acp>` tags). Overriding any nudge slot switches to template rendering. Templates support named placeholders (e.g. `{pct}` and `{philosophy}` for nudges, `{surface}` for the range table) and are **validated at construction**: a misspelled placeholder fails engine startup (fail-fast) instead of leaking a literal `{pct}` into the model context:
 
 ```yaml
       config:
@@ -88,7 +88,7 @@ That's it. Then add a composition row where a compaction backend is expected —
             acpStatus: 'Report the ACP block ledger: compressed blocks, reclaimed tokens, and current context pressure.'  # custom tool description
 ```
 
-See [docs/configurable-prompts-design.md](docs/configurable-prompts-design.md) for the full slot list, per-slot placeholders, and the empty-string/`null` semantics. Deployments that omit `prompts` use the built-in default copy (aligned with kernel/pi; see design doc v5).
+See [docs/configurable-prompts-design.md](docs/configurable-prompts-design.md) for the full slot list, per-slot placeholders, and the empty-string/`null` semantics. Deployments that omit `prompts` use the kernel rendering directly (aligned with kernel/pi; see design doc v6).
 
 **Per-mode — an agent preset's `compaction` realm.** First *disable (or delete) the realm's existing `dsh-compaction-basic` row*, then mount this engine — two backends cannot coexist in the same realm:
 

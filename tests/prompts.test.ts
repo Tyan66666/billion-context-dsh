@@ -113,7 +113,27 @@ test('M4/prompts 2: default normal nudge — efficiency note + HOW_TO_COMPRESS_R
   assert.ok(text.endsWith('💡 Compress all ranges in one call (pass multiple content entries: `content: [{...}, {...}]`).'), 'tip at end')
 })
 
-test('M4/prompts 3: default emergency nudge — ⚠️ frame + HOW_TO_COMPRESS_RULES + tip', () => {
+test('M4/prompts 2b: default nudge renders through the kernel renderNudgeText path (seq table replaces ref table)', () => {
+  // With a compressible range present, the DEFAULT nudge must come from the
+  // kernel's renderNudgeText (EFFICIENCY_NOTE / breakdown / HOW_TO_COMPRESS_RULES /
+  // tip verbatim) with ONLY the ref-ID rangesStr replaced by our seq table.
+  const session = buildTextSession(12)
+  const text = buildNudgeText(fakeDecision(50, false), false, session)
+  // Kernel frame + philosophy + rules + tip, all verbatim from acp-kernel
+  assert.ok(text.startsWith('This is an efficiency nudge to compress early and keep context lean — not an overflow warning.'), 'kernel EFFICIENCY_NOTE frame')
+  assert.ok(text.includes('HOW TO COMPRESS'), 'kernel HOW_TO_COMPRESS_RULES')
+  assert.ok(text.endsWith('💡 Compress all ranges in one call (pass multiple content entries: `content: [{...}, {...}]`).'), 'kernel batch tip at end')
+  // Ref-ID rangesStr replaced by the surface-seq table
+  assert.ok(!text.includes('oldest first'), 'kernel ref rangesStr header gone')
+  assert.ok(!text.includes('m00150'), 'kernel ref range sample gone')
+  assert.ok(text.includes('seq 1..7'), 'surface-seq range table injected')
+  assert.ok(text.includes('Surface: 12 nodes, seqs 1..12'), 'surface summary present')
+  // No usage statement; the only mNNNNN tokens are inside kernel's own
+  // HOW_TO_COMPRESS_RULES example text (m00420 key anchors), not a leak.
+  assert.ok(!text.includes('Context usage is at'), 'no usage statement')
+})
+
+test('M4/prompts 3: default emergency nudge — ⚠️ frame + HOW_TO_COMPRESS_RULES + seq example', () => {
   const text = buildNudgeText(fakeDecision(96, true), true, buildTextSession(4))
   // Frame: emergency style with philosophy embedded
   assert.ok(text.startsWith('⚠️ Context limit reached — compress now. Prioritize consumed tool outputs.'), 'emergency frame starts with compress now')
@@ -123,8 +143,10 @@ test('M4/prompts 3: default emergency nudge — ⚠️ frame + HOW_TO_COMPRESS_R
   // HOW_TO_COMPRESS_RULES
   assert.ok(text.includes('HOW TO COMPRESS'), 'HOW_TO_COMPRESS_RULES present in emergency')
   assert.ok(text.includes('KEEP VERBATIM'), 'KEEP VERBATIM present in emergency')
-  // Tip at end
-  assert.ok(text.endsWith('💡 Compress all ranges in one call (pass multiple content entries: `content: [{...}, {...}]`).'), 'tip at end in emergency')
+  // Ref-ID example replaced with the seq example (kernel emergency has no 💡 tip)
+  assert.ok(!text.includes('startId'), 'no ref-ID startId in the emergency example')
+  assert.ok(text.includes('compress({ content: [{ startSeq, endSeq, summary }] })'), 'seq example replaces the ref-ID example')
+  assert.ok(!text.includes('💡 Compress all ranges'), 'kernel emergency nudge has no batch tip (kernel parity)')
 })
 
 test('M4/prompts 4: range table snapshot (with ranges) and zero-range early return', () => {
@@ -210,7 +232,7 @@ test('M4/prompts 11: tier line renders (0 tokens) when pending is missing (B2 fa
     shouldInject: true,
     reason: 'tier-2 distillation recommended',
     compressibleRanges: [],
-    tierTargetBlocks: [{ blockId: 'b1' } as never],
+    tierTargetBlocks: [{ blockId: 'b1', tier: 1, effectiveMessageIds: ['m1'], compressedTokens: 4750, summary: 's', active: true, directMessageIds: [], directBlockIds: [], createdAt: 1, survivedCount: 0, generation: 'young' }],
     contextUsage: 0.9,
     tier: 2,
     // pendingT2 deliberately absent at runtime: NudgeBreakdown requires it
