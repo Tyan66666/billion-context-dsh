@@ -3,7 +3,7 @@
 [English](./README.en.md) | [中文](./README.md)
 
 > **⚠️ Beta notice — not for production use**
-> This project (**v0.1.9**) is a work-in-progress beta. The [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) itself is also in **public beta**. **Do not use either in engineering / production environments** — expect breaking changes and rough edges.
+> This project (**v0.2.0**) is a work-in-progress beta. The [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) itself is also in **public beta**. **Do not use either in engineering / production environments** — expect breaking changes and rough edges.
 
 <p align="center">
 <strong>Built with gratitude on top of these projects</strong> — please give them a ⭐:
@@ -55,6 +55,18 @@ This is the DeepSeek Harness port of [billion-context-pi](https://github.com/ran
 ```bash
 npm install billion-context-dsh
 ```
+
+> 💡 **One-command install via `dsh plugin` (bundle, v0.2.0+)**. The package declares a `dsh.bundle`
+> manifest, so DSH's plugin command installs it into the profile and applies the patch
+> automatically (equivalent to the composition row below):
+
+```bash
+dsh plugin --profile web add billion-context-dsh
+```
+
+Restart `dsh` afterwards (bundle layers are composed at startup). For custom `config`
+(such as `modelContextLimit` / `prompts`), keep the hand-written composition row — the
+bundle patch ([cordis.patch.yml](cordis.patch.yml)) only inserts the default row without `config`.
 
 That's it. Then add a composition row where a compaction backend is expected — two scopes, pick by how wide you want it:
 

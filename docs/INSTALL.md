@@ -17,10 +17,25 @@ ln -s /Users/yintianan/GitHub/billion-context-dsh ~/.dsh/profiles/web/node_modul
 
 ```bash
 cd /Users/yintianan/GitHub/billion-context-dsh
-npm pack                        # 产出 billion-context-dsh-0.0.0.tgz
+npm pack                        # 产出 billion-context-dsh-0.2.0.tgz
 mkdir -p ~/.dsh/profiles/web/node_modules
-npm install --prefix ~/.dsh/profiles/web ./billion-context-dsh-0.0.0.tgz
+npm install --prefix ~/.dsh/profiles/web ./billion-context-dsh-0.2.0.tgz
 ```
+
+### 方式 C：bundle 安装（v0.2.0+，`dsh plugin` 一键装）
+
+包已声明 `dsh.bundle` manifest（`package.json` 的 `dsh.bundle.patch` → 仓库根的
+[../cordis.patch.yml](../cordis.patch.yml)），可用 DSH 的插件机制安装，patch 自动把
+ACP 组合行插入当前 profile 的层栈：
+
+```bash
+dsh plugin --profile web add billion-context-dsh
+```
+
+装完重启 `dsh`（bundle 层在启动时组合）。该方式等效于下面 2a 的手写组合行
+（id `compaction-acp`、name `billion-context-dsh`）；bundle 的默认 patch 不带
+`config`（`modelContextLimit` 省略 = 自动探测、提示词用内置文案），需要自定义
+`config` 时仍建议手写组合行。
 
 ## 2. 组合行
 
@@ -131,7 +146,7 @@ cd /Users/yintianan/GitHub/billion-context-dsh
 npm run typecheck && npm test && npm run build
 ```
 
-20 个测试覆盖：seam 挂载、消息投影、压缩事务（事件序列 + surface 遮蔽）、日志重建账本、四工具端到端、nudge 注入/去重/紧急绕过。
+77 个测试覆盖：seam 挂载、窗口探测、CJK 感知 token 估算、消息投影、压缩事务（事件序列 + surface 遮蔽）、日志重建账本、四工具端到端、nudge 注入/去重/紧急绕过、可配置提示词模板与校验。
 
 ## 6. 回滚
 

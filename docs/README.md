@@ -2,7 +2,7 @@
 
 [English](./README.md) · [简体中文](../README.md) · [项目主页](https://github.com/Tyan66666/billion-context-dsh)
 
-> **⚠️ Beta** — this project (v0.1.9) and the [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) are both in **public beta**: do not use in engineering / production environments.
+> **⚠️ Beta** — this project (v0.2.0) and the [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) are both in **public beta**: do not use in engineering / production environments.
 
 Model-driven context management (Active Context Pruning / ACP) for the DeepSeek Harness, ported from [billion-context-pi](https://github.com/ranxianglei/billion-context-pi). The compression core ([acp-kernel](https://github.com/ranxianglei/acp-kernel)) is reused verbatim.
 
@@ -28,12 +28,14 @@ src/
 ├── nudge.ts        # M4: advisory nudge (surface-computed range table)
 ├── system-prompt.ts# M4: one-time ACP guidance section
 ├── config.ts       # kernel config assembly (thresholds + coreOverrides)
+├── window.ts       # auto context-window detection (LLM runtime probe, fallback 128000)
 └── commands.ts     # M4: /acp slash command
 ```
 
 ## 📦 Releases
 
-- [v0.1.9](https://github.com/Tyan66666/billion-context-dsh/releases/tag/v0.1.9) — (chore) bump acp-kernel 0.0.23 → 0.0.24 (inline-dependency upgrade); docs: update acp-kernel version reference in AGENTS.md; 62 tests pass (no regression)
+- [v0.2.0](https://github.com/Tyan66666/billion-context-dsh/releases/tag/v0.2.0) — (feat) ship a `dsh.bundle` manifest: the package is now installable with `dsh plugin --profile web add billion-context-dsh` (the patch auto-inserts the composition row), which also unlocks listing in the awesome-dsh-plugin registry and the dsh-market plugin store; (chore) add npm keywords for search discoverability; docs: bundle install method in README (zh/en) and INSTALL.md 方式 C; 77 tests pass (no regression)
+- [v0.1.9](https://github.com/Tyan66666/billion-context-dsh/releases/tag/v0.1.9) — (feat) configurable per-stage prompts via `config.prompts` (nudge frames/range table/system prompt/tool descriptions as validated templates; fail-fast on unknown placeholders), (chore) bump acp-kernel 0.0.23 → 0.0.24 (inline-dependency upgrade), docs: update acp-kernel version reference in AGENTS.md; 77 tests pass (no regression)
 - [v0.1.8](https://github.com/Tyan66666/billion-context-dsh/releases/tag/v0.1.8) — (fix) system prompt section cold-start retry: the ACP guidance section is now registered even when the `systemPrompt` service activates after the engine — matches the same retry pattern used by tools and commands; (fix) nudge context pressure now reads from `sessionProjections.contextPressure.projectedTokens` (matches the UI context-occupancy display; includes fixed overhead) instead of `tokenMeter.measure(session).surfaceTokens`; docs: INSTALL.md 2a notes that disabling compaction-basic is redundant on dsh 0.1.0-rc.6+; + 3 regression tests (62 tests)
 - [v0.1.7](https://github.com/Tyan66666/billion-context-dsh/releases/tag/v0.1.7) — (fix) compress no longer fails with *seq not in the current surface* when the model reuses stale refs (old nudge tables / earlier compress results): shadowed edges are remapped to the still-live content of the requested span, a fully shadowed span is reported as *already compressed* with the covering block ids, block checkpoint nodes are never folded on a stale reference (distillation stays explicit), and invented/other-session seqs still fail with acp_status guidance; guidance updated in the system prompt, nudge range table and compress tool description, + 6 regression tests (60 tests)
 - [v0.1.6](https://github.com/Tyan66666/billion-context-dsh/releases/tag/v0.1.6) — (feat) auto-detect the model context window from the LLM runtime (`agent.ctx.llm.resolveModelInfo`; explicit `modelContextLimit` wins, falls back to the default), (feat) engine nudge thresholds lowered to 0.70/0.85 (forced nudge before the host 80% compaction line; explicit values win), docs: clarify nudge trigger semantics — growth path has no percentage floor, + 3 regression tests (54 tests)
