@@ -34,7 +34,7 @@
 
 - 模型工具：`ctx.tools.register(ToolDefinition)`（`packages/core/tools/src/index.ts:1037`），`ToolDefinition` 含 `output`、`execute(args, exec)`、`finalizeContent?`、`timeoutMs?`、`isConcurrencySafe?`。
 - 命令：`ctx.commands.register(CommandDefinition)`（`packages/interaction/commands/src/index.ts:245`），`command-compact` 是 `/compact` 的现成参考。
-- 搜索：`ctx.sessionQuery.searchEvents(request, exec)` / `searchSessions`（`packages/session-query/session-query/src/index.ts:113-124`），SQLite 后端 `openAt: 'never' | 'first-search' | 'startup'`（默认 `never`，需在组合中改为 `first-search` 才启用全文搜索）。
+- 搜索：`ctx.sessionQuery.searchEvents(request, exec)` / `searchSessions`（`packages/session-query/session-query/src/index.ts:113-124`），SQLite 后端 `openAt: 'never' | 'first-search' | 'startup'`（默认 `never`，需在组合中改为 `first-search` 才启用全文搜索）——能力已验证但**本引擎未采用**（见 D6：改用 acp-kernel `searchBlocks`，无 opt-in 依赖）。
 - 状态持久化备选：web 组合里有 `ctx.storage`（`dsh-storage-json`，root `$DSH_HOME/storages`）。
 
 ### V4. 不存在"内存改写"钩子（最关键的负向验证）✅
@@ -113,7 +113,7 @@ PROBE OK
 | D3 | **decompress**：读取日志原始事件，replace 回原文 | V5 |
 | D4 | **自动触发**：`agent/pre-step` + `agent/request-error`，与 compaction-basic 相同 | V2 架构事实 2 |
 | D5 | **块状态**：ACP block 状态写成会话日志事件（如 `acp/block`，回放/checkpoint 免费）或 `ctx.storage` key | V5、V3 |
-| D6 | **搜索**：`search_context` 基于 `ctx.sessionQuery.searchEvents`；acp-kernel `searchBlocks` 仅作块内兜底 | V3、V1 |
+| D6 | **搜索**：`search_context` 从日志重建统一文档集（块摘要 + 被遮蔽的原始消息），交给 acp-kernel `searchBlocks`（默认 hybrid：BM25 词干化 + CJK bigram + 字符 n-gram 模糊）；BM25 作"无命中"闸门过滤 fuzzy 假阳性；消息命中回链最内层所属块 | V3、V1 |
 | D7 | **nudge**：pre-step 注入（现有注入通道，会成为日志中的 `user/message`） | V4 中 pre-step 语义 |
 | D8 | **delegate 工具**：直接映射 DSH 现有 subagent/jobs 体系，不移植 Pi 专用实现 | 组合现状 |
 
