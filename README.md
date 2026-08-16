@@ -180,6 +180,14 @@ DSH 的每个模型请求都派生自其 append-only 会话日志（*surface*）
 | `autoNudge` | `true` | 当内核建议时向 `agent/pre-step` 注入 nudge |
 | `prompts` | — | （可选）自定义提示词文案：nudge / 范围表 / system prompt / 工具描述按槽位覆盖（模板 + 命名占位符，构造期校验；见上文「自定义提示词文案」与 [docs/configurable-prompts-design.md](docs/configurable-prompts-design.md)） |
 
+## 兼容性
+
+### dsh-anchored-standard
+
+[dsh-anchored-standard](https://github.com/xiaobright/dsh-anchored-standard) 是一个两阶段启动预设，通过限制启动阶段的工具数量来锚定模型的聚焦型推理。与 ACP 配合使用时，只需在 anchored-standard 的 `agent.cordis.yml` 中把 ACP 工具加入 `compactionTools`，不影响其锚定效果。
+
+详见 [docs/anchored-standard-compat.md](docs/anchored-standard-compat.md)。
+
 ## 开发
 
 ```bash
