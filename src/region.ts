@@ -596,7 +596,10 @@ export function hideCompressToolPair(session: Session, callId: string, resultSeq
  * Uses the same durable prune protocol as `hideSurfaceSeqs`, so the removed
  * nodes stay recoverable from the append-only log.
  */
-export function stripOrphanedSurfaceToolMessages(session: Session): number {
+export function stripOrphanedSurfaceToolMessages(
+  session: Session,
+  inFlightCallIds: ReadonlySet<string> = new Set(),
+): number {
   const callIdsBySeq = new Map<number, string[]>()
   const open = new Map<string, number>()
   const orphanResultSeqs: number[] = []
@@ -621,6 +624,9 @@ export function stripOrphanedSurfaceToolMessages(session: Session): number {
   }
   const orphanCallSeqs = new Set<number>()
   for (const [id, seq] of open) {
+    // A call currently executing (its tool result has not been appended yet)
+    // is NOT orphaned — pruning it would orphan the result that lands later.
+    if (inFlightCallIds.has(id)) continue
     const ids = callIdsBySeq.get(seq)
     // Only hide an assistant node when NONE of its calls have results. A mixed
     // node (some results present) must stay so its valid results are not

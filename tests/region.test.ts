@@ -336,6 +336,18 @@ test('M5: stripOrphanedSurfaceToolMessages removes orphan results and orphan cal
   assert.doesNotThrow(() => buildCompressibleSeqRanges(session, { preserveRecent: 0 }), 'orphan cleanup leaves the range table computable')
 })
 
+test('M5: stripOrphanedSurfaceToolMessages preserves an in-flight tool call', () => {
+  const session = Session.create('in-flight')
+  appendTurn(session, 1)
+  appendUser(session, longText('q', 0))
+  appendToolCall(session, 'running compress', 'call-acp') // result not appended yet
+  const before = session.deriveMessages().length
+  const hidden = stripOrphanedSurfaceToolMessages(session, new Set(['call-acp']))
+  assert.equal(hidden, 0, 'the executing compress call is not treated as an orphan')
+  assert.equal(session.deriveMessages().length, before, 'the in-flight call stays on the surface')
+  assert.ok(session.surface.nodes.includes(session.events.find((event) => event.type === 'assistant/message')!.seq), 'the assistant call node remains visible')
+})
+
 test('M5: hideCompressToolPair removes the compress call/result from the invalid surface', () => {
   const session = Session.create('compress-pair')
   appendTurn(session, 1)

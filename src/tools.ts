@@ -160,7 +160,9 @@ async function handleCompress(env: ToolEnvironment, args: CompressArgs, exec: To
   const session = agent.session
   // Clean orphan tool messages before any range solve: a single orphan result
   // corrupts the pairing balance cache and rejects every large range (issue #18).
-  stripOrphanedSurfaceToolMessages(session)
+  // The current compress call is still in flight (its tool/result has not been
+  // appended), so it must be excluded from orphan pruning.
+  stripOrphanedSurfaceToolMessages(session, new Set([exec.callId]))
   const state = env.store.stateFor(session)
   // The kernel gets the FULL log (visible + shadowed): syncBlocks deactivates
   // a block whose consumed messages are absent, and resolveBoundaries refuses
