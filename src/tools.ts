@@ -26,6 +26,7 @@ import {
   resolveSurfaceRange,
   runCompactionTransaction,
   shadowedSeqsOf,
+  stripOrphanedSurfaceToolMessages,
   surfaceSummary,
   type ResolvedSurfaceRange,
 } from './region.ts'
@@ -39,6 +40,13 @@ export interface ToolEnvironment extends KernelConfigInput {
   readonly windowFor?: (agent: Agent) => Promise<AcpWindow>
   /** Resolved prompt templates (optional: falls back to DEFAULT_RESOLVED). */
   readonly prompts?: ResolvedPrompts
+  /**
+   * Call ids of compress invocations that created a durable block. The engine
+   * listens for the matching `tool/result` and hides the call/result pair from
+   * the surface, preventing the compaction summary from sitting between them
+   * (strict providers reject that sequence with HTTP 400).
+   */
+  readonly compressCallIdsToHide?: Set<string>
 }
 
 interface TextOutput {
@@ -150,6 +158,9 @@ function unwrapCompressArgs(args: CompressArgs): CompressArgs | null {
 async function handleCompress(env: ToolEnvironment, args: CompressArgs, exec: ToolRunContext): Promise<TextOutput> {
   const agent = requireAgent(exec)
   const session = agent.session
+  // Clean orphan tool messages before any range solve: a single orphan result
+  // corrupts the pairing balance cache and rejects every large range (issue #18).
+  stripOrphanedSurfaceToolMessages(session)
   const state = env.store.stateFor(session)
   // The kernel gets the FULL log (visible + shadowed): syncBlocks deactivates
   // a block whose consumed messages are absent, and resolveBoundaries refuses
@@ -263,6 +274,12 @@ async function handleCompress(env: ToolEnvironment, args: CompressArgs, exec: To
     return { text: `compress failed: ${applied.result.errors.join('; ')}` }
   }
   env.store.set(session, applied.state)
+  if (applied.result.blocksCreated > 0) {
+    // Hide this compress call/result after the tool result lands, so the
+    // compaction summary never sits between an assistant tool_calls block and
+    // its tool response (strict providers reject that sequence).
+    env.compressCallIdsToHide?.add(exec.callId)
+  }
 
   // Match freshly created kernel blocks to the requested ranges by their
   // range key (the kernel stamps startRef/endRef onto each new block).

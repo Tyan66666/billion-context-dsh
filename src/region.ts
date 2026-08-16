@@ -19,7 +19,7 @@ import {
   toolPairingBalancedAfter,
   toolPairingBalancedBefore,
 } from '@deepseek-ai/dsh-compaction'
-import { createUserMessage, type ContentBlock } from '@deepseek-ai/dsh-llm'
+import { createAssistantMessage, createUserMessage, type ContentBlock } from '@deepseek-ai/dsh-llm'
 import { defaultCountTokens } from 'acp-kernel'
 import { extractEventText, extractText } from './messages.ts'
 
@@ -459,6 +459,188 @@ function isCheckpointNode(event: SessionEvent): boolean {
   return source?.plugin === 'compact'
 }
 
+/** Tool-call ids carried by one assistant surface message. */
+function toolCallIdsOfEvent(event: SessionEvent): string[] {
+  if (event.type !== 'assistant/message') return []
+  const content = (event.data as { message?: { content?: unknown } }).message?.content
+  if (!Array.isArray(content)) return []
+  const ids: string[] = []
+  for (const block of content) {
+    if (block === null || typeof block !== 'object') continue
+    const b = block as { type?: unknown; id?: unknown }
+    if (b.type === 'tool-call' && typeof b.id === 'string') ids.push(b.id)
+  }
+  return ids
+}
+
+/** The tool-call id of one tool/result surface message, or null. */
+function toolCallIdOfResultEvent(event: SessionEvent): string | null {
+  if (event.type !== 'tool/result') return null
+  const message = (event.data as {
+    message?: { content?: Array<{ type?: unknown; toolCallId?: unknown }>; source?: { callId?: unknown } }
+  }).message
+  const block = Array.isArray(message?.content)
+    ? message.content.find((candidate) => candidate?.type === 'tool-result')
+    : undefined
+  const id = block?.toolCallId ?? message?.source?.callId
+  return typeof id === 'string' ? id : null
+}
+
+/** Provider/model to stamp on a synthetic empty assistant pruning node. */
+function assistantProviderModel(event: SessionEvent): { provider: string; model: string } {
+  if (event.type === 'assistant/message') {
+    const message = (event.data as { message?: { source?: { provider?: unknown; model?: unknown } } }).message
+    return {
+      provider: typeof message?.source?.provider === 'string' ? message.source.provider : 'billion-context-dsh',
+      model: typeof message?.source?.model === 'string' ? message.source.model : 'surface-prune',
+    }
+  }
+  return { provider: 'billion-context-dsh', model: 'surface-prune' }
+}
+
+/**
+ * Durable model-free prune: append `compaction/prune` as the shadow price, then
+ * replace the given surface seqs with either a user message carrying `text`
+ * (used for compress call/result hiding, so the model still sees the tool
+ * outcome) or an EMPTY assistant message (used for orphan cleanup, which DSH
+ * derives to nothing). The originals remain in the append-only log.
+ */
+function hideSurfaceSeqs(
+  session: Session,
+  seqs: readonly number[],
+  provider: string,
+  model: string,
+  text?: string,
+): void {
+  if (seqs.length === 0) return
+  const start = seqs[0]!
+  const end = seqs[seqs.length - 1]!
+  let shadowedTokenCount = 0
+  for (const seq of seqs) {
+    const event = session.events[seq]
+    if (event !== undefined) shadowedTokenCount += defaultCountTokens(extractEventText(event))
+  }
+  session.append('compaction/prune', {
+    shadowedRange: { start, end },
+    shadowedSeqs: [...seqs],
+    shadowedTokenCount,
+  })
+  if (text !== undefined) {
+    session.append('user/message', createUserMessage({
+      content: [{ type: 'text', text }],
+      source: { kind: 'plugin', plugin: 'billion-context-dsh' },
+    }), {
+      surfaceOp: { op: 'replace', start, end },
+      sourceEventSeqs: [...seqs],
+    })
+    return
+  }
+  session.append('assistant/message', {
+    turn: findOpenTurn(session.events) ?? 0,
+    step: 0,
+    message: createAssistantMessage({ content: [], source: { provider, model } }),
+  }, {
+    surfaceOp: { op: 'replace', start, end },
+    sourceEventSeqs: [...seqs],
+  })
+}
+
+/**
+ * Hide one successful `compress` tool's call/result pair after its tool/result
+ * has been logged. The durable compaction summary is inserted BEFORE the
+ * current tool result (the compress tool runs mid-turn), so leaving the pair on
+ * the surface would produce `assistant(tool_calls) → user(summary) →
+ * tool(result)` — rejected by strict providers. Replacing both nodes with a
+ * plain user message (the result text) removes the pair from the derived
+ * surface without touching the compaction block.
+ */
+export function hideCompressToolPair(session: Session, callId: string, resultSeq?: number): boolean {
+  let callSeq: number | null = null
+  for (const event of session.events) {
+    if (event.type !== 'assistant/message') continue
+    if (toolCallIdsOfEvent(event).includes(callId)) {
+      callSeq = event.seq
+      break
+    }
+  }
+  if (callSeq === null) return false
+  let resolvedResultSeq = resultSeq ?? null
+  if (resolvedResultSeq === null) {
+    for (const event of session.events) {
+      if (event.type === 'tool/result' && toolCallIdOfResultEvent(event) === callId) {
+        resolvedResultSeq = event.seq
+        break
+      }
+    }
+  }
+  if (resolvedResultSeq === null) return false
+  const nodes = session.surface.nodes
+  const startIdx = nodes.indexOf(callSeq)
+  const endIdx = nodes.indexOf(resolvedResultSeq)
+  // Only hide an actually adjacent pair; never shadow unrelated messages that
+  // happen to sit between a stale call and result.
+  if (startIdx < 0 || endIdx < 0 || endIdx - startIdx !== 1) return false
+  const { provider, model } = assistantProviderModel(session.events[callSeq]!)
+  const resultEvent = session.events[resolvedResultSeq]
+  const resultText = resultEvent === undefined ? '' : extractEventText(resultEvent)
+  hideSurfaceSeqs(session, [callSeq, resolvedResultSeq], provider, model, resultText.trim().length > 0 ? resultText : undefined)
+  return true
+}
+
+/**
+ * Surface-level orphan cleanup: hide tool/result nodes with no matching call
+ * and assistant tool-call nodes whose calls all lack results. A single orphan
+ * result corrupts the whole tool-pairing balance cache (every range resolve
+ * throws), and orphan calls fragment large ranges into tiny uncompressed
+ * fragments — the two mechanisms behind issue #18's "only ~28 tokens visible".
+ * Uses the same durable prune protocol as `hideSurfaceSeqs`, so the removed
+ * nodes stay recoverable from the append-only log.
+ */
+export function stripOrphanedSurfaceToolMessages(session: Session): number {
+  const callIdsBySeq = new Map<number, string[]>()
+  const open = new Map<string, number>()
+  const orphanResultSeqs: number[] = []
+  for (const seq of session.surface.nodes) {
+    const event = session.events[seq]
+    if (event === undefined) continue
+    if (event.type === 'assistant/message') {
+      const ids = toolCallIdsOfEvent(event)
+      if (ids.length === 0) continue
+      callIdsBySeq.set(seq, ids)
+      for (const id of ids) {
+        if (!open.has(id)) open.set(id, seq)
+      }
+    } else if (event.type === 'tool/result') {
+      const id = toolCallIdOfResultEvent(event)
+      if (id !== null && open.delete(id)) {
+        // Paired: nothing to do.
+      } else if (id !== null) {
+        orphanResultSeqs.push(seq)
+      }
+    }
+  }
+  const orphanCallSeqs = new Set<number>()
+  for (const [id, seq] of open) {
+    const ids = callIdsBySeq.get(seq)
+    // Only hide an assistant node when NONE of its calls have results. A mixed
+    // node (some results present) must stay so its valid results are not
+    // orphaned by hiding the call.
+    if (ids !== undefined && ids.every((candidate) => open.has(candidate))) {
+      orphanCallSeqs.add(seq)
+    }
+  }
+  const hidden = [...orphanResultSeqs, ...orphanCallSeqs].sort((a, b) => a - b)
+  let count = 0
+  for (const seq of hidden) {
+    const event = session.events[seq]
+    if (event === undefined) continue
+    const { provider, model } = assistantProviderModel(event)
+    hideSurfaceSeqs(session, [seq], provider, model)
+    count += 1
+  }
+  return count
+}
+
 /**
  * Compute compressible spans directly from the surface — independent of the
  * kernel's ref map, which can drift after surface replacements in long
@@ -471,6 +653,10 @@ export function buildCompressibleSeqRanges(
   session: Session,
   opts: { preserveRecent?: number } = {},
 ): SeqCompressibleRange[] {
+  // Orphan tool messages corrupt the pairing balance cache and fragment every
+  // large span. Prune them before scanning so the range table reflects the
+  // actually compressible surface (issue #18).
+  stripOrphanedSurfaceToolMessages(session)
   const nodes = session.surface.nodes
   const preserve = opts.preserveRecent ?? 5
   const protectedSeqs = new Set<number>()

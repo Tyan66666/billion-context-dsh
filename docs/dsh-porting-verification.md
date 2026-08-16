@@ -150,6 +150,8 @@ PROBE OK
 | 4 | 压缩单条工具结果报 `no tool-pairing-balanced range` | `resolveSurfaceRange` 只向内收缩，单条 tool 消息收缩到空 | 收缩失败时**向外扩展到最小完整配对**（单条结果自动带上其调用） |
 | 5 | 模型说"压无可压"（大工具结果在范围表隐形） | kernel 的 ref 映射在长会话压缩后漂移，`compressibleRanges` 漏掉大段 | nudge 范围表改为**从 surface 自算**（跳过保护区 + 摘要节点，边界配对平衡） |
 | 6 | 旧块 `tokens compressed` 仍为 0 | 修复前写入的块没有 token 数据 | 账本重建时对 0 值**从日志原文补算** |
+| 7 | 官方 API 在 compress 后下一请求 400（摘要插在 compress call 与 result 之间） | `compress` 工具在 turn 中途执行，摘要 `user/message` 先于当前 `tool/result` 落库 | 压缩成功后由 `session/event` 监听把该 call/result 对整体替换为普通 user 消息（保留结果文本，移除 tool-call/result 块），摘要不再夹在工具对之间 |
+| 8 | nudge 范围表只剩 ~28 tokens / 大段 compress 被 `no tool-pairing-balanced` 拒绝 | 孤儿工具消息（无配对 result 的 call、无配对 call 的 result）破坏配对平衡缓存或打碎大段 | 范围求解前自动剥离孤儿工具消息（`compaction/prune` + 空 assistant 替换），恢复可压缩大段 |
 
 **实机验证数据**（修复后）：
 

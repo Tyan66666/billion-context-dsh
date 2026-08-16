@@ -6,11 +6,14 @@ import { AcpStateStore } from '../src/state.ts'
 import {
   AlreadyCompressedRangeError,
   assertNoActiveCompaction,
+  buildCompressibleSeqRanges,
   findOpenTurn,
+  hideCompressToolPair,
   rebuildBlockLedger,
   resolveSurfaceRange,
   runCompactionTransaction,
   shadowedSeqsOf,
+  stripOrphanedSurfaceToolMessages,
 } from '../src/region.ts'
 import { appendTurn, appendToolCall, appendToolResult, appendMultiToolCall, appendUser, appendAssistant, buildTextSession, longText } from './helpers.ts'
 
@@ -310,4 +313,63 @@ test('M5: ledger backfills shadowedTokenCount for legacy blocks written as 0', (
   const ledger = rebuildBlockLedger(session.events)
   assert.equal(ledger.length, 1)
   assert.ok(ledger[0]!.shadowedTokenCount > 0, 'legacy 0 is backfilled from shadowed originals')
+})
+
+test('M5: stripOrphanedSurfaceToolMessages removes orphan results and orphan calls', () => {
+  const session = Session.create('orphans')
+  appendTurn(session, 1)
+  appendUser(session, longText('q0', 0))                // seq 1
+  appendToolResult(session, 'orphan result', 'result-orphan') // seq 2 (no call anywhere before it)
+  appendUser(session, longText('q1', 1))                // seq 3
+  appendToolCall(session, 'orphan call', 'call-orphan') // seq 4 (no result)
+  // Surface before cleanup: [1, 2, 3, 4] — the orphan result drives the
+  // pairing balance negative, so every range resolve throws.
+  assert.throws(() => resolveSurfaceRange(session, 1, 4), /no matching tool-call/)
+
+  const hidden = stripOrphanedSurfaceToolMessages(session)
+  assert.equal(hidden, 2, 'both the orphan call and the orphan result are pruned')
+
+  // The empty assistant pruning nodes derive to nothing: only q0/q1 remain.
+  assert.equal(session.deriveMessages().length, 2)
+  // The pairing cache is healthy again and the surface yields compressible spans.
+  assert.doesNotThrow(() => resolveSurfaceRange(session, 1, session.surface.nodes[session.surface.nodes.length - 1]!))
+  assert.doesNotThrow(() => buildCompressibleSeqRanges(session, { preserveRecent: 0 }), 'orphan cleanup leaves the range table computable')
+})
+
+test('M5: hideCompressToolPair removes the compress call/result from the invalid surface', () => {
+  const session = Session.create('compress-pair')
+  appendTurn(session, 1)
+  appendUser(session, longText('old', 0))                       // seq 1
+  appendToolCall(session, 'compressing history', 'call-acp')    // seq 2 (the compress tool call)
+  // The compress tool runs mid-turn: its durable summary node is inserted
+  // before the current tool/result, producing [summary, compress-call, result].
+  runCompactionTransaction(session, {
+    start: 1,
+    end: 1,
+    shadowedSeqs: [1],
+    summary: [{ type: 'text', text: 'Compression summary with enough technical detail to replace the old message.' }],
+    shadowedTokenCount: 1000,
+    provider: 'test-provider',
+    model: 'test-model',
+  })
+  const result = session.append('tool/result', {
+    turn: 1,
+    step: 1,
+    message: {
+      id: 'res-acp',
+      role: 'user',
+      content: [{ type: 'tool-result', toolCallId: 'call-acp', content: [{ type: 'text', text: 'ok' }] }],
+      source: { kind: 'tool', callId: 'call-acp' },
+    },
+  } as never, { surfaceOp: 'append' })
+  const before = session.deriveMessages()
+  assert.ok(before.some((message) => message.role === 'assistant' && message.content.some((block) => (block as { type?: string }).type === 'tool-call')), 'the invalid surface has the compress tool-call visible')
+
+  assert.equal(hideCompressToolPair(session, 'call-acp', result.seq), true)
+  const after = session.deriveMessages()
+  assert.equal(after.length, 2, 'the compaction summary plus the preserved compress result text remain visible')
+  assert.ok(!after.some((message) => message.role === 'assistant' && message.content.some((block) => (block as { type?: string }).type === 'tool-call')), 'compress call is hidden')
+  assert.ok(!after.some((message) => message.role === 'user' && message.content.some((block) => (block as { type?: string }).type === 'tool-result')), 'compress result is hidden as a tool-result')
+  assert.ok(after.some((message) => message.role === 'user' && message.content.some((block) => (block as { type?: string }).type === 'text' && (block as { text?: string }).text === 'ok')), 'the compress outcome text is preserved for the model')
+  assert.ok(session.events.some((event) => event.type === 'compaction/prune'), 'the hide is recorded as a durable prune')
 })

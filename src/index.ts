@@ -44,6 +44,7 @@ import { buildNudge } from './nudge.ts'
 import { ACP_SYSTEM_PROMPT_ORDER } from './system-prompt.ts'
 import { renderSystemPrompt, resolvePrompts, type AcpPrompts, type ResolvedPrompts } from './prompts.ts'
 import { DEFAULT_CONTEXT_WINDOW, detectContextWindow, type AcpWindow } from './window.ts'
+import { hideCompressToolPair } from './region.ts'
 
 export { AcpStateStore } from './state.ts'
 export { kernelConfigFor, type KernelConfigInput } from './config.ts'
@@ -84,6 +85,8 @@ export {
   compactionIdsOfKernelBlocks,
   summarySeqOfKernelBlock,
   expandShadowedSeqs,
+  hideCompressToolPair,
+  stripOrphanedSurfaceToolMessages,
   type AcpBlockLedgerEntry,
   type CompactionTransactionInput,
   type ResolvedSurfaceRange,
@@ -175,6 +178,8 @@ export class AcpCompactionEngine extends CompactionEngine {
   readonly prompts: ResolvedPrompts
 
   private readonly lastNudgeTurn = new Map<string, number>()
+  /** Successful compress call ids awaiting their tool/result so the pair can be hidden. */
+  private readonly compressCallIdsToHide = new Set<string>()
   /** Per provider/model route the resolved window (probe failures cached too). */
   private readonly windowCache = new Map<string, AcpWindow>()
 
@@ -199,6 +204,7 @@ export class AcpCompactionEngine extends CompactionEngine {
       coreOverrides: this.config.coreOverrides,
       windowFor: (agent) => this.windowFor(agent),
       prompts: this.prompts,
+      compressCallIdsToHide: this.compressCallIdsToHide,
     }
 
     // Tools and commands may not be registered yet on cold start: cordis
@@ -241,6 +247,20 @@ export class AcpCompactionEngine extends CompactionEngine {
         if (name === 'commands') registerCommand()
       })
     }
+    // After a successful compress tool result is appended, hide its
+    // call/result pair. The durable summary node was inserted mid-turn (before
+    // the result), so leaving the pair visible would put a user message between
+    // an assistant tool_calls block and its tool response — strict providers
+    // reject that request with HTTP 400 (issue #18).
+    ctx.on('session/event', (session, event) => {
+      if (event.type !== 'tool/result') return
+      const message = event.data.message
+      const block = message.content[0]
+      const callId = block?.toolCallId ?? message.source.callId
+      if (typeof callId !== 'string' || !this.compressCallIdsToHide.has(callId)) return
+      this.compressCallIdsToHide.delete(callId)
+      hideCompressToolPair(session, callId, event.seq)
+    })
     if (this.config.autoNudge) {
       ctx.on('agent/pre-step', async (payload, next) => {
         const decision = await next()
