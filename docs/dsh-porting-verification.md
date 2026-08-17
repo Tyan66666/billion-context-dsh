@@ -164,4 +164,11 @@ compress({ startSeq: 64757, endSeq: 265056, ... })
 
 一次压缩回收 **~13.9 万 tokens**，上下文 **129% → 20%**，模型自述"当前摘要块里完整保留了所有关键信息（提交历史、代码架构、mask 编码、本地化、测试命令、点击问题结论），后续任何需求都能无缝接续"——ACP 闭环在真实长会话中完整走通。
 
+**issue #18 修复实机验证**（2026-08-17，v0.2.1，PR #21 `c1d4045`，DSH web profile 符号链接直连 worktree 构建，重启加载）：
+
+- **deferred pair-hide 落库序列**（逐事件核对会话日志）：`assistant/message(compress 调用) → tool/result 落地 → compaction/prune shadowedSeqs=[callSeq,resultSeq] → user/message surfaceOp replace（携带 compress 结果文本，sourceEventSeqs=[callSeq,resultSeq]）`——隐藏发生在 `tool/result` 之后的微任务（修复 A：`deferCompressPairHide`），监听内不再同步 append；compress 后每一轮请求正常，无 400。
+- **nudge 范围表恢复真实数字**：把 profile `cordis.patch.yml` 的 `nudgeMaxContextLimitPct` 临时调低到 0.03（配 `nudgeMinContextLimitPct: 0.02`），nudge 在 ~5% 压力下于下一 pre-step 立即触发（证明 profile 补丁被 HMR 热重载、无需重启；重启后 growth 基线清零，只有阈值降低能触发）。范围表显示真实大小：
+  `Surface: 143 nodes, seqs 82609..204994; ranges: seq 143804..196596 — 111 messages, ~37634 tokens; seq 197852..203758 — 21 messages, ~5018 tokens`
+  ——issue #18 的 "~28 tokens" 死值消失（修复 8 的 `buildCompressibleSeqRanges` 实机输出真实范围）；大范围把旧 compress 对（surface 相邻健康对）正常纳入，不再整段 reject。测完已恢复 `0.5`。
+
 **关键教训**：`acp-kernel` 的 ref 映射在**经过 surface 替换（压缩）的超长会话**中会漂移（范围表出现 `end < start` 的乱序段、大工具结果拿不到 ref）。任何依赖 kernel `compressibleRanges` 的宿主侧逻辑都应**从 surface 自算兜底**——这是移植中最值得记住的一课。
