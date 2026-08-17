@@ -130,7 +130,7 @@ DSH 的每个模型请求都派生自其 append-only 会话日志（*surface*）
 | nudge（"效率提示——尽早压缩保持精简"） | 由内核的压力决策在 `agent/pre-step` 注入——效率通知 + 上下文分解 + 压缩规则，语气对齐 kernel/pi；绝非命令 |
 | `decompress` | 从日志只读恢复被遮蔽的原文 |
 | `search_context` | 对从日志重建的块摘要与原文打分 |
-| `acp_status` | 块账本与上下文压力 |
+| `acp_status` | CONTEXT BREAKDOWN（tool/text/summaries 占可见总量）+ 压缩块账本 + nudge 决策行；不含上下文窗口 |
 | 块状态 | 内存内核状态 + **日志重建账本**（无旁车文件） |
 | 分层蒸馏（T2/T3） | 再次压缩某块的摘要节点 = 蒸馏该块（tier 2），蒸馏 tier-2 块得 tier 3；tier 与内核块 id 持久化进日志，重启后内核状态从日志再水合、可继续蒸馏 |
 
@@ -149,7 +149,7 @@ DSH 的每个模型请求都派生自其 append-only 会话日志（*surface*）
 | `compress` | 用你书写的紧凑摘要替换 seq 范围（边界自动平衡到 tool-call/result 配对点）；对某块的摘要节点再次压缩 = 分层蒸馏（tier 2/3） |
 | `decompress` | 恢复已压缩块的原始内容（只读） |
 | `search_context` | 按关键词搜索压缩块摘要与原文 |
-| `acp_status` | 上下文占用、压缩块、可压缩范围 |
+| `acp_status` | CONTEXT BREAKDOWN（tool/text/summaries 占可见总量）+ 压缩块账本 + nudge 决策行；不含上下文窗口 |
 | `/acp` | 从命令栏执行 status / compress / decompress |
 
 ## 上游项目与致谢
@@ -170,7 +170,7 @@ DSH 的每个模型请求都派生自其 append-only 会话日志（*surface*）
 | 键 | 默认值 | 含义 |
 |---|---|---|
 | `modelContextLimit` | 自动探测（回退 `128000`） | 用于内核压力决策的上下文窗口；显式配置时优先且跳过探测 |
-| `autoModelContextLimit` | `true` | 从模型 API 自动探测真实窗口（`agent.ctx.llm.resolveModelInfo`）；探测失败回退默认值，`acp_status` 展示窗口来源 |
+| `autoModelContextLimit` | `true` | 从模型 API 自动探测真实窗口（`agent.ctx.llm.resolveModelInfo`）；探测失败回退默认值，`/acp` 命令展示窗口来源（模型工具 `acp_status` 不含窗口信息） |
 | `nudgeMinContextLimitPct` | 内核默认 `0.45` | Nudge 窗口下界（用量占比）——仅作配置校验，增长路径的触发没有百分比下限——与 billion-context-pi 相同的默认值 |
 | `nudgeMaxContextLimitPct` | engine 默认 `0.70`（内核/pi 默认 `0.75`） | 过限线：超过此值则无论增长与否都触发 nudge——刻意低于宿主 compaction-basic 的 80% 自动压缩线，保证强制 nudge 先触发；显式配置优先 |
 | `nudgeEmergencyThresholdPct` | engine 默认 `0.85`（内核/pi 默认 `0.95`） | 紧急 nudge（绕过每轮去重）——从 `0.95` 下调：95% 时模型已无操作空间且会被 80% 自动压缩线遮蔽；显式配置优先 |

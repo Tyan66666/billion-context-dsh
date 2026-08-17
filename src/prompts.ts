@@ -209,7 +209,7 @@ export const DEFAULT_PROMPTS: ResolvedPrompts = {
     compress: 'Replace older conversation ranges with dense summaries you write. Each message seq is a surface reference. Single range: compress({ content: [{ startSeq, endSeq, summary }] }). Batch multiple unrelated ranges in one call (each content entry becomes its own block); keep ranges disjoint. Never compress content the current step is actively using. Seq refs must come from the CURRENT surface (acp_status or the latest nudge): a span whose edges were shadowed by an earlier compress is auto-remapped to its still-live content, a fully compressed span is reported as already compressed, and invented/other-session seqs fail with guidance.',
     decompress: 'Recover the original content of a compressed block by its blockId (read-only; does not unshadow the range).',
     searchContext: 'Search inside compressed blocks (summaries and original content) for information the model no longer sees in context.',
-    acpStatus: 'Report the ACP block ledger: compressed blocks, reclaimed tokens, and current context pressure.',
+    acpStatus: 'Context status: overview of the current context — CONTEXT BREAKDOWN (tool/text/summaries token shares of the visible total), COMPRESSED BLOCKS ledger, and the nudge decision. No args = overview. Percentages are shares of the visible content, not the context window.',
   },
   systemPromptTemplate: `Active Context Pruning — model-driven context management
 

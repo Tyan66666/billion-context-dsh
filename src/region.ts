@@ -825,8 +825,15 @@ export function buildCompressibleSeqRanges(
 export function surfaceSummary(session: Session): string {
   const nodes = session.surface.nodes
   if (nodes.length === 0) return 'empty'
-  const first = nodes[0]!
-  const last = nodes[nodes.length - 1]!
+  // Surface nodes are NOT guaranteed to be ordered: a compaction replace lands
+  // the checkpoint node first, so [15, 6, 7, …]. Report the span as min..max
+  // rather than first..last, which would read "seqs 15..12" after a compress.
+  let first = nodes[0]!
+  let last = nodes[0]!
+  for (const seq of nodes) {
+    if (seq < first) first = seq
+    if (seq > last) last = seq
+  }
   return `${nodes.length} nodes, seqs ${first}..${last}`
 }
 

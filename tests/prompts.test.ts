@@ -169,7 +169,7 @@ test('M4/prompts 5: tool descriptions render the defaults byte-identical', () =>
   )
   assert.equal(descriptions['decompress'], 'Recover the original content of a compressed block by its blockId (read-only; does not unshadow the range).')
   assert.equal(descriptions['search_context'], 'Search inside compressed blocks (summaries and original content) for information the model no longer sees in context.')
-  assert.equal(descriptions['acp_status'], 'Report the ACP block ledger: compressed blocks, reclaimed tokens, and current context pressure.')
+  assert.equal(descriptions['acp_status'], 'Context status: overview of the current context — CONTEXT BREAKDOWN (tool/text/summaries token shares of the visible total), COMPRESSED BLOCKS ledger, and the nudge decision. No args = overview. Percentages are shares of the visible content, not the context window.')
 })
 
 test('M4/prompts 6: partial overrides merge per key; key/group null falls back to default', () => {

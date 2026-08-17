@@ -11,12 +11,13 @@
  */
 
 import { defineTool, type ToolDefinition, type ToolRunContext } from '@deepseek-ai/dsh-tools'
-import { defaultCountTokens, type CompressionCore } from 'acp-kernel'
+import { buildStatusReport, defaultCountTokens, type CompressionCore } from 'acp-kernel'
 import type { Agent } from '@deepseek-ai/dsh-agent'
+import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import type { AcpStateStore } from './state.ts'
 import { kernelConfigFor, type KernelConfigInput } from './config.ts'
 import { resolveTokenCount } from './nudge.ts'
-import { windowSourceLabel, type AcpWindow } from './window.ts'
+import type { AcpWindow } from './window.ts'
 import {
   AlreadyCompressedRangeError,
   blockRefForSummarySeq,
@@ -449,28 +450,47 @@ interface StatusArgs {
   [key: string]: never
 }
 
+/** A compaction checkpoint summary node (`source.plugin === 'compact'`). These
+ *  are NOT in any block's `effectiveMessageIds`, so feeding them to
+ *  `buildStatusReport` would double-count the summary — once as `block.summary`
+ *  (summaryTokens) and once as a visible text message (totalText). Excluded
+ *  before status rendering (design §4.2 P1-3). */
+function isCheckpointEvent(event: SessionEvent): boolean {
+  if (event.type !== 'user/message') return false
+  const source = (event.data as { source?: { plugin?: string } }).source
+  return source?.plugin === 'compact'
+}
+
 async function handleStatus(env: ToolEnvironment, _args: StatusArgs, exec: ToolRunContext): Promise<TextOutput> {
   const agent = requireAgent(exec)
   const session = agent.session
-  const ledger = rebuildBlockLedger(session.events)
-  const totalTokens = ledger.reduce((sum, block) => sum + block.shadowedTokenCount, 0)
-  const coreMessages = eventsToCoreMessages(surfaceEventsOf(session))
-  const estimated = resolveTokenCount(agent, coreMessages)
-  const window = env.windowFor === undefined
-    ? { limit: env.modelContextLimit, source: 'explicit' as const }
-    : await env.windowFor(agent)
-  const limit = window.limit
-  const lines = [
-    `ACP status — session ${session.id}`,
-    `  blocks: ${ledger.length}`,
-    `  tokens compressed: ${totalTokens}`,
-    `  estimated context: ${estimated} / ${limit} (${Math.round((estimated / limit) * 100)}%)`,
-    `  context window: ${limit} (${windowSourceLabel(window)})`,
-    `  surface: ${surfaceSummary(session)}`,
-  ]
-  for (const block of ledger.slice(0, 10)) {
-    lines.push(`  - ${block.blockId.slice(0, 8)}: seqs ${block.start}..${block.end} (${block.shadowedSeqs.length} msgs) — ${block.summary.slice(0, 80)}`)
+  const state = env.store.stateFor(session)
+  // Full log for the kernel (so block anchors survive — same arbitration as
+  // buildNudge); the token count stays a SURFACE measurement.
+  const coreMessages = allLogMessages(session)
+  const surfaceMessages = eventsToCoreMessages(surfaceEventsOf(session))
+  const tokenCount = resolveTokenCount(agent, surfaceMessages)
+  const config = kernelConfigFor(env)
+  // Run the same pipeline the context transform runs, so what acp_status
+  // reports matches what the model actually receives. The returned turn.state
+  // carries the freshly assigned refs; it is NOT persisted — acp_status is a
+  // read-only view, and env.store.set would advance the nudge baseline a
+  // second time in the same turn (design §6.1 P2-2).
+  const turn = env.kernel.processTurn({ messages: coreMessages, state, config, tokenCount })
+  // Status messages = visible surface EXCLUDING checkpoint summary nodes (P1-3).
+  const statusMessages = eventsToCoreMessages(
+    surfaceEventsOf(session).filter((event) => !isCheckpointEvent(event)),
+  )
+  // Upstream-aligned: the kernel renders the breakdown (percentages of the
+  // VISIBLE total — no window semantics); the engine only appends the nudge
+  // decision line and the DSH surface anchor.
+  const base = buildStatusReport(turn.state, statusMessages, defaultCountTokens, {})
+  const lines = [base]
+  const nudge = turn.nudge
+  if (nudge !== undefined) {
+    lines.push('', `Nudge: ${nudge.shouldInject ? 'ACTIVE' : 'idle'} — ${nudge.reason}`)
   }
+  lines.push('', `Surface: ${surfaceSummary(session)}`)
   return { text: lines.join('\n') }
 }
 

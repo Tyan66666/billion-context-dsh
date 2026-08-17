@@ -170,14 +170,20 @@ test('M3: search_context finds information inside compressed blocks', async () =
   assert.match((miss as { text: string }).text, /no matches/)
 })
 
-test('M3: acp_status reports the block ledger and pressure', async () => {
+test('M3: acp_status renders the upstream kernel breakdown without window rows', async () => {
   const env = makeEnv()
   const session = buildTextSession(12)
   const status = toolOf(env, 'acp_status')
   const empty = await status.execute({}, fakeExec(session))
-  assert.match((empty as { text: string }).text, /blocks: 0/)
-  assert.match((empty as { text: string }).text, /surface: 12 nodes, seqs 1\.\.12/, 'the surface summary lets the model locate seqs without a nudge')
-  assert.match((empty as { text: string }).text, /context window: 128000 \(configured\)/, 'without a windowFor the env falls back to modelContextLimit')
+  const text = (empty as { text: string }).text
+  // Upstream-aligned: kernel buildStatusReport overview, percentages of visible total.
+  assert.match(text, /CONTEXT BREAKDOWN\n  0 tool \(0%\) \| \d+(\.\d+)?K text \(100%\) \| 0 summaries \(0%\)/, 'kernel breakdown with visible-total percentages')
+  assert.match(text, /No compressed blocks\./, 'kernel block ledger section')
+  assert.match(text, /Nudge: idle — /, 'kernel nudge decision line')
+  assert.match(text, /Surface: 12 nodes, seqs 1\.\.12/, 'the surface summary lets the model locate seqs without a nudge')
+  // The model tool must NOT surface the context window (upstream has no window rows).
+  assert.ok(!/estimated context/.test(text), 'no window-occupancy row in the model tool')
+  assert.ok(!/context window/.test(text), 'no window row in the model tool')
 
   const compress = toolOf(env, 'compress')
   await compress.execute({
@@ -189,12 +195,15 @@ test('M3: acp_status reports the block ledger and pressure', async () => {
   } as never, fakeExec(session))
 
   const filled = await status.execute({}, fakeExec(session))
-  assert.match((filled as { text: string }).text, /blocks: 1/)
-  assert.match((filled as { text: string }).text, /estimated context:/)
-  assert.match((filled as { text: string }).text, /surface: 8 nodes/, '12 messages - 5 shadowed + 1 summary = 8 surface nodes')
+  const filledText = (filled as { text: string }).text
+  assert.match(filledText, /COMPRESSED BLOCKS — 1 active/, 'block ledger after compression')
+  assert.match(filledText, /b\d+ \(T1\)/, 'kernel block row with tier')
+  assert.match(filledText, /Surface: 8 nodes, seqs 6\.\.15/, '12 messages - 5 shadowed + 1 summary = 8 surface nodes; the span is min..max even though the checkpoint node lands first in surface.nodes')
+  assert.ok(!/estimated context/.test(filledText), 'still no window-occupancy row after compression')
+  assert.ok(!/context window/.test(filledText), 'still no window row after compression')
 })
 
-test('M3: acp_status shows the auto-detected context window and source', async () => {
+test('M3: acp_status never shows the window even when windowFor auto-detects it', async () => {
   const env = {
     ...makeEnv(),
     windowFor: async () => ({
@@ -207,8 +216,48 @@ test('M3: acp_status shows the auto-detected context window and source', async (
   const session = buildTextSession(12)
   const status = await toolOf(env, 'acp_status').execute({}, fakeExec(session))
   const text = (status as { text: string }).text
-  assert.match(text, /context window: 1000000 \(auto-detected from test-provider\/test-model\)/)
-  assert.match(text, /estimated context: \d+ \/ 1000000/, 'pressure is computed against the probed window')
+  assert.match(text, /CONTEXT BREAKDOWN/, 'kernel breakdown still rendered')
+  // The window is a human-side (/acp) concern; the model tool never sees it.
+  assert.ok(!/context window/.test(text), 'window rows stay out of the model tool even with a probed window')
+  assert.ok(!/estimated context/.test(text), 'window-occupancy rows stay out of the model tool')
+})
+
+test('M3: acp_status surfaces the ACTIVE nudge decision with a small window and compressible content', async () => {
+  // P2-5 construction: ACTIVE requires BOTH usage ≥ threshold AND pending
+  // content ≥ minCompressRange (5000 chars). A tiny window (500) plus the
+  // long-text session drives usage far past the emergency line while the
+  // surface still holds compressible ranges, so the kernel injects.
+  const env = makeEnv(500)
+  const session = buildTextSession(12)
+  const status = await toolOf(env, 'acp_status').execute({}, fakeExec(session))
+  const text = (status as { text: string }).text
+  assert.match(text, /Nudge: ACTIVE — /, 'pressure + pending content → kernel injects')
+})
+
+test('M3: acp_status breakdown does not double-count the checkpoint summary (P1-3)', async () => {
+  const env = makeEnv()
+  const session = buildTextSession(12)
+  const compress = toolOf(env, 'compress')
+  await compress.execute({
+    content: [{
+      startSeq: 1,
+      endSeq: 5,
+      summary: 'Authentication summary with enough technical detail to satisfy the kernel threshold: JWT, Redis refresh tokens, login flow, rate limiting, bcrypt.',
+    }],
+  } as never, fakeExec(session))
+
+  const status = await toolOf(env, 'acp_status').execute({}, fakeExec(session))
+  const text = (status as { text: string }).text
+  const breakdown = text.match(/CONTEXT BREAKDOWN\n  (.+)/)?.[1] ?? ''
+  // The checkpoint summary node is excluded from the visible messages, so it
+  // must count ONLY as summaries — never as text. If it leaked into text, the
+  // text share would be inflated by the summary's own tokens.
+  const summaries = breakdown.match(/([\d.]+K?) summaries/)?.[1] ?? '0'
+  assert.ok(summaries !== '0', `summaries counted: got "${summaries}"`)
+  // And the summary's token count is exactly what the block ledger reports.
+  const ledger = rebuildBlockLedger(session.events)
+  const summaryTokens = ledger.reduce((sum, block) => sum + block.shadowedTokenCount, 0)
+  assert.ok(summaryTokens > 0, 'ledger records real reclaimed tokens')
 })
 
 test('M3: compress rejects ranges outside the assigned surface', async () => {
