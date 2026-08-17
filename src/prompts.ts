@@ -207,7 +207,7 @@ export const DEFAULT_PROMPTS: ResolvedPrompts = {
   },
   tools: {
     compress: 'Replace older conversation ranges with dense summaries you write. Each message seq is a surface reference. Single range: compress({ content: [{ startSeq, endSeq, summary }] }). Batch multiple unrelated ranges in one call (each content entry becomes its own block); keep ranges disjoint. Never compress content the current step is actively using. Seq refs must come from the CURRENT surface (acp_status or the latest nudge): a span whose edges were shadowed by an earlier compress is auto-remapped to its still-live content, a fully compressed span is reported as already compressed, and invented/other-session seqs fail with guidance.',
-    decompress: 'Recover the original content of a compressed block by its blockId (read-only; does not unshadow the range).',
+    decompress: 'Recover the original content of a compressed block by its blockId — the kernel block ref `bN` shown by acp_status (e.g. b1), or a compaction id from search_context (read-only; does not unshadow the range).',
     searchContext: 'Search inside compressed blocks (summaries and original content) for information the model no longer sees in context.',
     acpStatus: 'Context status: overview of the current context — CONTEXT BREAKDOWN (tool/text/summaries token shares of the visible total), COMPRESSED BLOCKS ledger, and the nudge decision. No args = overview. Percentages are shares of the visible content, not the context window.',
   },
@@ -235,7 +235,7 @@ WHEN NOT TO COMPRESS:
 
 Compression tools (refs are SURFACE SEQS, not ids):
 - compress: replace one or more seq ranges, each with your own dense summary. Single range: compress({ content: [{ startSeq, endSeq, summary }] }). Batch multiple unrelated segments in one call (each entry becomes its own block): compress({ content: [{ startSeq: 1, endSeq: 5, summary: '...' }, { startSeq: 12, endSeq: 18, summary: '...' }] }). Keep ranges disjoint — overlapping entries in one batch are skipped. Edges are auto-balanced to tool-call/result boundaries; a trailing #callId fragment in a seq is ignored. Seq refs must be on the current surface: seqs from older nudges or earlier compresses go stale as the surface moves, so a stale span is auto-remapped to its still-live remainder (the result reports the adjusted span), a fully compressed span is reported as already compressed, and invented/other-session seqs fail with guidance.
-- decompress: recover a compressed block's original content, read-only. decompress({ blockId }).
+- decompress: recover a compressed block's original content, read-only. decompress({ blockId }) — accept the bN ref shown by acp_status (e.g. b1) or a compaction id.
 - search_context: find information inside compressed blocks BEFORE decompressing. search_context({ query }).
 - acp_status: current context usage and the live compressible-range list. Run it right before compressing — the only seqs that never go stale are the ones you just read.
 

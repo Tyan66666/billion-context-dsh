@@ -147,7 +147,7 @@ DSH 的每个模型请求都派生自其 append-only 会话日志（*surface*）
 | 工具 | 作用 |
 | --- | --- |
 | `compress` | 用你书写的紧凑摘要替换 seq 范围（边界自动平衡到 tool-call/result 配对点）；对某块的摘要节点再次压缩 = 分层蒸馏（tier 2/3） |
-| `decompress` | 恢复已压缩块的原始内容（只读） |
+| `decompress` | 恢复已压缩块的原始内容（只读）；接受 acp_status 显示的 `bN` 或 compaction id |
 | `search_context` | 按关键词搜索压缩块摘要与原文 |
 | `acp_status` | CONTEXT BREAKDOWN（tool/text/summaries 占可见总量）+ 压缩块账本 + nudge 决策行；不含上下文窗口 |
 | `/acp` | 从命令栏执行 status / compress / decompress |

@@ -294,13 +294,30 @@ scope:'compressed' for block drilldown.
 - **scope 钻取**：上游支持 `scope:'compressed'/'uncompressed'` 钻取。本 PR 模型工具仅无参 overview；如需钻取，参数 schema 与 `buildStatusReport` 的 `StatusReportOptions` 直通（kernel 已支持），后续加。**预警（P2-3）**：启用钻取前需重新评估 ref 值——`renderUncompressedRanges`/`renderMessageDrilldown` 用 `/\d+/` 解析并做连续编号合并，`byRaw` 自映射的 seq 纯数值碰巧可用，但 `seq#callId` 会被截成裸 seq 显示，语义漂移；若启用钻取应改为向 kernel 提供真实递增 ref 或另写钻取渲染。
 - **Tip 行**：D7 决定逐字保留；若评审认为暴露内部函数名不可接受，可后续裁剪（记入 CHANGELOG 的偏差说明）。
 
+## 9b. 双 id 空间：acp_status 显示 `bN`，decompress 接受 `bN` 与 compaction id（后续实现，已评审）
+
+**问题**：`buildStatusReport` 的 `COMPRESSED BLOCKS` 块行渲染的是 kernel 块 ref（`b1 (T1) …`），而 `decompress`/`search_context` 原本只接受 compaction UUID（`aa463345-…`）前缀——模型看到 `b1` 调 `decompress({ blockId: 'b1' })` 会 "not found"，模型可见 id 与可用 id 脱节（上游 pi 自洽：块 id 就是 `bN`，`decompress b3` 直接可用）。
+
+**决策（选项 1，优于选项 2）**：让 `decompress`/`/acp decompress` 接受**双 id 空间**——先精确匹配 `bN`（`/^b\d+$/` 锚定，经新增 `blockIdOfKernelRef`（`src/region.ts`）解析为 compaction id），再回退 compaction-id 前缀匹配（search_context 返回的 UUID 继续可用）。**不**在 `handleStatus` 里把 `bN` 文本替换为 UUID（选项 2）——那需要解析 kernel 渲染输出（对 kernel 文案/格式升级脆弱）、无法覆盖 nudge/tier 文本里的 `bN`、且违反硬性规则 9。
+
+**kernel 兼容性论证（子代理评审确认）**：`blockIdOfKernelRef` 只依赖**自有数据层**（持久化 `kernelBlockId` 字段 + `blockRegistry` 合成逻辑，`region.ts:762-795`），不解析 `buildStatusReport` 文本。kernel 升级改渲染文案/块 id 来源时本方案无感；仅对 §4b 已列出的 "ref assignment 格式" 热区敏感，现有测试网兜底。`rebuildKernelBlocks`（`state.ts:25-85`）与 `blockRegistry` 的 `bN` 合成为同一逻辑——已加**交叉断言测试**（P1-2）防止两处漂移导致同类 id 脱节复发。
+
+**实现要点**：
+- `blockIdOfKernelRef(session, bN): string | null`——精确 `bN` → compaction id；非 `bN` 形态返回 null（调用方回退前缀匹配）；
+- `resolveBlockId`（`src/tools.ts`）先 `blockIdOfKernelRef` 后前缀匹配；`/acp decompress`（`src/commands.ts`）同逻辑（P1-1）；
+- 畸形输入（`b0`/`b01`/`B1`/`b1 `）不归一化，一律 "not found"（P2-6）；
+- 碰撞优先级：`/^b\d+$/` 带 `$` 锚定，UUID 前缀（含 hex）不可能匹配，先 `bN` 后前缀无歧义（P2-5，测试固化）；
+- `search_context` 保持返回 compaction id（`decompress` 接受前缀，闭环成立）（P2-3）；
+- 工具描述更新：`decompressParameters.blockId`（`tools.ts`）、`prompts.ts` 工具描述与 system prompt 的 `decompress({ blockId })` 行（P2-7）。
+
 ## 10. 文档同步清单（本 PR 必须完成）
 
 - `README.md:133/152/173`（工具表、acp_status 描述、`autoModelContextLimit` 行——"`acp_status` 展示窗口来源"改为"`/acp` 展示窗口来源"）；
 - `README.en.md` 对应行（132/151/172）；
 - `docs/INSTALL.md:135`（验证步骤 2："返回块数、压缩 token、估计上下文占用" → "返回 CONTEXT BREAKDOWN、压缩块列表、nudge 状态"）；
 - `docs/README.md`（发布说明 + 模块图 `tools.ts` 描述）；
-- `AGENTS.md`（模块图 M3 描述 + 硬性规则新增：**acp_status 必须复用 kernel `buildStatusReport`，禁止在引擎侧复制 breakdown 格式**；更新 INSTALL 验证口径）。
+- `AGENTS.md`（模块图 M3 描述 + 硬性规则新增：**acp_status 必须复用 kernel `buildStatusReport`，禁止在引擎侧复制 breakdown 格式**；更新 INSTALL 验证口径）；
+- `README`/`README.en` 工具表的 `decompress` 参数说明（接受 `bN` 或 compaction id，§9b）。
 
 ## 11. 版本与提交
 

@@ -146,7 +146,7 @@ A walkthrough of the ACP philosophy this project inherits — how active context
 | Tool | What it does |
 | --- | --- |
 | `compress` | Replace a seq range with a dense summary you write (edges auto-balanced to tool-pair boundaries); re-compressing a block's summary node distills it (tier 2/3) |
-| `decompress` | Restore a previously compressed block's original content (read-only) |
+| `decompress` | Restore a previously compressed block's original content (read-only); accepts the `bN` ref shown by acp_status or a compaction id |
 | `search_context` | Search compressed block summaries and originals by keyword |
 | `acp_status` | CONTEXT BREAKDOWN (tool/text/summaries shares of the visible total) + compressed-block ledger + nudge decision line; no context-window rows |
 | `/acp` | status / compress / decompress from the command bar |

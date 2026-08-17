@@ -13,13 +13,14 @@
 import { defineTool, type ToolDefinition, type ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { buildStatusReport, defaultCountTokens, type CompressionCore } from 'acp-kernel'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import type { SessionEvent } from '@deepseek-ai/dsh-session'
+import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
 import type { AcpStateStore } from './state.ts'
 import { kernelConfigFor, type KernelConfigInput } from './config.ts'
 import { resolveTokenCount } from './nudge.ts'
 import type { AcpWindow } from './window.ts'
 import {
   AlreadyCompressedRangeError,
+  blockIdOfKernelRef,
   blockRefForSummarySeq,
   compactionIdsOfKernelBlocks,
   expandShadowedSeqs,
@@ -383,17 +384,34 @@ async function handleCompress(env: ToolEnvironment, args: CompressArgs, exec: To
 }
 
 const decompressParameters = {
-  blockId: { type: 'string' as const, required: true, description: 'Block id from acp_status or search_context (the compaction id).' },
+  blockId: { type: 'string' as const, required: true, description: 'Block id: the kernel block ref `bN` shown by acp_status (e.g. b1), or a compaction id / prefix from search_context.' },
 } as const
 
 interface DecompressArgs {
   blockId: string
 }
 
+/** Resolve a block arg to its durable compaction id: exact `bN` kernel ref
+ *  first (acp_status shows `bN`), then the compaction-id prefix match that
+ *  search_context and /acp have always used. The `bN` branch is exact
+ *  (`/^b\d+$/` with `$`), so a UUID that happens to start with `b1` cannot be
+ *  shadowed — full UUIDs and 8-char prefixes never match the anchored regex. */
+function resolveBlockId(session: Session, arg: string): string | null {
+  const byKernelRef = blockIdOfKernelRef(session, arg)
+  if (byKernelRef !== null) return byKernelRef
+  const ledger = rebuildBlockLedger(session.events)
+  const byPrefix = ledger.find((entry) => entry.blockId.startsWith(arg))
+  return byPrefix?.blockId ?? null
+}
+
 function handleDecompress(_env: ToolEnvironment, args: DecompressArgs, exec: ToolRunContext): TextOutput {
   const session = requireAgent(exec).session
+  const blockId = resolveBlockId(session, args.blockId)
+  if (blockId === null) {
+    return { text: `decompress: block "${args.blockId}" not found (see acp_status for the block list)` }
+  }
   const ledger = rebuildBlockLedger(session.events)
-  const block = ledger.find((entry) => entry.blockId.startsWith(args.blockId))
+  const block = ledger.find((entry) => entry.blockId === blockId)
   if (block === undefined) {
     return { text: `decompress: block "${args.blockId}" not found (see acp_status for the block list)` }
   }

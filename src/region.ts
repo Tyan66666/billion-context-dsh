@@ -919,6 +919,20 @@ export function compactionIdsOfKernelBlocks(session: Session, kernelBlockIds: re
     .filter((id): id is string => id !== undefined)
 }
 
+/**
+ * Resolve a kernel block ref (`bN`) — as shown by the model tool `acp_status`
+ * (kernel `buildStatusReport` renders `block.blockId`) — to the durable
+ * compaction id the decompress/search tools accept. Returns null when `bN` is
+ * not an exact registry key (unknown ref). Only matches the canonical `bN`
+ * form (`/^b\d+$/`); anything else is not a kernel ref and returns null so the
+ * caller falls back to its compaction-id prefix match.
+ */
+export function blockIdOfKernelRef(session: Session, kernelRef: string): string | null {
+  if (!/^b\d+$/.test(kernelRef)) return null
+  const entry = blockRegistry(session).find((r) => r.kernelBlockId === kernelRef)
+  return entry?.blockId ?? null
+}
+
 /** The checkpoint summary seq of an ACTIVE kernel block (`bN`), or null. */
 export function summarySeqOfKernelBlock(session: Session, kernelBlockId: string): number | null {
   const entry = blockRegistry(session).find((r) => r.kernelBlockId === kernelBlockId)

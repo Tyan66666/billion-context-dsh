@@ -151,6 +151,96 @@ test('M3: decompress recovers the shadowed originals read-only', async () => {
   assert.equal(session.deriveMessages().length, 8)
 })
 
+test('M3: decompress accepts the kernel block ref bN that acp_status shows', async () => {
+  const env = makeEnv()
+  const session = buildTextSession(12)
+  const compress = toolOf(env, 'compress')
+  await compress.execute({
+    content: [{
+      startSeq: 1,
+      endSeq: 5,
+      summary: 'Authentication summary with enough technical detail to satisfy the kernel threshold: JWT, Redis refresh tokens, login flow, rate limiting, bcrypt.',
+    }],
+  } as never, fakeExec(session))
+
+  const ledger = rebuildBlockLedger(session.events)
+  const kernelBlockId = ledger[0]!.kernelBlockId
+  assert.match(kernelBlockId!, /^b\d+$/, 'the durable block records its kernel ref')
+
+  const decompress = toolOf(env, 'decompress')
+  const result = await decompress.execute({ blockId: kernelBlockId! }, fakeExec(session))
+  const text = (result as { text: string }).text
+  // The bN path resolves to the SAME durable block as the compaction id.
+  assert.match(text, /Block [0-9a-f-]{36} — Authentication/, 'bN resolves to the compaction id')
+  assert.match(text, /\[msg 0\]/)
+  assert.match(text, /\[msg 4\]/)
+})
+
+test('M3: decompress malformed or unknown bN forms are not found, not normalised', async () => {
+  const env = makeEnv()
+  const session = buildTextSession(12)
+  const compress = toolOf(env, 'compress')
+  await compress.execute({
+    content: [{
+      startSeq: 1,
+      endSeq: 5,
+      summary: 'Authentication summary with enough technical detail to satisfy the kernel threshold: JWT, Redis refresh tokens, login flow, rate limiting, bcrypt.',
+    }],
+  } as never, fakeExec(session))
+
+  const decompress = toolOf(env, 'decompress')
+  // Unknown ref, zero-padded ref, and uppercase are all NOT the canonical bN.
+  for (const arg of ['b99', 'b0', 'b01', 'B1', 'b1 ', 'b1x']) {
+    const result = await decompress.execute({ blockId: arg }, fakeExec(session))
+    assert.match((result as { text: string }).text, /not found \(see acp_status/, `"${arg}" must be reported not found`)
+  }
+})
+
+test('M3: decompress prefers an exact bN over a compaction-id prefix collision', async () => {
+  const env = makeEnv()
+  const session = buildTextSession(12)
+  const compress = toolOf(env, 'compress')
+  // Compress two ranges so the session has two blocks (b1, b2).
+  await compress.execute({
+    content: [
+      {
+        startSeq: 1,
+        endSeq: 3,
+        summary: 'First block: JWT access tokens with 15 minute expiry, refresh tokens in Redis, login flow in src/auth/login.ts, sliding-window rate limiting, bcrypt cost 12.',
+      },
+      {
+        startSeq: 7,
+        endSeq: 9,
+        summary: 'Second block: deployment pipeline with docker builds, registry push, kubernetes canary rollout and health-check probes.',
+      },
+    ],
+  } as never, fakeExec(session))
+
+  // Collision semantics: a compaction UUID may start with "b2" (randomUUID is
+  // hex). The anchored /^b\d+$/ must NOT treat such a prefix as a kernel ref,
+  // so "b2" always resolves the REAL second block, and the full UUID prefix
+  // (e.g. "b2abcd12") falls through to the compaction-id prefix match. We
+  // assert both directions with the real blocks: "b2" hits the kernel ref;
+  // passing a UUID-looking string that is not a kernel ref falls back.
+  const ledger = rebuildBlockLedger(session.events)
+  const second = ledger[1]!
+
+  const decompress = toolOf(env, 'decompress')
+  const byB2 = await decompress.execute({ blockId: 'b2' }, fakeExec(session))
+  assert.match(
+    (byB2 as { text: string }).text,
+    new RegExp(`Block ${second.blockId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`),
+    'exact b2 resolves to the real second block',
+  )
+  // A prefix that LOOKS like it could collide ("b2..." hex) is not a kernel
+  // ref: blockIdOfKernelRef rejects it, and the compaction-id prefix match
+  // runs. With no block whose UUID starts with that exact prefix this is a
+  // clean "not found" — proving the bN branch did not swallow the prefix.
+  const uuidLike = `b2${'abcd1234'}`
+  const byPrefix = await decompress.execute({ blockId: uuidLike }, fakeExec(session))
+  assert.match((byPrefix as { text: string }).text, /not found \(see acp_status/, 'a bN-looking hex prefix is not a kernel ref and falls through')
+})
+
 test('M3: search_context finds information inside compressed blocks', async () => {
   const env = makeEnv()
   const session = buildTextSession(12)
