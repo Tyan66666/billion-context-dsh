@@ -150,8 +150,9 @@ PROBE OK
 | 4 | 压缩单条工具结果报 `no tool-pairing-balanced range` | `resolveSurfaceRange` 只向内收缩，单条 tool 消息收缩到空 | 收缩失败时**向外扩展到最小完整配对**（单条结果自动带上其调用） |
 | 5 | 模型说"压无可压"（大工具结果在范围表隐形） | kernel 的 ref 映射在长会话压缩后漂移，`compressibleRanges` 漏掉大段 | nudge 范围表改为**从 surface 自算**（跳过保护区 + 摘要节点，边界配对平衡） |
 | 6 | 旧块 `tokens compressed` 仍为 0 | 修复前写入的块没有 token 数据 | 账本重建时对 0 值**从日志原文补算** |
-| 7 | 官方 API 在 compress 后下一请求 400（摘要插在 compress call 与 result 之间） | `compress` 工具在 turn 中途执行，摘要 `user/message` 先于当前 `tool/result` 落库 | 压缩成功后由 `session/event` 监听把该 call/result 对整体替换为普通 user 消息（保留结果文本，移除 tool-call/result 块），摘要不再夹在工具对之间 |
-| 8 | nudge 范围表只剩 ~28 tokens / 大段 compress 被 `no tool-pairing-balanced` 拒绝 | 孤儿工具消息（无配对 result 的 call、无配对 call 的 result）破坏配对平衡缓存或打碎大段 | 范围求解前自动剥离孤儿工具消息（`compaction/prune` + 空 assistant 替换），恢复可压缩大段；`handleCompress` 会排除当前 in-flight compress call，避免把正在执行的调用当孤儿剪掉 |
+| 7 | 官方 API 在 compress 后下一请求 400（摘要插在 compress call 与 result 之间） | `compress` 工具在 turn 中途执行，摘要 `user/message` 先于当前 `tool/result` 落库；且 `session.append` **不可重入**——在 `session/event` 监听内同步 append 会抛 "session append cannot reenter" 并被 dispatcher 静默吞掉 | `session/event` 监听把隐藏推迟到**微任务**（`deferCompressPairHide`，在下一个请求构建前落库），把该 call/result 对整体替换为普通 user 消息（保留结果文本）；只隐藏**单 call 节点**（多 call 节点隐藏会孤儿化兄弟结果，留作可见对——当前 harness 按 surface 位置序序列化，本就安全） |
+| 8 | nudge 范围表只剩 ~28 tokens / 大段 compress 被 `no tool-pairing-balanced` 拒绝 | 孤儿工具消息（无配对 result 的 call、无配对 call 的 result）破坏配对平衡缓存或打碎大段；老版本 bug 还在 call 与 result 之间插入摘要形成死锁 "broken pair" | 范围求解前自动剥离孤儿（`compaction/prune` + 空 assistant 替换）：`agent/pre-step` **无条件执行**（低压力会话也不被崩溃孤儿 400）+ `buildCompressibleSeqRanges` + `handleCompress` 顶部；剥离覆盖孤儿 result、全孤儿 call 节点、以及 call→非工具节点→result 的 broken pair（自动治愈遗留死锁会话）；`handleCompress` 保护当前 step **全部 in-flight call**（`openToolCallIds`），兄弟工具不会被误剪 |
+| 9 | 批量 compress 中单个 kernel 拒绝的范围拖垮整个调用（成功块被丢弃） | kernel 对"已被活动块 `effectiveMessageIds` 吸收但仍存活于 surface"的范围抛 `Range contains no compressible messages`；旧代码对任一 error 即整体返回失败并丢弃 `applied.state` | 仅当 `blocksCreated === 0` 才整体失败；否则照常落账成功块，失败范围作为 advisory 行报告（phantom range 不再毒化批次） |
 
 **实机验证数据**（修复后）：
 

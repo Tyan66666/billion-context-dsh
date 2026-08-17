@@ -27,6 +27,7 @@ import {
   runCompactionTransaction,
   shadowedSeqsOf,
   stripOrphanedSurfaceToolMessages,
+  openToolCallIds,
   surfaceSummary,
   type ResolvedSurfaceRange,
 } from './region.ts'
@@ -159,10 +160,12 @@ async function handleCompress(env: ToolEnvironment, args: CompressArgs, exec: To
   const agent = requireAgent(exec)
   const session = agent.session
   // Clean orphan tool messages before any range solve: a single orphan result
-  // corrupts the pairing balance cache and rejects every large range (issue #18).
-  // The current compress call is still in flight (its tool/result has not been
-  // appended), so it must be excluded from orphan pruning.
-  stripOrphanedSurfaceToolMessages(session, new Set([exec.callId]))
+  // corrupts the pairing balance cache and rejects every large range (issue
+  // #18). Every call still in flight — the compress call itself AND any
+  // sibling tool called in the same assistant message — must be excluded from
+  // orphan pruning: its tool/result lands at the end of the step, and pruning
+  // the call now would orphan that result.
+  stripOrphanedSurfaceToolMessages(session, openToolCallIds(session))
   const state = env.store.stateFor(session)
   // The kernel gets the FULL log (visible + shadowed): syncBlocks deactivates
   // a block whose consumed messages are absent, and resolveBoundaries refuses
@@ -272,7 +275,14 @@ async function handleCompress(env: ToolEnvironment, args: CompressArgs, exec: To
     // non-block-covered messages as the visible feed, so default behavior is
     // preserved. Any 'Excluded N protected message(s)' warning is surfaced.
   })
-  if (applied.result.errors.length > 0) {
+  // A kernel error for ONE range must not poison the whole call: the other
+  // ranges still created blocks. This matters for issue #18's "phantom range"
+  // — messages absorbed into an earlier block's effectiveMessageIds (kernel
+  // boundary adjustment) but still live on the surface resolve fine but make
+  // the kernel throw "Range contains no compressible messages". Fail only
+  // when NOTHING landed; otherwise land the successes and surface the
+  // failures as advisory lines below.
+  if (applied.result.errors.length > 0 && applied.result.blocksCreated === 0) {
     return { text: `compress failed: ${applied.result.errors.join('; ')}` }
   }
   env.store.set(session, applied.state)
@@ -363,9 +373,10 @@ async function handleCompress(env: ToolEnvironment, args: CompressArgs, exec: To
 
   const summaryLine = `Compressed ${applied.result.blocksCreated} block(s), ~${applied.result.tokensCompressed} tokens reclaimed.`
   const totalSkipped = skippedRanges + alreadyCompressedNotes.length
-  const warningLines = [...freeWarnings.map((warning) => `  ${warning}`), ...alreadyCompressedNotes, ...lines]
+  const failedLines = applied.result.errors.map((error) => `  ${error}`)
+  const warningLines = [...freeWarnings.map((warning) => `  ${warning}`), ...failedLines, ...alreadyCompressedNotes, ...lines]
   const footer = totalSkipped > 0
-    ? `  (${totalSkipped} range(s) skipped — see warnings above)`
+    ? `  (${totalSkipped} range(s) skipped or failed — see above)`
     : ''
   return { text: `${summaryLine}\n${[...warningLines, footer].filter((line) => line !== '').join('\n')}` }
 }

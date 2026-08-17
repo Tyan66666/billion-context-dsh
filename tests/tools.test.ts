@@ -593,3 +593,28 @@ test('M3: a mixed boundary [message..blockSummary] distills and folds extra mess
   assert.match(recText, /\[reply 1\]/, 'the folded assistant message is in the recursion')
   assert.match(recText, /\[msg 4\]/, 'a distilled original from the parent block is in the recursion')
 })
+
+test('M3: a kernel-rejected range does not poison the rest of the compress call', async () => {
+  const env = makeEnv()
+  const session = buildTextSession(12)
+  const compress = toolOf(env, 'compress')
+  const result = await compress.execute({
+    content: [
+      {
+        startSeq: 1,
+        endSeq: 3,
+        summary: 'Authentication system: JWT access tokens with 15 minute expiry, refresh tokens in Redis with 30 day TTL, login flow in src/auth/login.ts with sliding-window rate limiting at 10 requests per minute per IP address, bcrypt hashing at cost factor 12.',
+      },
+      {
+        startSeq: 11,
+        endSeq: 12,
+        summary: 'Recent tail messages fall inside the kernel protected zone, so the kernel rejects this range while the first range still lands.',
+      },
+    ],
+  } as never, fakeExec(session))
+  const text = (result as { text: string }).text
+  assert.match(text, /Compressed 1 block/, 'the healthy range still lands')
+  assert.match(text, /protected zone/, 'the rejected range is reported, not fatal')
+  const ledger = rebuildBlockLedger(session.events)
+  assert.equal(ledger.length, 1, 'exactly the healthy range produced a block')
+})

@@ -7,8 +7,10 @@ import {
   AlreadyCompressedRangeError,
   assertNoActiveCompaction,
   buildCompressibleSeqRanges,
+  deferCompressPairHide,
   findOpenTurn,
   hideCompressToolPair,
+  openToolCallIds,
   rebuildBlockLedger,
   resolveSurfaceRange,
   runCompactionTransaction,
@@ -384,4 +386,93 @@ test('M5: hideCompressToolPair removes the compress call/result from the invalid
   assert.ok(!after.some((message) => message.role === 'user' && message.content.some((block) => (block as { type?: string }).type === 'tool-result')), 'compress result is hidden as a tool-result')
   assert.ok(after.some((message) => message.role === 'user' && message.content.some((block) => (block as { type?: string }).type === 'text' && (block as { text?: string }).text === 'ok')), 'the compress outcome text is preserved for the model')
   assert.ok(session.events.some((event) => event.type === 'compaction/prune'), 'the hide is recorded as a durable prune')
+})
+
+test('M5: stripOrphanedSurfaceToolMessages prunes legacy broken pairs (call → summary → result)', () => {
+  const session = Session.create('broken-pair')
+  appendTurn(session, 1)
+  appendUser(session, longText('q', 0))                                   // seq 1
+  appendToolCall(session, 'compress call', 'call-broken')                 // seq 2
+  appendUser(session, 'Legacy compaction summary inserted between call and result.') // seq 3
+  appendToolResult(session, 'ok', 'call-broken')                          // seq 4 — non-adjacent result
+  assert.equal(session.deriveMessages().length, 4)
+  const hidden = stripOrphanedSurfaceToolMessages(session)
+  assert.equal(hidden, 2, 'the broken call and its non-adjacent result are both pruned')
+  const after = session.deriveMessages()
+  assert.equal(after.length, 2, 'only the two user messages remain visible')
+  assert.ok(!after.some((message) => message.role === 'tool'), 'no orphaned tool result remains')
+  assert.ok(!after.some((message) => message.role === 'assistant' && message.content.some((block) => (block as { type?: string }).type === 'tool-call')), 'no orphaned tool-call remains')
+  assert.doesNotThrow(() => buildCompressibleSeqRanges(session, { preserveRecent: 0 }), 'the healed surface is range-solvable')
+})
+
+test('M5: stripOrphanedSurfaceToolMessages keeps healthy multi-call pairs', () => {
+  const session = Session.create('multi-call')
+  appendTurn(session, 1)
+  appendUser(session, longText('q', 0))
+  appendMultiToolCall(session, 'compress + other', ['call-a', 'call-b'])
+  appendToolResult(session, 'a ok', 'call-a')
+  appendToolResult(session, 'b ok', 'call-b')
+  const hidden = stripOrphanedSurfaceToolMessages(session)
+  assert.equal(hidden, 0, 'adjacent multi-call results are healthy — nothing pruned')
+  assert.equal(session.deriveMessages().length, 4, 'the whole pair stays on the surface')
+})
+
+test('M5: openToolCallIds reports exactly the in-flight calls', () => {
+  const session = Session.create('open-calls')
+  appendTurn(session, 1)
+  appendUser(session, longText('q', 0))
+  appendToolCall(session, 'compress', 'call-acp')
+  appendToolCall(session, 'other tool', 'call-other')
+  assert.deepEqual([...openToolCallIds(session)].sort(), ['call-acp', 'call-other'])
+  appendToolResult(session, 'ok', 'call-other')
+  assert.deepEqual([...openToolCallIds(session)], ['call-acp'], 'only the unanswered call remains open')
+})
+
+test('M5: hideCompressToolPair refuses a multi-call node (hiding would orphan siblings)', () => {
+  const session = Session.create('multi-call-hide')
+  appendTurn(session, 1)
+  appendUser(session, longText('old', 0))
+  appendMultiToolCall(session, 'compress + other', ['call-acp', 'call-other'])
+  appendToolResult(session, 'ok', 'call-acp') // adjacent to the call node
+  assert.equal(hideCompressToolPair(session, 'call-acp'), false, 'a multi-call node is never hidden')
+  const after = session.deriveMessages()
+  assert.ok(after.some((message) => message.content.some((block) => (block as { type?: string }).type === 'tool-result')), 'the sibling result stays visible')
+  assert.ok(after.some((message) => message.role === 'assistant' && message.content.some((block) => (block as { type?: string }).type === 'tool-call')), 'the tool-call node stays visible')
+})
+
+test('M5: deferCompressPairHide lands the hide on the microtask queue', async () => {
+  const session = Session.create('deferred-hide')
+  appendTurn(session, 1)
+  appendUser(session, longText('old', 0))                    // seq 1
+  appendToolCall(session, 'compressing history', 'call-acp') // seq 2
+  // The compress tool runs mid-turn: its durable summary node is inserted
+  // before the current tool/result, producing [summary, compress-call, result].
+  runCompactionTransaction(session, {
+    start: 1,
+    end: 1,
+    shadowedSeqs: [1],
+    summary: [{ type: 'text', text: 'Compression summary with enough technical detail to replace the old message.' }],
+    shadowedTokenCount: 1000,
+    provider: 'test-provider',
+    model: 'test-model',
+  })
+  const result = session.append('tool/result', {
+    turn: 1,
+    step: 1,
+    message: {
+      id: 'res-acp',
+      role: 'user',
+      content: [{ type: 'tool-result', toolCallId: 'call-acp', content: [{ type: 'text', text: 'ok' }] }],
+      source: { kind: 'tool', callId: 'call-acp' },
+    },
+  } as never, { surfaceOp: 'append' })
+  let errored: unknown = null
+  deferCompressPairHide(session, 'call-acp', result.seq, (error) => { errored = error })
+  // Synchronously the pair is still on the surface — the hide is deferred.
+  assert.ok(session.deriveMessages().some((message) => message.role === 'assistant' && message.content.some((block) => (block as { type?: string }).type === 'tool-call')), 'hide is deferred — the pair is still visible synchronously')
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  assert.equal(errored, null, 'the deferred hide does not error')
+  const after = session.deriveMessages()
+  assert.ok(!after.some((message) => message.role === 'assistant' && message.content.some((block) => (block as { type?: string }).type === 'tool-call')), 'the pair is hidden after the microtask drains')
+  assert.ok(after.some((message) => message.role === 'user' && message.content.some((block) => (block as { type?: string }).type === 'text' && (block as { text?: string }).text === 'ok')), 'the compress result text is preserved')
 })
