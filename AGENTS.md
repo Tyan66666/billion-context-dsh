@@ -102,7 +102,7 @@ The PR title is enforced by CI (`.github/workflows/pr-lint.yml` → `scripts/che
    - ref assignment / `compressibleRanges` — we deliberately self-compute the range table, so drift here is absorbed, but confirm
    - `CoreMessage` / `NudgeDecision` types — `messages.ts`, `nudge.ts`
 3. Bump the exact version in `package.json`, run `npm install` (refreshes lock), then `npm run typecheck && npm test && npm run build`.
-4. **The test suite is the safety net**: 91 tests cover the battle-hardened behaviors (CJK estimation, lone-tool expansion, surface range table, ledger backfill, ref-tag projection, orphan-tool pruning, broken-pair healing, deferred compress call/result hiding, in-flight call preservation, batch resilience, acp_status upstream alignment, dual-id bN decompress). Any kernel behavior change that breaks one of those turns red here — do NOT release on red.
+4. **The test suite is the safety net**: 97 tests cover the battle-hardened behaviors (CJK estimation, lone-tool expansion, surface range table, ledger backfill, ref-tag projection, orphan-tool pruning, broken-pair healing, deferred compress call/result hiding, in-flight call preservation, batch resilience, acp_status upstream alignment, dual-id bN decompress). Any kernel behavior change that breaks one of those turns red here — do NOT release on red.
 5. Optionally enable new kernel features deliberately (e.g. `createBpeTokenizer()` behind a config flag) — never adopt silently.
 6. Release per the workflow below (bump own version, publish, `gh release create`).
 

@@ -286,7 +286,7 @@ scope:'compressed' for block drilldown.
 
 ### 8.3 验收
 
-`npm run typecheck && npm test && npm run build` 全绿；§8.2 新增测试数 ≥ 4（实际 +9：bN decompress、畸形输入、碰撞优先级、blockIdOfKernelRef 单元、合成交叉断言、ACTIVE 双态、checkpoint 排除、surfaceSummary min..max、prompt 防混淆文案）；README/INSTALL/AGENTS.md 同步（§10）。
+`npm run typecheck && npm test && npm run build` 全绿；§8.2 新增测试数 ≥ 4（实际 +7：acp_status 上游格式、无窗口断言、windowFor 探测下仍无窗口、ACTIVE 双态、checkpoint 排除、bN decompress、畸形输入、碰撞优先级、blockIdOfKernelRef 单元、合成交叉断言——相对 main v0.2.2 净增 7 条，全量 97）；README/INSTALL/AGENTS.md 同步（§10）。
 
 ## 9. 未决项与后续
 
