@@ -16,6 +16,7 @@ function makeEnv(limit = 128000): ToolEnvironment {
     kernel: createCore({}) as CompressionCore,
     store: new AcpStateStore(),
     modelContextLimit: limit,
+    compressCallIdsToHide: new Set(),
   }
 }
 
@@ -70,6 +71,21 @@ test('M3: compress lands a durable block and shrinks the surface', async () => {
   assert.equal(ledger.length, 1)
   assert.deepEqual(ledger[0]!.shadowedSeqs, [1, 2, 3, 4, 5])
   assert.ok(ledger[0]!.shadowedTokenCount > 0, 'the ledger records real reclaimed tokens, not 0')
+})
+
+test('M3: successful compress registers its call id for post-result pair hiding', async () => {
+  const env = makeEnv()
+  const session = buildTextSession(12)
+  const compress = toolOf(env, 'compress')
+  const result = await compress.execute({
+    content: [{
+      startSeq: 1,
+      endSeq: 5,
+      summary: 'Authentication system: JWT access tokens with 15 minute expiry, refresh tokens in Redis with 30 day TTL, login flow in src/auth/login.ts with sliding-window rate limiting at 10 requests per minute per IP address, bcrypt hashing at cost factor 12.',
+    }],
+  } as never, fakeExec(session))
+  assert.match((result as { text: string }).text, /Compressed 1 block/)
+  assert.ok(env.compressCallIdsToHide!.has('call-acp'), 'the engine knows to hide this compress call/result after the tool result lands')
 })
 
 test('M3: compress accepts multiple disjoint ranges in one call, each its own block', async () => {
@@ -576,4 +592,29 @@ test('M3: a mixed boundary [message..blockSummary] distills and folds extra mess
   const recText = (rec as { text: string }).text
   assert.match(recText, /\[reply 1\]/, 'the folded assistant message is in the recursion')
   assert.match(recText, /\[msg 4\]/, 'a distilled original from the parent block is in the recursion')
+})
+
+test('M3: a kernel-rejected range does not poison the rest of the compress call', async () => {
+  const env = makeEnv()
+  const session = buildTextSession(12)
+  const compress = toolOf(env, 'compress')
+  const result = await compress.execute({
+    content: [
+      {
+        startSeq: 1,
+        endSeq: 3,
+        summary: 'Authentication system: JWT access tokens with 15 minute expiry, refresh tokens in Redis with 30 day TTL, login flow in src/auth/login.ts with sliding-window rate limiting at 10 requests per minute per IP address, bcrypt hashing at cost factor 12.',
+      },
+      {
+        startSeq: 11,
+        endSeq: 12,
+        summary: 'Recent tail messages fall inside the kernel protected zone, so the kernel rejects this range while the first range still lands.',
+      },
+    ],
+  } as never, fakeExec(session))
+  const text = (result as { text: string }).text
+  assert.match(text, /Compressed 1 block/, 'the healthy range still lands')
+  assert.match(text, /protected zone/, 'the rejected range is reported, not fatal')
+  const ledger = rebuildBlockLedger(session.events)
+  assert.equal(ledger.length, 1, 'exactly the healthy range produced a block')
 })
