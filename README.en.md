@@ -130,7 +130,7 @@ DSH derives every model request from its append-only session log (the *surface*)
 | nudge ("efficiency note — compress early and keep context lean") | injected at `agent/pre-step` by the kernel's pressure decision — efficiency note + context breakdown + compression rules, tone aligned with kernel/pi; never an order |
 | `decompress` | read-only recovery of shadowed originals from the log |
 | `search_context` | scores block summaries + originals rebuilt from the log |
-| `acp_status` | block ledger + context pressure |
+| `acp_status` | CONTEXT BREAKDOWN (tool/text/summaries shares of the visible total) + compressed-block ledger + nudge decision line; no context-window rows; scope/view/tool/sort/limit drilldown supported |
 | block state | in-memory kernel state + **log-rebuilt ledger** (no sidecar files) |
 | tiered distillation (T2/T3) | re-compressing a block's summary node distills that block (tier 2); distilling a tier-2 block yields tier 3. Tier + kernel block ids are persisted to the log, so kernel state rehydrates from the log after a restart and stays distillable |
 
@@ -147,9 +147,9 @@ A walkthrough of the ACP philosophy this project inherits — how active context
 | Tool | What it does |
 | --- | --- |
 | `compress` | Replace a seq range with a dense summary you write (edges auto-balanced to tool-pair boundaries); re-compressing a block's summary node distills it (tier 2/3) |
-| `decompress` | Restore a previously compressed block's original content (read-only) |
+| `decompress` | Restore a previously compressed block's original content (read-only); accepts the `bN` ref shown by acp_status or a compaction id |
 | `search_context` | Search compressed block summaries and originals by keyword |
-| `acp_status` | Context usage, compressed blocks, compressible ranges |
+| `acp_status` | CONTEXT BREAKDOWN (tool/text/summaries shares of the visible total) + compressed-block ledger + nudge decision line; no context-window rows. Drilldown supported: `scope:"compressed"` per block, `scope:"uncompressed"` + `view:"messages"`/`"ranges"` per message/range, with `tool` filter, `sort` order and `limit` cap. Drilldown row refs are kernel ids (mN, size awareness only) — compress always uses the `Surface:` seqs |
 | `/acp` | status / compress / decompress from the command bar |
 
 ## Upstream & credits
@@ -170,7 +170,7 @@ This project reuses `acp-kernel`'s compression core and `billion-context-pi`'s d
 | Key | Default | Meaning |
 |---|---|---|
 | `modelContextLimit` | auto-detected (fallback `128000`) | Context window used for the kernel's pressure decisions; an explicit value wins and skips the probe |
-| `autoModelContextLimit` | `true` | Probe the model's real window from the model API (`agent.ctx.llm.resolveModelInfo`); fall back to the default on failure, `acp_status` shows the window source |
+| `autoModelContextLimit` | `true` | Probe the model's real window from the model API (`agent.ctx.llm.resolveModelInfo`); fall back to the default on failure, the `/acp` command shows the window source (the `acp_status` model tool carries no window info) |
 | `nudgeMinContextLimitPct` | kernel default `0.45` | Nudge window lower bound (usage fraction) — validation only; the growth-driven trigger has no percentage floor — same default as billion-context-pi |
 | `nudgeMaxContextLimitPct` | engine default `0.70` (kernel/pi default `0.75`) | Over-limit line: above this the nudge fires regardless of growth — deliberately below the host compaction-basic 80% auto-compaction line so the forced nudge fires first; an explicit value wins |
 | `nudgeEmergencyThresholdPct` | engine default `0.85` (kernel/pi default `0.95`) | Emergency nudge (bypasses the per-turn dedup) — lowered from `0.95`: at 95% the model has no room to act and the 80% auto-compaction line shadows it; an explicit value wins |

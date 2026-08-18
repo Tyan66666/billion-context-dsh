@@ -11,14 +11,16 @@
  */
 
 import { defineTool, type ToolDefinition, type ToolRunContext } from '@deepseek-ai/dsh-tools'
-import { defaultCountTokens, type CompressionCore } from 'acp-kernel'
+import { buildStatusReport, defaultCountTokens, type CompressionCore } from 'acp-kernel'
 import type { Agent } from '@deepseek-ai/dsh-agent'
+import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
 import type { AcpStateStore } from './state.ts'
 import { kernelConfigFor, type KernelConfigInput } from './config.ts'
 import { resolveTokenCount } from './nudge.ts'
-import { windowSourceLabel, type AcpWindow } from './window.ts'
+import type { AcpWindow } from './window.ts'
 import {
   AlreadyCompressedRangeError,
+  blockIdOfKernelRef,
   blockRefForSummarySeq,
   compactionIdsOfKernelBlocks,
   expandShadowedSeqs,
@@ -31,7 +33,7 @@ import {
   surfaceSummary,
   type ResolvedSurfaceRange,
 } from './region.ts'
-import { allLogMessages, eventsToCoreMessages, extractEventText, surfaceEventsOf } from './messages.ts'
+import { allLogMessages, buildToolCallIndex, eventsToCoreMessages, extractEventText, surfaceEventsOf } from './messages.ts'
 import { DEFAULT_RESOLVED, type ResolvedPrompts } from './prompts.ts'
 
 export interface ToolEnvironment extends KernelConfigInput {
@@ -153,6 +155,30 @@ function unwrapCompressArgs(args: CompressArgs): CompressArgs | null {
   const content = (inner as { content?: unknown }).content
   if (content === undefined) return null
   return { ...args, content: content as CompressArgs['content'] }
+}
+
+/**
+ * Peel the tolerated wrapped-arguments envelope `{ arguments: {…} }` that some
+ * model channels emit for ANY tool — the same double-nesting that birthed
+ * `unwrapCompressArgs` (live-verified on acp_status: a drilldown call arrived
+ * as `{"arguments":{"scope":"compressed"}}` and was silently dropped, since
+ * only compress unwrapped). The envelope may be an object or a JSON string;
+ * inner keys win over outer duplicates. Args without an envelope pass through
+ * untouched.
+ */
+function unwrapEnvelope<T extends object>(args: T): T {
+  const envelope = (args as { arguments?: unknown }).arguments
+  if (envelope === undefined) return args
+  let inner: unknown = envelope
+  if (typeof inner === 'string') {
+    try {
+      inner = JSON.parse(inner)
+    } catch {
+      return args
+    }
+  }
+  if (typeof inner !== 'object' || inner === null || Array.isArray(inner)) return args
+  return { ...args, ...(inner as object) } as T
 }
 
 /** Resolve seq → kernel ref, then applyCompression and land the transaction. */
@@ -382,17 +408,35 @@ async function handleCompress(env: ToolEnvironment, args: CompressArgs, exec: To
 }
 
 const decompressParameters = {
-  blockId: { type: 'string' as const, required: true, description: 'Block id from acp_status or search_context (the compaction id).' },
+  blockId: { type: 'string' as const, required: true, description: 'Block id: the kernel block ref `bN` shown by acp_status (e.g. b1), or a compaction id / prefix from search_context.' },
 } as const
 
 interface DecompressArgs {
   blockId: string
 }
 
-function handleDecompress(_env: ToolEnvironment, args: DecompressArgs, exec: ToolRunContext): TextOutput {
-  const session = requireAgent(exec).session
+/** Resolve a block arg to its durable compaction id: exact `bN` kernel ref
+ *  first (acp_status shows `bN`), then the compaction-id prefix match that
+ *  search_context and /acp have always used. The `bN` branch is exact
+ *  (`/^b\d+$/` with `$`), so a UUID that happens to start with `b1` cannot be
+ *  shadowed — full UUIDs and 8-char prefixes never match the anchored regex. */
+function resolveBlockId(session: Session, arg: string): string | null {
+  const byKernelRef = blockIdOfKernelRef(session, arg)
+  if (byKernelRef !== null) return byKernelRef
   const ledger = rebuildBlockLedger(session.events)
-  const block = ledger.find((entry) => entry.blockId.startsWith(args.blockId))
+  const byPrefix = ledger.find((entry) => entry.blockId.startsWith(arg))
+  return byPrefix?.blockId ?? null
+}
+
+function handleDecompress(_env: ToolEnvironment, rawArgs: DecompressArgs, exec: ToolRunContext): TextOutput {
+  const args = unwrapEnvelope<DecompressArgs>(rawArgs)
+  const session = requireAgent(exec).session
+  const blockId = resolveBlockId(session, args.blockId)
+  if (blockId === null) {
+    return { text: `decompress: block "${args.blockId}" not found (see acp_status for the block list)` }
+  }
+  const ledger = rebuildBlockLedger(session.events)
+  const block = ledger.find((entry) => entry.blockId === blockId)
   if (block === undefined) {
     return { text: `decompress: block "${args.blockId}" not found (see acp_status for the block list)` }
   }
@@ -419,7 +463,8 @@ interface SearchArgs {
   limit?: number
 }
 
-function handleSearch(_env: ToolEnvironment, args: SearchArgs, exec: ToolRunContext): TextOutput {
+function handleSearch(_env: ToolEnvironment, rawArgs: SearchArgs, exec: ToolRunContext): TextOutput {
+  const args = unwrapEnvelope<SearchArgs>(rawArgs)
   const session = requireAgent(exec).session
   const ledger = rebuildBlockLedger(session.events)
   const terms = args.query.toLowerCase().split(/\s+/).filter(Boolean)
@@ -443,33 +488,108 @@ function handleSearch(_env: ToolEnvironment, args: SearchArgs, exec: ToolRunCont
   }
 }
 
-const statusParameters = {} as const
-
-interface StatusArgs {
-  [key: string]: never
+/** acp_status drilldown passthrough (kernel buildStatusReport options). All
+ *  keys optional — no args = overview. `view`/`tool`/`sort`/`limit` only have
+ *  meaning under `scope:"uncompressed"` (`tool` narrows to `view:"messages"`;
+ *  `sort:"age"` applies to `scope:"compressed"`); the kernel ignores them in
+ *  overview mode (upstream status-tool docstring documented the same scope).
+ *  DSH schema compiler: `string` + `enum` supported, no `required: true`
+ *  anywhere → all optional (schema.js:192-210). */
+const statusParameters = {
+  scope: {
+    type: 'string' as const,
+    enum: ['compressed', 'uncompressed'] as const,
+    description: 'Drilldown scope: "compressed" lists compressed blocks, "uncompressed" lists visible messages. Omit for the overview.',
+  },
+  view: {
+    type: 'string' as const,
+    enum: ['ranges', 'messages'] as const,
+    description: 'Drilldown view under scope:"uncompressed": "ranges" merges visible messages into ranges (default), "messages" lists every message.',
+  },
+  tool: {
+    type: 'string' as const,
+    description: 'Filter drilldown rows to one tool name (scope:"uncompressed" + view:"messages" only).',
+  },
+  sort: {
+    type: 'string' as const,
+    enum: ['size', 'time', 'tool', 'age'] as const,
+    description: 'Row order: size (default, most tokens first), time, tool; "age" applies to compressed blocks.',
+  },
+  limit: {
+    type: 'integer' as const,
+    description: 'Cap on rows or blocks shown (default 30).',
+  },
 }
 
-async function handleStatus(env: ToolEnvironment, _args: StatusArgs, exec: ToolRunContext): Promise<TextOutput> {
+interface StatusArgs {
+  scope?: 'compressed' | 'uncompressed'
+  view?: 'ranges' | 'messages'
+  tool?: string
+  sort?: 'size' | 'time' | 'tool' | 'age'
+  limit?: number
+}
+
+/** A compaction checkpoint summary node (`source.plugin === 'compact'`). These
+ *  are NOT in any block's `effectiveMessageIds`, so feeding them to
+ *  `buildStatusReport` would double-count the summary — once as `block.summary`
+ *  (summaryTokens) and once as a visible text message (totalText). Excluded
+ *  before status rendering (design §4.2 P1-3). */
+function isCheckpointEvent(event: SessionEvent): boolean {
+  if (event.type !== 'user/message') return false
+  const source = (event.data as { source?: { plugin?: string } }).source
+  return source?.plugin === 'compact'
+}
+
+async function handleStatus(env: ToolEnvironment, rawArgs: StatusArgs, exec: ToolRunContext): Promise<TextOutput> {
+  // The model channel may wrap ANY tool's args under `{ arguments: {…} }`;
+  // peel it or drilldown params never reach buildStatusReport (live-verified
+  // `{"arguments":{"scope":"compressed"}}` silently rendered the overview).
+  const args = unwrapEnvelope<StatusArgs>(rawArgs)
   const agent = requireAgent(exec)
   const session = agent.session
-  const ledger = rebuildBlockLedger(session.events)
-  const totalTokens = ledger.reduce((sum, block) => sum + block.shadowedTokenCount, 0)
-  const coreMessages = eventsToCoreMessages(surfaceEventsOf(session))
-  const estimated = resolveTokenCount(agent, coreMessages)
-  const window = env.windowFor === undefined
-    ? { limit: env.modelContextLimit, source: 'explicit' as const }
-    : await env.windowFor(agent)
-  const limit = window.limit
-  const lines = [
-    `ACP status — session ${session.id}`,
-    `  blocks: ${ledger.length}`,
-    `  tokens compressed: ${totalTokens}`,
-    `  estimated context: ${estimated} / ${limit} (${Math.round((estimated / limit) * 100)}%)`,
-    `  context window: ${limit} (${windowSourceLabel(window)})`,
-    `  surface: ${surfaceSummary(session)}`,
-  ]
-  for (const block of ledger.slice(0, 10)) {
-    lines.push(`  - ${block.blockId.slice(0, 8)}: seqs ${block.start}..${block.end} (${block.shadowedSeqs.length} msgs) — ${block.summary.slice(0, 80)}`)
+  const state = env.store.stateFor(session)
+  const surface = surfaceEventsOf(session)
+  // One tool-call index for both projections below (P2-5): tool/result
+  // toolName/toolCallId are backfilled from the assistant tool-calls.
+  const toolNames = buildToolCallIndex(surface)
+  const coreMessages = allLogMessages(session)
+  const surfaceMessages = eventsToCoreMessages(surface, toolNames)
+  const tokenCount = resolveTokenCount(agent, surfaceMessages)
+  const config = kernelConfigFor(env)
+  // Run the same pipeline the context transform runs, so what acp_status
+  // reports matches what the model actually receives. The returned turn.state
+  // carries the freshly assigned refs; it is NOT persisted — acp_status is a
+  // read-only view, and env.store.set would advance the nudge baseline a
+  // second time in the same turn (design §6.1 P2-2).
+  const turn = env.kernel.processTurn({ messages: coreMessages, state, config, tokenCount })
+  // Status messages = visible surface EXCLUDING checkpoint summary nodes (P1-3).
+  const statusMessages = eventsToCoreMessages(
+    surface.filter((event) => !isCheckpointEvent(event)),
+    toolNames,
+  )
+  // Upstream-aligned: the kernel renders the breakdown (percentages of the
+  // VISIBLE total — no window semantics; drilldown scope/view/tool/sort/limit
+  // pass through verbatim); the engine only appends the nudge decision line,
+  // the DSH Surface anchor, and — in drilldown mode — the mN-vs-seq note.
+  const report = buildStatusReport(turn.state, statusMessages, defaultCountTokens, args)
+  const lines = [report]
+  // Mirror upstream pi (`if (args.scope) return base`): a drilldown request
+  // answers with the kernel report alone — the nudge decision line is an
+  // overview concept. The Surface anchor stays in ALL modes: it is the model's
+  // compressible-ref locator (design P2-1).
+  if (args.scope === undefined) {
+    const nudge = turn.nudge
+    if (nudge !== undefined) {
+      lines.push('', `Nudge: ${nudge.shouldInject ? 'ACTIVE' : 'idle'} — ${nudge.reason}`)
+    }
+  }
+  lines.push('', `Surface: ${surfaceSummary(session)}`)
+  // Drilldown rows carry kernel refs (mN, dense log-order ids). The model must
+  // NOT feed them to compress — compress speaks surface seqs, and the Surface
+  // anchor above is the only compressible-ref source (design §9 P2-3). Slated
+  // for direct seq adaptation when the search_context seq dialect lands (#23).
+  if (args.scope === 'uncompressed') {
+    lines.push('', 'Note: drilldown rows are kernel refs (mN) for size awareness — compress uses the Surface: seqs above, never mN.')
   }
   return { text: lines.join('\n') }
 }

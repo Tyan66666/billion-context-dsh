@@ -132,8 +132,8 @@ cp <deepseek-harness>/apps/cli/config/agent-presets/standard/{agent.cordis.yml,p
 | 步骤 | 命令/操作 | 预期 |
 |---|---|---|
 | 1. 工具注册 | 新会话里要求模型列出可用工具，或观察工具目录 | 出现 `compress`、`decompress`、`search_context`、`acp_status` |
-| 2. 状态可用 | 让模型调用 `acp_status` | 返回块数、压缩 token、估计上下文占用 |
-| 3. 压缩闭环 | 在一个较长会话（消息多、上下文超过窗口时），模型按 nudge 或自行调用 `compress({ content: [{ startSeq, endSeq, summary }] })` | 返回 `Compressed N block(s)`；会话上下文明显缩小；`acp_status` 的 blocks 增加 |
+| 2. 状态可用 | 让模型调用 `acp_status`（或带钻取参数 `{"scope":"uncompressed","view":"messages","limit":5}`） | 返回 CONTEXT BREAKDOWN（tool/text/summaries 占可见总量）、压缩块列表、nudge 状态行（不含上下文窗口信息）；钻取模式逐行/逐块列出体积，行 ref 为内核 mN，压缩仍用 `Surface:` 的 seq |
+| 3. 压缩闭环 | 在一个较长会话（消息多、上下文超过窗口时），模型按 nudge 或自行调用 `compress({ content: [{ startSeq, endSeq, summary }] })` | 返回 `Compressed N block(s)`；会话上下文明显缩小；`acp_status` 的 COMPRESSED BLOCKS 增加 |
 | 4. 可恢复 | 调用 `decompress({ blockId })` | 返回被压缩范围的原文 |
 | 5. 可搜索 | 调用 `search_context({ query })` | 命中被压缩块内信息 |
 | 6. nudge | 持续对话到出现可压缩堆积。增长路径：某层 pending ≥ 5 万 token 且较上次检测增长 ≥ 2.25 万 token（无百分比下限，中前期就可能触发）；保证线：使用率 ≥ 70%；紧急：≥ 85% | 注入消息提示压缩，带 `seq a..b` 范围表 |

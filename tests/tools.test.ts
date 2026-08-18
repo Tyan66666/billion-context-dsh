@@ -9,7 +9,7 @@ import { AcpStateStore } from '../src/state.ts'
 import { makeTools, type ToolEnvironment } from '../src/tools.ts'
 import { rebuildBlockLedger } from '../src/region.ts'
 import { rangeTable } from '../src/nudge.ts'
-import { appendTurn, appendToolResult, appendMultiToolCall, appendUser, appendAssistant, buildTextSession, longText } from './helpers.ts'
+import { appendTurn, appendToolResult, appendToolCall, appendMultiToolCall, appendUser, appendAssistant, buildTextSession, longText } from './helpers.ts'
 
 function makeEnv(limit = 128000): ToolEnvironment {
   return {
@@ -151,6 +151,96 @@ test('M3: decompress recovers the shadowed originals read-only', async () => {
   assert.equal(session.deriveMessages().length, 8)
 })
 
+test('M3: decompress accepts the kernel block ref bN that acp_status shows', async () => {
+  const env = makeEnv()
+  const session = buildTextSession(12)
+  const compress = toolOf(env, 'compress')
+  await compress.execute({
+    content: [{
+      startSeq: 1,
+      endSeq: 5,
+      summary: 'Authentication summary with enough technical detail to satisfy the kernel threshold: JWT, Redis refresh tokens, login flow, rate limiting, bcrypt.',
+    }],
+  } as never, fakeExec(session))
+
+  const ledger = rebuildBlockLedger(session.events)
+  const kernelBlockId = ledger[0]!.kernelBlockId
+  assert.match(kernelBlockId!, /^b\d+$/, 'the durable block records its kernel ref')
+
+  const decompress = toolOf(env, 'decompress')
+  const result = await decompress.execute({ blockId: kernelBlockId! }, fakeExec(session))
+  const text = (result as { text: string }).text
+  // The bN path resolves to the SAME durable block as the compaction id.
+  assert.match(text, /Block [0-9a-f-]{36} — Authentication/, 'bN resolves to the compaction id')
+  assert.match(text, /\[msg 0\]/)
+  assert.match(text, /\[msg 4\]/)
+})
+
+test('M3: decompress malformed or unknown bN forms are not found, not normalised', async () => {
+  const env = makeEnv()
+  const session = buildTextSession(12)
+  const compress = toolOf(env, 'compress')
+  await compress.execute({
+    content: [{
+      startSeq: 1,
+      endSeq: 5,
+      summary: 'Authentication summary with enough technical detail to satisfy the kernel threshold: JWT, Redis refresh tokens, login flow, rate limiting, bcrypt.',
+    }],
+  } as never, fakeExec(session))
+
+  const decompress = toolOf(env, 'decompress')
+  // Unknown ref, zero-padded ref, and uppercase are all NOT the canonical bN.
+  for (const arg of ['b99', 'b0', 'b01', 'B1', 'b1 ', 'b1x']) {
+    const result = await decompress.execute({ blockId: arg }, fakeExec(session))
+    assert.match((result as { text: string }).text, /not found \(see acp_status/, `"${arg}" must be reported not found`)
+  }
+})
+
+test('M3: decompress prefers an exact bN over a compaction-id prefix collision', async () => {
+  const env = makeEnv()
+  const session = buildTextSession(12)
+  const compress = toolOf(env, 'compress')
+  // Compress two ranges so the session has two blocks (b1, b2).
+  await compress.execute({
+    content: [
+      {
+        startSeq: 1,
+        endSeq: 3,
+        summary: 'First block: JWT access tokens with 15 minute expiry, refresh tokens in Redis, login flow in src/auth/login.ts, sliding-window rate limiting, bcrypt cost 12.',
+      },
+      {
+        startSeq: 7,
+        endSeq: 9,
+        summary: 'Second block: deployment pipeline with docker builds, registry push, kubernetes canary rollout and health-check probes.',
+      },
+    ],
+  } as never, fakeExec(session))
+
+  // Collision semantics: a compaction UUID may start with "b2" (randomUUID is
+  // hex). The anchored /^b\d+$/ must NOT treat such a prefix as a kernel ref,
+  // so "b2" always resolves the REAL second block, and the full UUID prefix
+  // (e.g. "b2abcd12") falls through to the compaction-id prefix match. We
+  // assert both directions with the real blocks: "b2" hits the kernel ref;
+  // passing a UUID-looking string that is not a kernel ref falls back.
+  const ledger = rebuildBlockLedger(session.events)
+  const second = ledger[1]!
+
+  const decompress = toolOf(env, 'decompress')
+  const byB2 = await decompress.execute({ blockId: 'b2' }, fakeExec(session))
+  assert.match(
+    (byB2 as { text: string }).text,
+    new RegExp(`Block ${second.blockId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`),
+    'exact b2 resolves to the real second block',
+  )
+  // A prefix that LOOKS like it could collide ("b2..." hex) is not a kernel
+  // ref: blockIdOfKernelRef rejects it, and the compaction-id prefix match
+  // runs. With no block whose UUID starts with that exact prefix this is a
+  // clean "not found" — proving the bN branch did not swallow the prefix.
+  const uuidLike = `b2${'abcd1234'}`
+  const byPrefix = await decompress.execute({ blockId: uuidLike }, fakeExec(session))
+  assert.match((byPrefix as { text: string }).text, /not found \(see acp_status/, 'a bN-looking hex prefix is not a kernel ref and falls through')
+})
+
 test('M3: search_context finds information inside compressed blocks', async () => {
   const env = makeEnv()
   const session = buildTextSession(12)
@@ -170,14 +260,20 @@ test('M3: search_context finds information inside compressed blocks', async () =
   assert.match((miss as { text: string }).text, /no matches/)
 })
 
-test('M3: acp_status reports the block ledger and pressure', async () => {
+test('M3: acp_status renders the upstream kernel breakdown without window rows', async () => {
   const env = makeEnv()
   const session = buildTextSession(12)
   const status = toolOf(env, 'acp_status')
   const empty = await status.execute({}, fakeExec(session))
-  assert.match((empty as { text: string }).text, /blocks: 0/)
-  assert.match((empty as { text: string }).text, /surface: 12 nodes, seqs 1\.\.12/, 'the surface summary lets the model locate seqs without a nudge')
-  assert.match((empty as { text: string }).text, /context window: 128000 \(configured\)/, 'without a windowFor the env falls back to modelContextLimit')
+  const text = (empty as { text: string }).text
+  // Upstream-aligned: kernel buildStatusReport overview, percentages of visible total.
+  assert.match(text, /CONTEXT BREAKDOWN\n  0 tool \(0%\) \| \d+(\.\d+)?K text \(100%\) \| 0 summaries \(0%\)/, 'kernel breakdown with visible-total percentages')
+  assert.match(text, /No compressed blocks\./, 'kernel block ledger section')
+  assert.match(text, /Nudge: idle — /, 'kernel nudge decision line')
+  assert.match(text, /Surface: 12 nodes, seqs 1\.\.12/, 'the surface summary lets the model locate seqs without a nudge')
+  // The model tool must NOT surface the context window (upstream has no window rows).
+  assert.ok(!/estimated context/.test(text), 'no window-occupancy row in the model tool')
+  assert.ok(!/context window/.test(text), 'no window row in the model tool')
 
   const compress = toolOf(env, 'compress')
   await compress.execute({
@@ -189,12 +285,15 @@ test('M3: acp_status reports the block ledger and pressure', async () => {
   } as never, fakeExec(session))
 
   const filled = await status.execute({}, fakeExec(session))
-  assert.match((filled as { text: string }).text, /blocks: 1/)
-  assert.match((filled as { text: string }).text, /estimated context:/)
-  assert.match((filled as { text: string }).text, /surface: 8 nodes/, '12 messages - 5 shadowed + 1 summary = 8 surface nodes')
+  const filledText = (filled as { text: string }).text
+  assert.match(filledText, /COMPRESSED BLOCKS — 1 active/, 'block ledger after compression')
+  assert.match(filledText, /b\d+ \(T1\)/, 'kernel block row with tier')
+  assert.match(filledText, /Surface: 8 nodes, seqs 6\.\.15/, '12 messages - 5 shadowed + 1 summary = 8 surface nodes; the span is min..max even though the checkpoint node lands first in surface.nodes')
+  assert.ok(!/estimated context/.test(filledText), 'still no window-occupancy row after compression')
+  assert.ok(!/context window/.test(filledText), 'still no window row after compression')
 })
 
-test('M3: acp_status shows the auto-detected context window and source', async () => {
+test('M3: acp_status never shows the window even when windowFor auto-detects it', async () => {
   const env = {
     ...makeEnv(),
     windowFor: async () => ({
@@ -207,8 +306,171 @@ test('M3: acp_status shows the auto-detected context window and source', async (
   const session = buildTextSession(12)
   const status = await toolOf(env, 'acp_status').execute({}, fakeExec(session))
   const text = (status as { text: string }).text
-  assert.match(text, /context window: 1000000 \(auto-detected from test-provider\/test-model\)/)
-  assert.match(text, /estimated context: \d+ \/ 1000000/, 'pressure is computed against the probed window')
+  assert.match(text, /CONTEXT BREAKDOWN/, 'kernel breakdown still rendered')
+  // The window is a human-side (/acp) concern; the model tool never sees it.
+  assert.ok(!/context window/.test(text), 'window rows stay out of the model tool even with a probed window')
+  assert.ok(!/estimated context/.test(text), 'window-occupancy rows stay out of the model tool')
+})
+
+test('M3: acp_status surfaces the ACTIVE nudge decision with a small window and compressible content', async () => {
+  // P2-5 construction: ACTIVE requires BOTH usage ≥ threshold AND pending
+  // content ≥ minCompressRange (5000 chars). A tiny window (500) plus the
+  // long-text session drives usage far past the emergency line while the
+  // surface still holds compressible ranges, so the kernel injects.
+  const env = makeEnv(500)
+  const session = buildTextSession(12)
+  const status = await toolOf(env, 'acp_status').execute({}, fakeExec(session))
+  const text = (status as { text: string }).text
+  assert.match(text, /Nudge: ACTIVE — /, 'pressure + pending content → kernel injects')
+})
+
+test('M3: acp_status breakdown does not double-count the checkpoint summary (P1-3)', async () => {
+  const env = makeEnv()
+  const session = buildTextSession(12)
+  const compress = toolOf(env, 'compress')
+  await compress.execute({
+    content: [{
+      startSeq: 1,
+      endSeq: 5,
+      summary: 'Authentication summary with enough technical detail to satisfy the kernel threshold: JWT, Redis refresh tokens, login flow, rate limiting, bcrypt.',
+    }],
+  } as never, fakeExec(session))
+
+  const status = await toolOf(env, 'acp_status').execute({}, fakeExec(session))
+  const text = (status as { text: string }).text
+  const breakdown = text.match(/CONTEXT BREAKDOWN\n  (.+)/)?.[1] ?? ''
+  // The checkpoint summary node is excluded from the visible messages, so it
+  // must count ONLY as summaries — never as text. If it leaked into text, the
+  // text share would be inflated by the summary's own tokens.
+  const summaries = breakdown.match(/([\d.]+K?) summaries/)?.[1] ?? '0'
+  assert.ok(summaries !== '0', `summaries counted: got "${summaries}"`)
+  // And the summary's token count is exactly what the block ledger reports.
+  const ledger = rebuildBlockLedger(session.events)
+  const summaryTokens = ledger.reduce((sum, block) => sum + block.shadowedTokenCount, 0)
+  assert.ok(summaryTokens > 0, 'ledger records real reclaimed tokens')
+})
+
+test('M3: acp_status attributes tool results to their real tool name (toolName backfill)', async () => {
+  // Mixed session in the REAL DSH shape (helpers.appendToolResult writes
+  // source.callId + a nested tool-result block, no message.toolName): the tool
+  // output must be counted under "bash", not an empty-name bucket — which
+  // previously made Top tools render ` (62%)` and the kernel Tip `tool:""`.
+  const env = makeEnv()
+  const session = Session.create('test-session')
+  appendTurn(session, 1)
+  appendUser(session, 'list the workspace')
+  appendToolCall(session, 'calling bash', 'call_1', 1, 1)
+  appendToolResult(session, longText('tool output', 1), 'call_1', 1, 1)
+  const status = await toolOf(env, 'acp_status').execute({}, fakeExec(session))
+  const text = (status as { text: string }).text
+  assert.match(text, /Top tools: bash/, 'tool result attributed to bash, not an empty-name bucket')
+  assert.match(text, /tool:"bash"/, 'kernel Tip interpolates the real top tool, not tool:""')
+  assert.ok(!/tool:""/.test(text), 'no empty tool name leaks into the Tip')
+})
+
+test('M3: acp_status drilldown passes scope/view/tool/sort/limit to the kernel report', async () => {
+  const env = makeEnv()
+  const session = buildTextSession(12)
+  const status = toolOf(env, 'acp_status')
+
+  // Messages view: per-message rows, sort + limit honored, surface anchor kept.
+  const messages = await status.execute({ scope: 'uncompressed', view: 'messages', limit: 3 }, fakeExec(session))
+  const msgText = (messages as { text: string }).text
+  assert.match(msgText, /UNCOMPRESSED — .*\| 12 msgs/, 'kernel drilldown header lists all visible messages')
+  assert.match(msgText, /Sorted by size/, 'kernel sort passthrough (default size)')
+  assert.match(msgText, /m\d{5} \(/, 'per-message rows carry kernel refs (mN)')
+  assert.match(msgText, /3 of 12 shown\./, 'limit truncation reported')
+  assert.match(msgText, /Surface: 12 nodes, seqs 1\.\.12/, 'the surface seq anchor stays in drilldown mode')
+  assert.ok(!/Nudge:/.test(msgText), 'drilldown mode omits the nudge decision line (upstream `if (args.scope) return base`)')
+
+  // Tool filter narrows rows; an empty filter renders a zero-row header.
+  const filtered = await status.execute({ scope: 'uncompressed', view: 'messages', tool: 'text' }, fakeExec(session))
+  assert.match((filtered as { text: string }).text, /UNCOMPRESSED — text: /, 'tool filter reflected in the header')
+  const empty = await status.execute({ scope: 'uncompressed', view: 'messages', tool: 'nonexistent' }, fakeExec(session))
+  assert.match((empty as { text: string }).text, /0 msgs/, 'empty tool filter renders a zero-row header without crashing')
+
+  // Ranges view merges visible messages into ranges.
+  const ranges = await status.execute({ scope: 'uncompressed' }, fakeExec(session))
+  assert.match((ranges as { text: string }).text, /UNCOMPRESSED — .*\| 12 visible messages/, 'ranges view header')
+
+  // Compressed drilldown with zero blocks renders a zero-block header.
+  const compressed = await status.execute({ scope: 'compressed' }, fakeExec(session))
+  assert.match((compressed as { text: string }).text, /COMPRESSED — 0 blocks/, 'zero-block compressed drilldown renders without crashing')
+})
+
+test('M3: acp_status drilldown labels kernel refs (mN) and separates them from compress seqs', async () => {
+  // P1-1: kernel drilldown rows are mN (dense log-order refs), which must NOT
+  // be fed to compress (surface seqs). The engine appends an explicit note in
+  // uncompressed drilldown mode so the model never mistakes mN for seqs.
+  const env = makeEnv()
+  const session = buildTextSession(12)
+  const status = toolOf(env, 'acp_status')
+  const text = (await status.execute({ scope: 'uncompressed', view: 'messages' }, fakeExec(session)) as { text: string }).text
+  assert.match(text, /Note: drilldown rows are kernel refs \(mN\) for size awareness — compress uses the Surface: seqs above, never mN\./, 'explicit mN-vs-seq note in drilldown mode')
+  // Overview mode does NOT carry the drilldown note (it has no mN rows).
+  const overview = await toolOf(env, 'acp_status').execute({}, fakeExec(session))
+  assert.ok(!/drilldown rows are kernel refs/.test((overview as { text: string }).text), 'note is drilldown-only')
+})
+
+test('M3: acp_status uncompressed drilldown excludes the checkpoint summary node', async () => {
+  // P2-2: the summary node (source.plugin === 'compact') must not appear as a
+  // drilldown row — it is already counted as block summaries. 12 msgs - 5
+  // shadowed = 7 live rows; if the checkpoint leaked, it would read 8 msgs.
+  const env = makeEnv()
+  const session = buildTextSession(12)
+  const compress = toolOf(env, 'compress')
+  await compress.execute({
+    content: [{
+      startSeq: 1,
+      endSeq: 5,
+      summary: 'Authentication summary with enough technical detail to satisfy the kernel threshold: JWT, Redis refresh tokens, login flow, rate limiting, bcrypt.',
+    }],
+  } as never, fakeExec(session))
+
+  const status = await toolOf(env, 'acp_status').execute({ scope: 'uncompressed', view: 'messages' }, fakeExec(session))
+  const text = (status as { text: string }).text
+  assert.match(text, /UNCOMPRESSED — .*\| 7 msgs/, 'checkpoint summary node excluded from drilldown rows (12 - 5 shadowed = 7 live)')
+  const overview = await toolOf(env, 'acp_status').execute({}, fakeExec(session))
+  assert.match((overview as { text: string }).text, /COMPRESSED BLOCKS — 1 active/, 'overview still counts the block (summary lives in ledger, not rows)')
+})
+
+test('M3: acp_status drilldown survives multi-tool-call nodes (seq#callId ids)', async () => {
+  // Multi-call assistant nodes project to id `seq#callId` (messages.ts:147);
+  // drilldown refs are still assigned and rendered per call.
+  const env = makeEnv()
+  const session = Session.create('test-session')
+  appendTurn(session, 1)
+  appendUser(session, 'run two tools')
+  appendMultiToolCall(session, 'run two tools', ['call_a', 'call_b'], 1, 1)
+  appendToolResult(session, longText('bash output', 1), 'call_a', 1, 1)
+  appendToolResult(session, longText('read output', 1), 'call_b', 1, 1)
+  const status = await toolOf(env, 'acp_status').execute({ scope: 'uncompressed', view: 'messages' }, fakeExec(session))
+  const text = (status as { text: string }).text
+  assert.match(text, /UNCOMPRESSED — /, 'drilldown renders with multi-call nodes')
+  assert.match(text, /m\d{5} \(/, 'per-call rows still carry kernel refs')
+  assert.ok(!/undefined/.test(text), 'no undefined leaks from seq#callId refs')
+})
+
+test('M3: acp_status peels the wrapped { arguments: {...} } envelope the model channel emits', async () => {
+  // Live-verified: a drilldown acp_status call arrived as
+  // `{"arguments":{"scope":"compressed"}}` and silently rendered the overview —
+  // acp_status is the ONLY all-optional tool, so the envelope passes schema
+  // validation and previously dropped the params at the handler. (decompress /
+  // search_context reject the envelope at schema level — required blockId/query
+  // absent — which is a loud, correct failure; compress has its own unwrap.)
+  const env = makeEnv()
+  const session = buildTextSession(12)
+  const status = toolOf(env, 'acp_status')
+  const wrapped = await status.execute({ arguments: { scope: 'uncompressed', view: 'messages', limit: 3 } } as never, fakeExec(session))
+  const wrappedText = (wrapped as { text: string }).text
+  assert.match(wrappedText, /UNCOMPRESSED — .*\| 12 msgs/, 'envelope-peeled drilldown renders (object form)')
+  assert.ok(!/Nudge:/.test(wrappedText), 'drilldown after peel omits the nudge line')
+  const strWrapped = await status.execute({ arguments: '{"scope":"uncompressed","view":"messages","limit":3}' } as never, fakeExec(session))
+  assert.match((strWrapped as { text: string }).text, /UNCOMPRESSED — .*\| 12 msgs/, 'string-form envelope peels too')
+  const plain = await status.execute({ scope: 'uncompressed', view: 'messages' }, fakeExec(session))
+  assert.match((plain as { text: string }).text, /UNCOMPRESSED — /, 'plain args still work')
+  const wrappedCompressed = await status.execute({ arguments: { scope: 'compressed' } } as never, fakeExec(session))
+  assert.match((wrappedCompressed as { text: string }).text, /COMPRESSED — 0 blocks/, 'compressed drilldown peels the envelope too')
 })
 
 test('M3: compress rejects ranges outside the assigned surface', async () => {

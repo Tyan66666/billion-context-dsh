@@ -21,7 +21,7 @@ import {
 } from '@deepseek-ai/dsh-compaction'
 import { createAssistantMessage, createUserMessage, type ContentBlock } from '@deepseek-ai/dsh-llm'
 import { defaultCountTokens } from 'acp-kernel'
-import { extractEventText, extractText } from './messages.ts'
+import { extractEventText, extractText, toolCallIdOfResultEvent } from './messages.ts'
 
 /** One durable ACP block as rebuilt from the session log. */
 export interface AcpBlockLedgerEntry {
@@ -473,20 +473,9 @@ function toolCallIdsOfEvent(event: SessionEvent): string[] {
   return ids
 }
 
-/** The tool-call id of one tool/result surface message, or null. */
-function toolCallIdOfResultEvent(event: SessionEvent): string | null {
-  if (event.type !== 'tool/result') return null
-  const message = (event.data as {
-    message?: { content?: Array<{ type?: unknown; toolCallId?: unknown }>; source?: { callId?: unknown } }
-  }).message
-  const block = Array.isArray(message?.content)
-    ? message.content.find((candidate) => candidate?.type === 'tool-result')
-    : undefined
-  const id = block?.toolCallId ?? message?.source?.callId
-  return typeof id === 'string' ? id : null
-}
-
-/** Provider/model to stamp on a synthetic empty assistant pruning node. */
+/**
+ * Provider/model to stamp on a synthetic empty assistant pruning node.
+ */
 function assistantProviderModel(event: SessionEvent): { provider: string; model: string } {
   if (event.type === 'assistant/message') {
     const message = (event.data as { message?: { source?: { provider?: unknown; model?: unknown } } }).message
@@ -825,8 +814,15 @@ export function buildCompressibleSeqRanges(
 export function surfaceSummary(session: Session): string {
   const nodes = session.surface.nodes
   if (nodes.length === 0) return 'empty'
-  const first = nodes[0]!
-  const last = nodes[nodes.length - 1]!
+  // Surface nodes are NOT guaranteed to be ordered: a compaction replace lands
+  // the checkpoint node first, so [15, 6, 7, …]. Report the span as min..max
+  // rather than first..last, which would read "seqs 15..12" after a compress.
+  let first = nodes[0]!
+  let last = nodes[0]!
+  for (const seq of nodes) {
+    if (seq < first) first = seq
+    if (seq > last) last = seq
+  }
   return `${nodes.length} nodes, seqs ${first}..${last}`
 }
 
@@ -910,6 +906,20 @@ export function compactionIdsOfKernelBlocks(session: Session, kernelBlockIds: re
   return kernelBlockIds
     .map((id) => byKernel.get(id))
     .filter((id): id is string => id !== undefined)
+}
+
+/**
+ * Resolve a kernel block ref (`bN`) — as shown by the model tool `acp_status`
+ * (kernel `buildStatusReport` renders `block.blockId`) — to the durable
+ * compaction id the decompress/search tools accept. Returns null when `bN` is
+ * not an exact registry key (unknown ref). Only matches the canonical `bN`
+ * form (`/^b\d+$/`); anything else is not a kernel ref and returns null so the
+ * caller falls back to its compaction-id prefix match.
+ */
+export function blockIdOfKernelRef(session: Session, kernelRef: string): string | null {
+  if (!/^b\d+$/.test(kernelRef)) return null
+  const entry = blockRegistry(session).find((r) => r.kernelBlockId === kernelRef)
+  return entry?.blockId ?? null
 }
 
 /** The checkpoint summary seq of an ACTIVE kernel block (`bN`), or null. */

@@ -62,13 +62,60 @@ function stringifyArgs(args: unknown): string {
 }
 
 /**
+ * The tool-call id of one tool/result surface message, or null.
+ *
+ * Real DSH tool-result events carry NO `message.toolCallId` (hard-won rule
+ * 10): the identity lives in the nested `{ type: 'tool-result', toolCallId }`
+ * content block, falling back to `message.source.callId`. Shared with
+ * `src/region.ts`'s call/result pairing — one implementation, never a copy.
+ */
+export function toolCallIdOfResultEvent(event: SessionEvent): string | null {
+  if (event.type !== 'tool/result') return null
+  const message = (event.data as {
+    message?: { content?: Array<{ type?: unknown; toolCallId?: unknown }>; source?: { callId?: unknown } }
+  }).message
+  const block = Array.isArray(message?.content)
+    ? message.content.find((candidate) => candidate?.type === 'tool-result')
+    : undefined
+  const id = block?.toolCallId ?? message?.source?.callId
+  return typeof id === 'string' ? id : null
+}
+
+/**
+ * Index of assistant tool-call `id` → tool `name`, used to attribute
+ * tool/result messages to their tool. Real DSH tool-results carry no
+ * `message.toolName` (rule 10), so the projection backfills it from the
+ * matching assistant tool-call. Scans ALL events up front (order-independent:
+ * a result may precede its call in the array) and covers shadowed calls too.
+ */
+export function buildToolCallIndex(events: readonly SessionEvent[]): ReadonlyMap<string, string> {
+  const index = new Map<string, string>()
+  for (const event of events) {
+    if (event.type !== 'assistant/message') continue
+    const content = (event.data as { message?: { content?: unknown } }).message?.content
+    if (!Array.isArray(content)) continue
+    for (const block of content) {
+      const candidate = block as { type?: unknown; id?: unknown; name?: unknown } | null
+      if (candidate !== null && typeof candidate === 'object' && candidate.type === 'tool-call' && typeof candidate.id === 'string') {
+        index.set(candidate.id, typeof candidate.name === 'string' ? candidate.name : '')
+      }
+    }
+  }
+  return index
+}
+
+/**
  * Project one surface message event into CoreMessage(s).
  *  - user/message      → user text (verbatim content)
  *  - assistant/message → assistant text, or one CoreMessage per tool-call
- *  - tool/result       → tool result (toolName/toolCallId, role 'tool')
+ *  - tool/result       → tool result (role 'tool'); toolName/toolCallId are
+ *                        backfilled from `toolNames` (assistant tool-call
+ *                        index) — real DSH events do not carry them at the
+ *                        message level. Without an index the result stays
+ *                        untagged (`toolName: ''`), never "text".
  * Non-surface events project to nothing.
  */
-export function projectEvent(event: SessionEvent): CoreMessage[] {
+export function projectEvent(event: SessionEvent, toolNames?: ReadonlyMap<string, string>): CoreMessage[] {
   switch (event.type) {
     case 'user/message': {
       const text = extractText((event.data as { content?: unknown }).content)
@@ -111,12 +158,13 @@ export function projectEvent(event: SessionEvent): CoreMessage[] {
       }).message
       const text = extractText(message?.content)
       if (text.length === 0) return []
+      const key = toolCallIdOfResultEvent(event)
       return [{
         id: String(event.seq),
         role: 'tool',
         contentType: 'tool-result',
-        toolName: message?.toolName ?? '',
-        toolCallId: message?.toolCallId ?? '',
+        toolName: toolNames?.get(key ?? '') ?? '',
+        toolCallId: message?.toolCallId ?? key ?? '',
         text,
       }]
     }
@@ -126,9 +174,10 @@ export function projectEvent(event: SessionEvent): CoreMessage[] {
 }
 
 /** Project a session's message events into CoreMessage[] in log order. */
-export function eventsToCoreMessages(events: readonly SessionEvent[]): CoreMessage[] {
+export function eventsToCoreMessages(events: readonly SessionEvent[], toolNames?: ReadonlyMap<string, string>): CoreMessage[] {
+  const index = toolNames ?? buildToolCallIndex(events)
   const out: CoreMessage[] = []
-  for (const event of events) out.push(...projectEvent(event))
+  for (const event of events) out.push(...projectEvent(event, index))
   return out
 }
 

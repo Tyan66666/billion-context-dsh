@@ -6,6 +6,8 @@ import { AcpStateStore } from '../src/state.ts'
 import {
   AlreadyCompressedRangeError,
   assertNoActiveCompaction,
+  blockIdOfKernelRef,
+  blockRegistry,
   buildCompressibleSeqRanges,
   deferCompressPairHide,
   findOpenTurn,
@@ -99,6 +101,81 @@ test('M5: the block ledger rebuilds from the log without kernel state', () => {
   assert.deepEqual(ledger[0]!.shadowedSeqs, [1, 2, 3, 4])
   assert.equal(ledger[1]!.shadowedTokenCount, 2000)
   assert.equal(ledger[1]!.start, 6)
+})
+
+test('M5: blockIdOfKernelRef resolves the bN the model tool shows back to the compaction id', () => {
+  const session = buildTextSession(8)
+  runCompactionTransaction(session, {
+    start: 1,
+    end: 4,
+    shadowedSeqs: [1, 2, 3, 4],
+    summary: [{ type: 'text', text: 'First block summary with plenty of detail.' }],
+    shadowedTokenCount: 1000,
+    provider: 'p',
+    model: 'm',
+    kernelBlockId: 'b1',
+  })
+  runCompactionTransaction(session, {
+    start: 6,
+    end: 8,
+    shadowedSeqs: [6, 7, 8],
+    summary: [{ type: 'text', text: 'Second block summary with plenty of detail.' }],
+    shadowedTokenCount: 2000,
+    provider: 'p',
+    model: 'm',
+    kernelBlockId: 'b2',
+  })
+  const ledger = rebuildBlockLedger(session.events)
+  // The acp_status block rows (bN) must resolve to the durable ids the
+  // decompress/search tools accept — the whole point of the dual-id support.
+  assert.equal(blockIdOfKernelRef(session, 'b1'), ledger[0]!.blockId)
+  assert.equal(blockIdOfKernelRef(session, 'b2'), ledger[1]!.blockId)
+  // Unknown / malformed refs are not resolved (caller falls back to prefix).
+  assert.equal(blockIdOfKernelRef(session, 'b99'), null)
+  assert.equal(blockIdOfKernelRef(session, 'b0'), null)
+  assert.equal(blockIdOfKernelRef(session, 'b01'), null, 'no zero-padding normalisation')
+  assert.equal(blockIdOfKernelRef(session, 'B1'), null, 'case-sensitive')
+  assert.equal(blockIdOfKernelRef(session, 'b1 '), null, 'no trailing-space tolerance')
+  assert.equal(blockIdOfKernelRef(session, ledger[0]!.blockId.slice(0, 8)), null, 'a UUID prefix is not a kernel ref')
+})
+
+test('M5: rebuildKernelBlocks and blockRegistry synthesise identical bN ids (no id-space drift)', () => {
+  // P1-2: two independent bN syntheses exist (region.ts blockRegistry and
+  // state.ts rebuildKernelBlocks, via AcpStateStore). acp_status displays the
+  // kernel state's blockId while decompress resolves through blockRegistry —
+  // if the two ever drift, the model tool shows bN ids that decompress cannot
+  // resolve (the exact bug this feature fixes). Pin them together.
+  const session = buildTextSession(8)
+  runCompactionTransaction(session, {
+    start: 1,
+    end: 4,
+    shadowedSeqs: [1, 2, 3, 4],
+    summary: [{ type: 'text', text: 'First block summary with plenty of detail.' }],
+    shadowedTokenCount: 1000,
+    provider: 'p',
+    model: 'm',
+  })
+  runCompactionTransaction(session, {
+    start: 6,
+    end: 8,
+    shadowedSeqs: [6, 7, 8],
+    summary: [{ type: 'text', text: 'Second block summary with plenty of detail.' }],
+    shadowedTokenCount: 2000,
+    provider: 'p',
+    model: 'm',
+  })
+  // Fresh store forces the log-rebuild path (the "restarted engine" case).
+  const kernelBlocks = new AcpStateStore().stateFor(session).blocks
+  const registry = blockRegistry(session)
+  assert.equal(kernelBlocks.length, registry.length)
+  for (let index = 0; index < kernelBlocks.length; index += 1) {
+    assert.equal(
+      kernelBlocks[index]!.blockId,
+      registry[index]!.kernelBlockId,
+      `block ${index}: kernel state bN must equal the registry bN`,
+    )
+    assert.equal(blockIdOfKernelRef(session, kernelBlocks[index]!.blockId), registry[index]!.blockId)
+  }
 })
 
 test('M5: resolveSurfaceRange rejects missing, reversed, and pair-broken ranges', () => {

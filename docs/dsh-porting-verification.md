@@ -154,15 +154,15 @@ PROBE OK
 | 8 | nudge 范围表只剩 ~28 tokens / 大段 compress 被 `no tool-pairing-balanced` 拒绝 | 孤儿工具消息（无配对 result 的 call、无配对 call 的 result）破坏配对平衡缓存或打碎大段；老版本 bug 还在 call 与 result 之间插入摘要形成死锁 "broken pair" | 范围求解前自动剥离孤儿（`compaction/prune` + 空 assistant 替换）：`agent/pre-step` **无条件执行**（低压力会话也不被崩溃孤儿 400）+ `buildCompressibleSeqRanges` + `handleCompress` 顶部；剥离覆盖孤儿 result、全孤儿 call 节点、以及 call→非工具节点→result 的 broken pair（自动治愈遗留死锁会话）；`handleCompress` 保护当前 step **全部 in-flight call**（`openToolCallIds`），兄弟工具不会被误剪 |
 | 9 | 批量 compress 中单个 kernel 拒绝的范围拖垮整个调用（成功块被丢弃） | kernel 对"已被活动块 `effectiveMessageIds` 吸收但仍存活于 surface"的范围抛 `Range contains no compressible messages`；旧代码对任一 error 即整体返回失败并丢弃 `applied.state` | 仅当 `blocksCreated === 0` 才整体失败；否则照常落账成功块，失败范围作为 advisory 行报告（phantom range 不再毒化批次） |
 
-**实机验证数据**（修复后）：
+**实机验证数据**（修复后；acp_status 自 v0.2.2 起为上游对齐格式——CONTEXT BREAKDOWN 占可见总量、无窗口行，见 docs/acp-status-align-design.md）：
 
 ```
 compress({ startSeq: 64757, endSeq: 265056, ... })
 → Compressed 1 block(s), ~139200 tokens reclaimed. block 9458eab3, 583 messages shadowed
-→ acp_status: blocks: 16 | tokens compressed: 145305 | estimated context: 26165 / 128000 (20%)
+→ acp_status: CONTEXT BREAKDOWN ... | COMPRESSED BLOCKS — 16 active ... | Nudge: idle/ACTIVE — reason
 ```
 
-一次压缩回收 **~13.9 万 tokens**，上下文 **129% → 20%**，模型自述"当前摘要块里完整保留了所有关键信息（提交历史、代码架构、mask 编码、本地化、测试命令、点击问题结论），后续任何需求都能无缝接续"——ACP 闭环在真实长会话中完整走通。
+一次压缩回收 **~13.9 万 tokens**，模型自述"当前摘要块里完整保留了所有关键信息（提交历史、代码架构、mask 编码、本地化、测试命令、点击问题结论），后续任何需求都能无缝接续"——ACP 闭环在真实长会话中完整走通。
 
 **issue #18 修复实机验证**（2026-08-17，v0.2.1，PR #21 `c1d4045`，DSH web profile 符号链接直连 worktree 构建，重启加载）：
 
