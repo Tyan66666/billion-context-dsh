@@ -42,6 +42,7 @@ Design decisions (see docs/dsh-porting-verification.md for the full evidence):
 3. **No automatic summarization** — `compactIfNeeded` returns null; nudges are advisory, never imperative (default copy aligned with kernel/pi: efficiency note, not "suggestion, not a requirement"; the emergency tier alone says "compress now").
 4. **Model-driven summaries** — the model writes the summary via `compress`; no second LLM summarization call.
 5. **`acp-kernel` pinned to an exact version** (e.g. `"acp-kernel": "0.0.24"`, NEVER `^`). It is inlined by tsup; a caret range breaks reproducibility.
+6. **Search trusts the kernel** — `search_context` feeds the rebuilt doc set straight to `searchBlocks` (hybrid) and surfaces the scores; the engine adds NO second-tier gate/threshold (an early BM25 no-match gate was removed after it killed 6/46 real queries — synonyms and stemmed matches that hybrid would have found). A low fuzzy-only score (≈0.3 ceiling on noise) is for the model to judge from the surfaced score, not for the engine to filter. Algorithm bugs belong in acp-kernel, never re-implemented here.
 
 ## 3. Hard-won rules (from v0.1.1 long-session battle)
 

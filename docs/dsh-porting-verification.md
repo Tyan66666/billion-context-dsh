@@ -113,7 +113,7 @@ PROBE OK
 | D3 | **decompress**：读取日志原始事件，replace 回原文 | V5 |
 | D4 | **自动触发**：`agent/pre-step` + `agent/request-error`，与 compaction-basic 相同 | V2 架构事实 2 |
 | D5 | **块状态**：ACP block 状态写成会话日志事件（如 `acp/block`，回放/checkpoint 免费）或 `ctx.storage` key | V5、V3 |
-| D6 | **搜索**：`search_context` 从日志重建统一文档集（块摘要 + 被遮蔽的原始消息），交给 acp-kernel `searchBlocks`（默认 hybrid：BM25 词干化 + CJK bigram + 字符 n-gram 模糊）；BM25 作"无命中"闸门过滤 fuzzy 假阳性；消息命中回链最内层所属块 | V3、V1 |
+| D6 | **搜索**：`search_context` 从日志重建统一文档集（块摘要 + 被遮蔽的原始消息），交给 acp-kernel `searchBlocks`（默认 hybrid：BM25 词干化 + CJK bigram + 字符 n-gram 模糊）；**信任内核**——引擎不设无命中闸门/阈值（曾有一版 BM25 闸门过滤 fuzzy 假阳性，实测误杀 6/46 条同义词与词干化查询，违反"算法归内核"原则后移除），评分直接呈现，弱命中（fuzzy 兜底分 ≈0.3 上下）由模型凭分数判断；消息命中回链最内层所属块 | V3、V1 |
 | D7 | **nudge**：pre-step 注入（现有注入通道，会成为日志中的 `user/message`） | V4 中 pre-step 语义 |
 | D8 | **delegate 工具**：直接映射 DSH 现有 subagent/jobs 体系，不移植 Pi 专用实现 | 组合现状 |
 

@@ -522,12 +522,10 @@ function handleSearch(_env: ToolEnvironment, rawArgs: SearchArgs, exec: ToolRunC
   const session = requireAgent(exec).session
   if (args.query.trim() === '') return { text: 'search_context: empty query (no matches)' }
   const docs = buildSearchDocs(session)
-  // No-match gate: BM25 (stemmed tokens) must hit at least one doc, otherwise
-  // the query shares no real vocabulary with the log — hybrid's fuzzy n-gram
-  // leg alone would return near-random hits from common character bigrams in
-  // long messages (e.g. "quantum teleportation" matching "Authentication …").
-  const probe = searchBlocks(docs, args.query, { algorithm: 'bm25', limit: 1 })
-  if (probe.length === 0) return { text: `search_context: no matches for "${args.query}"` }
+  // Trust the kernel: hybrid (0.7×BM25 stemmed + 0.3×fuzzy n-gram) is the
+  // algorithm contract — no engine-side gate or threshold re-implements
+  // search policy. Scores are surfaced so the model can judge a weak hit
+  // (fuzzy-only tops out near 0.3).
   const results = searchBlocks(docs, args.query, { limit: args.limit ?? 5, previewLength: 160 })
   if (results.length === 0) return { text: `search_context: no matches for "${args.query}"` }
   const lines = results.map((r) => {

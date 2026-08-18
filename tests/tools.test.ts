@@ -254,10 +254,19 @@ test('M3: search_context finds information inside compressed blocks', async () =
   } as never, fakeExec(session))
 
   const search = toolOf(env, 'search_context')
+  // Real vocabulary hit: high score.
   const hit = await search.execute({ query: 'rate limiting', limit: 5 }, fakeExec(session))
-  assert.match((hit as { text: string }).text, /Matches for "rate limiting"/)
-  const miss = await search.execute({ query: 'quantum teleportation' }, fakeExec(session))
-  assert.match((miss as { text: string }).text, /no matches/)
+  const hitText = (hit as { text: string }).text
+  assert.match(hitText, /Matches for "rate limiting"/)
+  const hitScore = Number(/score ([\d.]+)/.exec(hitText)![1])
+  // Unrelated query: trust the kernel — no engine-side no-match gate. Hybrid
+  // still returns fuzzy-n-gram hits, but at a score well below a real hit, so
+  // the model can judge the weak match from the surfaced score.
+  const noise = await search.execute({ query: 'quantum teleportation' }, fakeExec(session))
+  const noiseText = (noise as { text: string }).text
+  assert.doesNotMatch(noiseText, /no matches/, 'no engine-side BM25 gate: unrelated query still returns low-scored hits')
+  const noiseScore = Number(/score ([\d.]+)/.exec(noiseText)![1])
+  assert.ok(noiseScore < hitScore, `unrelated query scores below a real hit (${noiseScore} < ${hitScore})`)
 })
 
 test('M3: search_context matches on stemmed English terms and CJK bigrams', async () => {
