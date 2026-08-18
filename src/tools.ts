@@ -33,7 +33,7 @@ import {
   surfaceSummary,
   type ResolvedSurfaceRange,
 } from './region.ts'
-import { allLogMessages, eventsToCoreMessages, extractEventText, surfaceEventsOf } from './messages.ts'
+import { allLogMessages, buildToolCallIndex, eventsToCoreMessages, extractEventText, surfaceEventsOf } from './messages.ts'
 import { DEFAULT_RESOLVED, type ResolvedPrompts } from './prompts.ts'
 
 export interface ToolEnvironment extends KernelConfigInput {
@@ -483,10 +483,12 @@ async function handleStatus(env: ToolEnvironment, _args: StatusArgs, exec: ToolR
   const agent = requireAgent(exec)
   const session = agent.session
   const state = env.store.stateFor(session)
-  // Full log for the kernel (so block anchors survive — same arbitration as
-  // buildNudge); the token count stays a SURFACE measurement.
+  const surface = surfaceEventsOf(session)
+  // One tool-call index for both projections below (P2-5): tool/result
+  // toolName/toolCallId are backfilled from the assistant tool-calls.
+  const toolNames = buildToolCallIndex(surface)
   const coreMessages = allLogMessages(session)
-  const surfaceMessages = eventsToCoreMessages(surfaceEventsOf(session))
+  const surfaceMessages = eventsToCoreMessages(surface, toolNames)
   const tokenCount = resolveTokenCount(agent, surfaceMessages)
   const config = kernelConfigFor(env)
   // Run the same pipeline the context transform runs, so what acp_status
@@ -497,7 +499,8 @@ async function handleStatus(env: ToolEnvironment, _args: StatusArgs, exec: ToolR
   const turn = env.kernel.processTurn({ messages: coreMessages, state, config, tokenCount })
   // Status messages = visible surface EXCLUDING checkpoint summary nodes (P1-3).
   const statusMessages = eventsToCoreMessages(
-    surfaceEventsOf(session).filter((event) => !isCheckpointEvent(event)),
+    surface.filter((event) => !isCheckpointEvent(event)),
+    toolNames,
   )
   // Upstream-aligned: the kernel renders the breakdown (percentages of the
   // VISIBLE total — no window semantics); the engine only appends the nudge

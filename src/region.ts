@@ -21,7 +21,7 @@ import {
 } from '@deepseek-ai/dsh-compaction'
 import { createAssistantMessage, createUserMessage, type ContentBlock } from '@deepseek-ai/dsh-llm'
 import { defaultCountTokens } from 'acp-kernel'
-import { extractEventText, extractText } from './messages.ts'
+import { extractEventText, extractText, toolCallIdOfResultEvent } from './messages.ts'
 
 /** One durable ACP block as rebuilt from the session log. */
 export interface AcpBlockLedgerEntry {
@@ -473,20 +473,9 @@ function toolCallIdsOfEvent(event: SessionEvent): string[] {
   return ids
 }
 
-/** The tool-call id of one tool/result surface message, or null. */
-function toolCallIdOfResultEvent(event: SessionEvent): string | null {
-  if (event.type !== 'tool/result') return null
-  const message = (event.data as {
-    message?: { content?: Array<{ type?: unknown; toolCallId?: unknown }>; source?: { callId?: unknown } }
-  }).message
-  const block = Array.isArray(message?.content)
-    ? message.content.find((candidate) => candidate?.type === 'tool-result')
-    : undefined
-  const id = block?.toolCallId ?? message?.source?.callId
-  return typeof id === 'string' ? id : null
-}
-
-/** Provider/model to stamp on a synthetic empty assistant pruning node. */
+/**
+ * Provider/model to stamp on a synthetic empty assistant pruning node.
+ */
 function assistantProviderModel(event: SessionEvent): { provider: string; model: string } {
   if (event.type === 'assistant/message') {
     const message = (event.data as { message?: { source?: { provider?: unknown; model?: unknown } } }).message

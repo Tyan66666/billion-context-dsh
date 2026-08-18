@@ -9,7 +9,7 @@ import { AcpStateStore } from '../src/state.ts'
 import { makeTools, type ToolEnvironment } from '../src/tools.ts'
 import { rebuildBlockLedger } from '../src/region.ts'
 import { rangeTable } from '../src/nudge.ts'
-import { appendTurn, appendToolResult, appendMultiToolCall, appendUser, appendAssistant, buildTextSession, longText } from './helpers.ts'
+import { appendTurn, appendToolResult, appendToolCall, appendMultiToolCall, appendUser, appendAssistant, buildTextSession, longText } from './helpers.ts'
 
 function makeEnv(limit = 128000): ToolEnvironment {
   return {
@@ -348,6 +348,24 @@ test('M3: acp_status breakdown does not double-count the checkpoint summary (P1-
   const ledger = rebuildBlockLedger(session.events)
   const summaryTokens = ledger.reduce((sum, block) => sum + block.shadowedTokenCount, 0)
   assert.ok(summaryTokens > 0, 'ledger records real reclaimed tokens')
+})
+
+test('M3: acp_status attributes tool results to their real tool name (toolName backfill)', async () => {
+  // Mixed session in the REAL DSH shape (helpers.appendToolResult writes
+  // source.callId + a nested tool-result block, no message.toolName): the tool
+  // output must be counted under "bash", not an empty-name bucket — which
+  // previously made Top tools render ` (62%)` and the kernel Tip `tool:""`.
+  const env = makeEnv()
+  const session = Session.create('test-session')
+  appendTurn(session, 1)
+  appendUser(session, 'list the workspace')
+  appendToolCall(session, 'calling bash', 'call_1', 1, 1)
+  appendToolResult(session, longText('tool output', 1), 'call_1', 1, 1)
+  const status = await toolOf(env, 'acp_status').execute({}, fakeExec(session))
+  const text = (status as { text: string }).text
+  assert.match(text, /Top tools: bash/, 'tool result attributed to bash, not an empty-name bucket')
+  assert.match(text, /tool:"bash"/, 'kernel Tip interpolates the real top tool, not tool:""')
+  assert.ok(!/tool:""/.test(text), 'no empty tool name leaks into the Tip')
 })
 
 test('M3: compress rejects ranges outside the assigned surface', async () => {
