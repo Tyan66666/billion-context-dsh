@@ -41,10 +41,11 @@ When conversations get long, the model runs out of context. Most tools hard-trun
 
 Unlike DSH's built-in auto-compaction (which replaces a range with an automatically generated summary), billion-context-dsh:
 
-- **Model-driven** — the model writes the summary itself; there is no second LLM summarization call (the ACP cost win)
+- **Model-driven** — the model writes the summary itself; there is no second LLM summarization call
 - **Advisory, never imperative** — automatic policy only *nudges*; the model decides whether and when to compress
 - **Durable & recoverable** — a compressed range becomes a checkpoint node, the originals stay in the append-only session log; `decompress` restores them, `search_context` finds information inside blocks
-- **Seq-based refs** — no message tags; surface seqs are carried by the nudge's range table, with auto-balanced range edges and `#callId` tolerance
+- **Long tasks hold steady** — every step builds on the results before it; key conclusions stay usable and compound, so very long tasks actually finish
+- **Context stays lean** — every request rides on a small, distilled slice of context with only the key information; no bulk compression of large ranges, so details don't decay with it — and tokens stay low
 
 This is the DeepSeek Harness port of [billion-context-pi](https://github.com/ranxianglei/billion-context-pi) (the Pi coding-agent adapter): the compression core ([acp-kernel](https://github.com/ranxianglei/acp-kernel)) is reused verbatim, and the adapter layer was rewritten against DSH's durable-surface model — see [docs](https://github.com/Tyan66666/billion-context-dsh/tree/main/docs) for the verified mapping.
 

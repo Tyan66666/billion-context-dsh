@@ -41,10 +41,11 @@
 
 与 DSH 内置的自动压缩（用自动生成的摘要替换一段范围）不同，billion-context-dsh：
 
-- **模型驱动** —— 摘要由模型自己书写，没有第二次 LLM 摘要调用（ACP 的成本优势）
+- **模型驱动** —— 摘要由模型自己书写，没有第二次 LLM 摘要调用
 - **只建议、不强令** —— 自动策略只 *nudge*（提醒），是否压缩、何时压缩由模型决定
 - **持久且可恢复** —— 压缩范围成为 checkpoint 节点，原文保留在 append-only 会话日志中；`decompress` 可恢复，`search_context` 可在块内查找
-- **基于 seq 引用** —— 不需要消息标签；surface seq 由 nudge 的范围表携带，范围边界自动平衡、容忍 `#callId` 片段
+- **长任务稳得住** —— 每一步都接着前面的成果走，关键结论持续可用、不断叠加，超长任务更容易跑完
+- **上下文始终精简** —— 每次请求都只用少量、精炼的上下文，只保留关键信息；不做大段统一压缩，细节不随之衰失，token 消耗自然更低
 
 这是 [billion-context-pi](https://github.com/ranxianglei/billion-context-pi)（Pi 编码代理适配器）在 DeepSeek Harness 上的移植：压缩内核（[acp-kernel](https://github.com/ranxianglei/acp-kernel)）原样复用，适配层针对 DSH 的 durable-surface 模型重写——经过验证的映射关系见 [docs](https://github.com/Tyan66666/billion-context-dsh/tree/main/docs)。
 
