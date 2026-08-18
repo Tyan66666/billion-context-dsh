@@ -232,7 +232,7 @@ scope:'uncompressed' + view:'messages' for per-message listing.
 scope:'compressed' for block drilldown.
 ```
 
-（若 §4.4 的 scope 钻取暂不实现，描述删去 scope 两行，见 §9。）
+（§4.4 的 scope 钻取已实现（§9）：描述按上文扩写；钻取行 mN 与 compress seq 的分界见 §9「P2-3 处置」。）
 
 ## 5. 关键决策与理由
 
@@ -286,12 +286,12 @@ scope:'compressed' for block drilldown.
 
 ### 8.3 验收
 
-`npm run typecheck && npm test && npm run build` 全绿；§8.2 新增测试数 ≥ 4（实际 +7：acp_status 上游格式、无窗口断言、windowFor 探测下仍无窗口、ACTIVE 双态、checkpoint 排除、bN decompress、畸形输入、碰撞优先级、blockIdOfKernelRef 单元、合成交叉断言——相对 main v0.2.2 净增 7 条，全量 97）；README/INSTALL/AGENTS.md 同步（§10）。
+`npm run typecheck && npm test && npm run build` 全绿；§8.2 新增测试数 ≥ 4（实际 +14：acp_status 上游格式、无窗口断言、windowFor 探测下仍无窗口、ACTIVE 双态、checkpoint 排除、bN decompress、畸形输入、碰撞优先级、blockIdOfKernelRef 单元、合成交叉断言、toolName 回填、钻取直通 + mN/seq 分离、钻取 checkpoint 行排除、多 call 钻取存活——相对 main v0.2.2 净增 14 条，全量 104）；README/INSTALL/AGENTS.md 同步（§10）。
 
 ## 9. 未决项与后续
 
 - **`Compressible ranges` / `Delegate usage`**：上游有，但依赖 `billion-context-kit`（`viableRanges`）与 delegate 三件套。移植版无此依赖；当前 ranges 信息由 nudge 范围表（`src/nudge.ts`）承载。**本 PR 不做**，记为后续项：引入 `billion-context-kit` 后补齐。
-- **scope 钻取**：上游支持 `scope:'compressed'/'uncompressed'` 钻取。本 PR 模型工具仅无参 overview；如需钻取，参数 schema 与 `buildStatusReport` 的 `StatusReportOptions` 直通（kernel 已支持），后续加。**预警（P2-3）**：启用钻取前需重新评估 ref 值——`renderUncompressedRanges`/`renderMessageDrilldown` 用 `/\d+/` 解析并做连续编号合并，`byRaw` 自映射的 seq 纯数值碰巧可用，但 `seq#callId` 会被截成裸 seq 显示，语义漂移；若启用钻取应改为向 kernel 提供真实递增 ref 或另写钻取渲染。
+- **scope 钻取**：上游支持 `scope:'compressed'/'uncompressed'` 钻取。**本 PR 已实现**：`statusParameters` 提供 `scope`/`view`/`tool`/`sort`/`limit` 五个可选参数（schema 全 optional，DSH 编译器支持 `string`+`enum`/`integer`），`handleStatus` 原样转发给 `buildStatusReport`；`scope` 有值时镜像上游 `if (args.scope) return base`——只返回 kernel 报告 + `Surface:` 行，**不加** Nudge 行；`scope:'uncompressed'` 模式追加引擎 `Note:` 行。**P2-3 处置（实现后定稿）**：钻取行保持 kernel 原生 `mN` ref，引擎不改写文本（保持规则 9——kernel 渲染、engine 拼装）；`Note:` 行明确「mN 仅供体量感知，压缩用 `Surface:` 的 seq」，prompts 描述同步写死三套 id 分界（seq 可压缩 / bN 可解压 / mN 仅展示）。**#22/#23 预留**：search_context 消息级将采用 surface seq 方言（PR #23），届时若需钻取行与 search 同方言，再把 mN→seq 适配（`turn.state.messageRefs.byRef[mN] → id → seq`，nudge.ts 的 ref-ID 适配先例）作为后续项实施——方向已定，本 PR 不含该适配。
 - **Tip 行**：D7 决定逐字保留；若评审认为暴露内部函数名不可接受，可后续裁剪（记入 CHANGELOG 的偏差说明）。
 
 ## 9b. 双 id 空间：acp_status 显示 `bN`，decompress 接受 `bN` 与 compaction id（后续实现，已评审）
@@ -307,7 +307,7 @@ scope:'compressed' for block drilldown.
 - `resolveBlockId`（`src/tools.ts`）先 `blockIdOfKernelRef` 后前缀匹配；`/acp decompress`（`src/commands.ts`）同逻辑（P1-1）；
 - 畸形输入（`b0`/`b01`/`B1`/`b1 `）不归一化，一律 "not found"（P2-6）；
 - 碰撞优先级：`/^b\d+$/` 带 `$` 锚定，UUID 前缀（含 hex）不可能匹配，先 `bN` 后前缀无歧义（P2-5，测试固化）；
-- `search_context` 保持返回 compaction id（`decompress` 接受前缀，闭环成立）（P2-3）；
+- `search_context` 保持返回 compaction id（`decompress` 接受前缀，闭环成立）（P2-3）；PR #23 落地后消息级命中显示 surface seq（`message seq N`），与压缩参考系同方言。
 - 工具描述更新：`decompressParameters.blockId`（`tools.ts`）、`prompts.ts` 工具描述与 system prompt 的 `decompress({ blockId })` 行（P2-7）。
 
 ## 10. 文档同步清单（本 PR 必须完成）

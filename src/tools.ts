@@ -462,10 +462,45 @@ function handleSearch(_env: ToolEnvironment, args: SearchArgs, exec: ToolRunCont
   }
 }
 
-const statusParameters = {} as const
+/** acp_status drilldown passthrough (kernel buildStatusReport options). All
+ *  keys optional — no args = overview. `view`/`tool`/`sort`/`limit` only have
+ *  meaning under `scope:"uncompressed"` (`tool` narrows to `view:"messages"`;
+ *  `sort:"age"` applies to `scope:"compressed"`); the kernel ignores them in
+ *  overview mode (upstream status-tool docstring documented the same scope).
+ *  DSH schema compiler: `string` + `enum` supported, no `required: true`
+ *  anywhere → all optional (schema.js:192-210). */
+const statusParameters = {
+  scope: {
+    type: 'string' as const,
+    enum: ['compressed', 'uncompressed'] as const,
+    description: 'Drilldown scope: "compressed" lists compressed blocks, "uncompressed" lists visible messages. Omit for the overview.',
+  },
+  view: {
+    type: 'string' as const,
+    enum: ['ranges', 'messages'] as const,
+    description: 'Drilldown view under scope:"uncompressed": "ranges" merges visible messages into ranges (default), "messages" lists every message.',
+  },
+  tool: {
+    type: 'string' as const,
+    description: 'Filter drilldown rows to one tool name (scope:"uncompressed" + view:"messages" only).',
+  },
+  sort: {
+    type: 'string' as const,
+    enum: ['size', 'time', 'tool', 'age'] as const,
+    description: 'Row order: size (default, most tokens first), time, tool; "age" applies to compressed blocks.',
+  },
+  limit: {
+    type: 'integer' as const,
+    description: 'Cap on rows or blocks shown (default 30).',
+  },
+}
 
 interface StatusArgs {
-  [key: string]: never
+  scope?: 'compressed' | 'uncompressed'
+  view?: 'ranges' | 'messages'
+  tool?: string
+  sort?: 'size' | 'time' | 'tool' | 'age'
+  limit?: number
 }
 
 /** A compaction checkpoint summary node (`source.plugin === 'compact'`). These
@@ -479,7 +514,7 @@ function isCheckpointEvent(event: SessionEvent): boolean {
   return source?.plugin === 'compact'
 }
 
-async function handleStatus(env: ToolEnvironment, _args: StatusArgs, exec: ToolRunContext): Promise<TextOutput> {
+async function handleStatus(env: ToolEnvironment, args: StatusArgs, exec: ToolRunContext): Promise<TextOutput> {
   const agent = requireAgent(exec)
   const session = agent.session
   const state = env.store.stateFor(session)
@@ -503,15 +538,29 @@ async function handleStatus(env: ToolEnvironment, _args: StatusArgs, exec: ToolR
     toolNames,
   )
   // Upstream-aligned: the kernel renders the breakdown (percentages of the
-  // VISIBLE total — no window semantics); the engine only appends the nudge
-  // decision line and the DSH surface anchor.
-  const base = buildStatusReport(turn.state, statusMessages, defaultCountTokens, {})
-  const lines = [base]
-  const nudge = turn.nudge
-  if (nudge !== undefined) {
-    lines.push('', `Nudge: ${nudge.shouldInject ? 'ACTIVE' : 'idle'} — ${nudge.reason}`)
+  // VISIBLE total — no window semantics; drilldown scope/view/tool/sort/limit
+  // pass through verbatim); the engine only appends the nudge decision line,
+  // the DSH Surface anchor, and — in drilldown mode — the mN-vs-seq note.
+  const report = buildStatusReport(turn.state, statusMessages, defaultCountTokens, args)
+  const lines = [report]
+  // Mirror upstream pi (`if (args.scope) return base`): a drilldown request
+  // answers with the kernel report alone — the nudge decision line is an
+  // overview concept. The Surface anchor stays in ALL modes: it is the model's
+  // compressible-ref locator (design P2-1).
+  if (args.scope === undefined) {
+    const nudge = turn.nudge
+    if (nudge !== undefined) {
+      lines.push('', `Nudge: ${nudge.shouldInject ? 'ACTIVE' : 'idle'} — ${nudge.reason}`)
+    }
   }
   lines.push('', `Surface: ${surfaceSummary(session)}`)
+  // Drilldown rows carry kernel refs (mN, dense log-order ids). The model must
+  // NOT feed them to compress — compress speaks surface seqs, and the Surface
+  // anchor above is the only compressible-ref source (design §9 P2-3). Slated
+  // for direct seq adaptation when the search_context seq dialect lands (#23).
+  if (args.scope === 'uncompressed') {
+    lines.push('', 'Note: drilldown rows are kernel refs (mN) for size awareness — compress uses the Surface: seqs above, never mN.')
+  }
   return { text: lines.join('\n') }
 }
 

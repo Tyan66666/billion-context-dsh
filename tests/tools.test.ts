@@ -368,6 +368,89 @@ test('M3: acp_status attributes tool results to their real tool name (toolName b
   assert.ok(!/tool:""/.test(text), 'no empty tool name leaks into the Tip')
 })
 
+test('M3: acp_status drilldown passes scope/view/tool/sort/limit to the kernel report', async () => {
+  const env = makeEnv()
+  const session = buildTextSession(12)
+  const status = toolOf(env, 'acp_status')
+
+  // Messages view: per-message rows, sort + limit honored, surface anchor kept.
+  const messages = await status.execute({ scope: 'uncompressed', view: 'messages', limit: 3 }, fakeExec(session))
+  const msgText = (messages as { text: string }).text
+  assert.match(msgText, /UNCOMPRESSED — .*\| 12 msgs/, 'kernel drilldown header lists all visible messages')
+  assert.match(msgText, /Sorted by size/, 'kernel sort passthrough (default size)')
+  assert.match(msgText, /m\d{5} \(/, 'per-message rows carry kernel refs (mN)')
+  assert.match(msgText, /3 of 12 shown\./, 'limit truncation reported')
+  assert.match(msgText, /Surface: 12 nodes, seqs 1\.\.12/, 'the surface seq anchor stays in drilldown mode')
+  assert.ok(!/Nudge:/.test(msgText), 'drilldown mode omits the nudge decision line (upstream `if (args.scope) return base`)')
+
+  // Tool filter narrows rows; an empty filter renders a zero-row header.
+  const filtered = await status.execute({ scope: 'uncompressed', view: 'messages', tool: 'text' }, fakeExec(session))
+  assert.match((filtered as { text: string }).text, /UNCOMPRESSED — text: /, 'tool filter reflected in the header')
+  const empty = await status.execute({ scope: 'uncompressed', view: 'messages', tool: 'nonexistent' }, fakeExec(session))
+  assert.match((empty as { text: string }).text, /0 msgs/, 'empty tool filter renders a zero-row header without crashing')
+
+  // Ranges view merges visible messages into ranges.
+  const ranges = await status.execute({ scope: 'uncompressed' }, fakeExec(session))
+  assert.match((ranges as { text: string }).text, /UNCOMPRESSED — .*\| 12 visible messages/, 'ranges view header')
+
+  // Compressed drilldown with zero blocks renders a zero-block header.
+  const compressed = await status.execute({ scope: 'compressed' }, fakeExec(session))
+  assert.match((compressed as { text: string }).text, /COMPRESSED — 0 blocks/, 'zero-block compressed drilldown renders without crashing')
+})
+
+test('M3: acp_status drilldown labels kernel refs (mN) and separates them from compress seqs', async () => {
+  // P1-1: kernel drilldown rows are mN (dense log-order refs), which must NOT
+  // be fed to compress (surface seqs). The engine appends an explicit note in
+  // uncompressed drilldown mode so the model never mistakes mN for seqs.
+  const env = makeEnv()
+  const session = buildTextSession(12)
+  const status = toolOf(env, 'acp_status')
+  const text = (await status.execute({ scope: 'uncompressed', view: 'messages' }, fakeExec(session)) as { text: string }).text
+  assert.match(text, /Note: drilldown rows are kernel refs \(mN\) for size awareness — compress uses the Surface: seqs above, never mN\./, 'explicit mN-vs-seq note in drilldown mode')
+  // Overview mode does NOT carry the drilldown note (it has no mN rows).
+  const overview = await toolOf(env, 'acp_status').execute({}, fakeExec(session))
+  assert.ok(!/drilldown rows are kernel refs/.test((overview as { text: string }).text), 'note is drilldown-only')
+})
+
+test('M3: acp_status uncompressed drilldown excludes the checkpoint summary node', async () => {
+  // P2-2: the summary node (source.plugin === 'compact') must not appear as a
+  // drilldown row — it is already counted as block summaries. 12 msgs - 5
+  // shadowed = 7 live rows; if the checkpoint leaked, it would read 8 msgs.
+  const env = makeEnv()
+  const session = buildTextSession(12)
+  const compress = toolOf(env, 'compress')
+  await compress.execute({
+    content: [{
+      startSeq: 1,
+      endSeq: 5,
+      summary: 'Authentication summary with enough technical detail to satisfy the kernel threshold: JWT, Redis refresh tokens, login flow, rate limiting, bcrypt.',
+    }],
+  } as never, fakeExec(session))
+
+  const status = await toolOf(env, 'acp_status').execute({ scope: 'uncompressed', view: 'messages' }, fakeExec(session))
+  const text = (status as { text: string }).text
+  assert.match(text, /UNCOMPRESSED — .*\| 7 msgs/, 'checkpoint summary node excluded from drilldown rows (12 - 5 shadowed = 7 live)')
+  const overview = await toolOf(env, 'acp_status').execute({}, fakeExec(session))
+  assert.match((overview as { text: string }).text, /COMPRESSED BLOCKS — 1 active/, 'overview still counts the block (summary lives in ledger, not rows)')
+})
+
+test('M3: acp_status drilldown survives multi-tool-call nodes (seq#callId ids)', async () => {
+  // Multi-call assistant nodes project to id `seq#callId` (messages.ts:147);
+  // drilldown refs are still assigned and rendered per call.
+  const env = makeEnv()
+  const session = Session.create('test-session')
+  appendTurn(session, 1)
+  appendUser(session, 'run two tools')
+  appendMultiToolCall(session, 'run two tools', ['call_a', 'call_b'], 1, 1)
+  appendToolResult(session, longText('bash output', 1), 'call_a', 1, 1)
+  appendToolResult(session, longText('read output', 1), 'call_b', 1, 1)
+  const status = await toolOf(env, 'acp_status').execute({ scope: 'uncompressed', view: 'messages' }, fakeExec(session))
+  const text = (status as { text: string }).text
+  assert.match(text, /UNCOMPRESSED — /, 'drilldown renders with multi-call nodes')
+  assert.match(text, /m\d{5} \(/, 'per-call rows still carry kernel refs')
+  assert.ok(!/undefined/.test(text), 'no undefined leaks from seq#callId refs')
+})
+
 test('M3: compress rejects ranges outside the assigned surface', async () => {
   const env = makeEnv()
   const session = buildTextSession(12)
