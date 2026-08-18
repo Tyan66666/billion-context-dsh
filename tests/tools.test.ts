@@ -451,6 +451,28 @@ test('M3: acp_status drilldown survives multi-tool-call nodes (seq#callId ids)',
   assert.ok(!/undefined/.test(text), 'no undefined leaks from seq#callId refs')
 })
 
+test('M3: acp_status peels the wrapped { arguments: {...} } envelope the model channel emits', async () => {
+  // Live-verified: a drilldown acp_status call arrived as
+  // `{"arguments":{"scope":"compressed"}}` and silently rendered the overview —
+  // acp_status is the ONLY all-optional tool, so the envelope passes schema
+  // validation and previously dropped the params at the handler. (decompress /
+  // search_context reject the envelope at schema level — required blockId/query
+  // absent — which is a loud, correct failure; compress has its own unwrap.)
+  const env = makeEnv()
+  const session = buildTextSession(12)
+  const status = toolOf(env, 'acp_status')
+  const wrapped = await status.execute({ arguments: { scope: 'uncompressed', view: 'messages', limit: 3 } } as never, fakeExec(session))
+  const wrappedText = (wrapped as { text: string }).text
+  assert.match(wrappedText, /UNCOMPRESSED — .*\| 12 msgs/, 'envelope-peeled drilldown renders (object form)')
+  assert.ok(!/Nudge:/.test(wrappedText), 'drilldown after peel omits the nudge line')
+  const strWrapped = await status.execute({ arguments: '{"scope":"uncompressed","view":"messages","limit":3}' } as never, fakeExec(session))
+  assert.match((strWrapped as { text: string }).text, /UNCOMPRESSED — .*\| 12 msgs/, 'string-form envelope peels too')
+  const plain = await status.execute({ scope: 'uncompressed', view: 'messages' }, fakeExec(session))
+  assert.match((plain as { text: string }).text, /UNCOMPRESSED — /, 'plain args still work')
+  const wrappedCompressed = await status.execute({ arguments: { scope: 'compressed' } } as never, fakeExec(session))
+  assert.match((wrappedCompressed as { text: string }).text, /COMPRESSED — 0 blocks/, 'compressed drilldown peels the envelope too')
+})
+
 test('M3: compress rejects ranges outside the assigned surface', async () => {
   const env = makeEnv()
   const session = buildTextSession(12)

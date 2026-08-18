@@ -157,6 +157,30 @@ function unwrapCompressArgs(args: CompressArgs): CompressArgs | null {
   return { ...args, content: content as CompressArgs['content'] }
 }
 
+/**
+ * Peel the tolerated wrapped-arguments envelope `{ arguments: {…} }` that some
+ * model channels emit for ANY tool — the same double-nesting that birthed
+ * `unwrapCompressArgs` (live-verified on acp_status: a drilldown call arrived
+ * as `{"arguments":{"scope":"compressed"}}` and was silently dropped, since
+ * only compress unwrapped). The envelope may be an object or a JSON string;
+ * inner keys win over outer duplicates. Args without an envelope pass through
+ * untouched.
+ */
+function unwrapEnvelope<T extends object>(args: T): T {
+  const envelope = (args as { arguments?: unknown }).arguments
+  if (envelope === undefined) return args
+  let inner: unknown = envelope
+  if (typeof inner === 'string') {
+    try {
+      inner = JSON.parse(inner)
+    } catch {
+      return args
+    }
+  }
+  if (typeof inner !== 'object' || inner === null || Array.isArray(inner)) return args
+  return { ...args, ...(inner as object) } as T
+}
+
 /** Resolve seq → kernel ref, then applyCompression and land the transaction. */
 async function handleCompress(env: ToolEnvironment, args: CompressArgs, exec: ToolRunContext): Promise<TextOutput> {
   const agent = requireAgent(exec)
@@ -404,7 +428,8 @@ function resolveBlockId(session: Session, arg: string): string | null {
   return byPrefix?.blockId ?? null
 }
 
-function handleDecompress(_env: ToolEnvironment, args: DecompressArgs, exec: ToolRunContext): TextOutput {
+function handleDecompress(_env: ToolEnvironment, rawArgs: DecompressArgs, exec: ToolRunContext): TextOutput {
+  const args = unwrapEnvelope<DecompressArgs>(rawArgs)
   const session = requireAgent(exec).session
   const blockId = resolveBlockId(session, args.blockId)
   if (blockId === null) {
@@ -438,7 +463,8 @@ interface SearchArgs {
   limit?: number
 }
 
-function handleSearch(_env: ToolEnvironment, args: SearchArgs, exec: ToolRunContext): TextOutput {
+function handleSearch(_env: ToolEnvironment, rawArgs: SearchArgs, exec: ToolRunContext): TextOutput {
+  const args = unwrapEnvelope<SearchArgs>(rawArgs)
   const session = requireAgent(exec).session
   const ledger = rebuildBlockLedger(session.events)
   const terms = args.query.toLowerCase().split(/\s+/).filter(Boolean)
@@ -514,7 +540,11 @@ function isCheckpointEvent(event: SessionEvent): boolean {
   return source?.plugin === 'compact'
 }
 
-async function handleStatus(env: ToolEnvironment, args: StatusArgs, exec: ToolRunContext): Promise<TextOutput> {
+async function handleStatus(env: ToolEnvironment, rawArgs: StatusArgs, exec: ToolRunContext): Promise<TextOutput> {
+  // The model channel may wrap ANY tool's args under `{ arguments: {…} }`;
+  // peel it or drilldown params never reach buildStatusReport (live-verified
+  // `{"arguments":{"scope":"compressed"}}` silently rendered the overview).
+  const args = unwrapEnvelope<StatusArgs>(rawArgs)
   const agent = requireAgent(exec)
   const session = agent.session
   const state = env.store.stateFor(session)
