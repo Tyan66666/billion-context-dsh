@@ -68,7 +68,7 @@ billion-context-dsh 目前所有"模型可见"的提示词文本都是硬编码�
 | P10 | nudge 批量提示 | `src/prompts.ts`(DEFAULT_PROMPTS.nudge.tip) | "💡 Compress all ranges in one call (pass multiple content entries: `content: [{...}, {...}]`)." | 无 |
 | P5 | nudge 范围表 | `src/nudge.ts`(rangeTable) | 表头 "Surface: …" + 标题 + 每行 + 表尾调用语法 | 表头 `{surface}`;标题 `{count}`;行 `{start} {end} {count} {tokens}`;表尾无 |
 | P6 | system prompt(一次性) | `src/system-prompt.ts` | 整段 ACP 指导:效率通知框架 + philosophy + WHEN TO/WHEN NOT + HOW_TO_COMPRESS_RULES + 工具描述 + tier 蒸馏/浓缩规则 | `{philosophy}` `{howToCompressRules}` `{tier2DistillRules}` `{tier3CondenseRules}` |
-| P7 | 工具描述 | `src/tools.ts:355-395` | compress / decompress / search_context / acp_status 的 description | 无 |
+| P7 | 工具描述 | `src/tools.ts:500-535` | compress / decompress / search_context / acp_status 的 description | 无 |
 
 ## 3. 核心机制:模板 + 命名占位符
 

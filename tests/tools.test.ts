@@ -254,10 +254,83 @@ test('M3: search_context finds information inside compressed blocks', async () =
   } as never, fakeExec(session))
 
   const search = toolOf(env, 'search_context')
+  // Real vocabulary hit: high score.
   const hit = await search.execute({ query: 'rate limiting', limit: 5 }, fakeExec(session))
-  assert.match((hit as { text: string }).text, /Matches for "rate limiting"/)
-  const miss = await search.execute({ query: 'quantum teleportation' }, fakeExec(session))
-  assert.match((miss as { text: string }).text, /no matches/)
+  const hitText = (hit as { text: string }).text
+  assert.match(hitText, /Matches for "rate limiting"/)
+  const hitScore = Number(/score ([\d.]+)/.exec(hitText)![1])
+  // Unrelated query: trust the kernel — no engine-side no-match gate. Hybrid
+  // still returns fuzzy-n-gram hits, but at a score well below a real hit, so
+  // the model can judge the weak match from the surfaced score.
+  const noise = await search.execute({ query: 'quantum teleportation' }, fakeExec(session))
+  const noiseText = (noise as { text: string }).text
+  assert.doesNotMatch(noiseText, /no matches/, 'no engine-side BM25 gate: unrelated query still returns low-scored hits')
+  const noiseScore = Number(/score ([\d.]+)/.exec(noiseText)![1])
+  assert.ok(noiseScore < hitScore, `unrelated query scores below a real hit (${noiseScore} < ${hitScore})`)
+})
+
+test('M3: search_context matches on stemmed English terms and CJK bigrams', async () => {
+  const env = makeEnv()
+  const session = buildTextSession(12)
+  const compress = toolOf(env, 'compress')
+  await compress.execute({
+    content: [{
+      startSeq: 1,
+      endSeq: 5,
+      summary: '认证与授权系统：JWT 访问令牌 15 分钟过期，刷新令牌存于 Redis 三十天 TTL，登录流程在 src/auth/login.ts，滑动窗口速率限制，bcrypt 成本因子 12。',
+    }],
+  } as never, fakeExec(session))
+
+  const search = toolOf(env, 'search_context')
+  // English stemming: "rate limit" must match "rate limiting".
+  const stemmed = await search.execute({ query: 'rate limit', limit: 5 }, fakeExec(session))
+  assert.match((stemmed as { text: string }).text, /Matches for "rate limit"/)
+  // CJK: the query tokenizes into bigrams that match the summary.
+  const cjk = await search.execute({ query: '速率限制', limit: 5 }, fakeExec(session))
+  assert.match((cjk as { text: string }).text, /Matches for "速率限制"/)
+})
+
+test('M3: search_context hits shadowed messages and reports the owning block', async () => {
+  const env = makeEnv()
+  const session = buildTextSession(12)
+  const compress = toolOf(env, 'compress')
+  await compress.execute({
+    content: [{
+      startSeq: 1,
+      endSeq: 5,
+      summary: 'Summary that only mentions Redis and bcrypt, deliberately omitting the JWT expiry detail that lives in the shadowed originals.',
+    }],
+  } as never, fakeExec(session))
+
+  const search = toolOf(env, 'search_context')
+  // "expiry" appears ONLY in the shadowed message originals, not the summary —
+  // hybrid must find it via the message docs and link back to the block.
+  const hit = await search.execute({ query: 'expiry', limit: 5 }, fakeExec(session))
+  const text = (hit as { text: string }).text
+  assert.match(text, /Matches for "expiry"/)
+  assert.match(text, /message seq \d+ \(user, in block [0-9a-f-]+\)/, 'the hit names the shadowed message and its owning block')
+})
+
+test('M3: search_context on a distilled tier-2 block reports the innermost owning block', async () => {
+  const env = makeEnv()
+  const session = buildTextSession(12)
+  const compress = toolOf(env, 'compress')
+  await compress.execute({
+    content: [{ startSeq: 1, endSeq: 5, summary: TIER_SUMMARY }],
+  } as never, fakeExec(session))
+  const tier1 = rebuildBlockLedger(session.events)[0]!
+  // Distill the tier-1 checkpoint into a tier-2 block.
+  await compress.execute({
+    content: [{ startSeq: tier1.summarySeq!, endSeq: tier1.summarySeq!, summary: TIER_SUMMARY }],
+  } as never, fakeExec(session))
+
+  const search = toolOf(env, 'search_context')
+  // The originals' "[msg 0]" marker survives only in the tier-1 shadowed seqs.
+  const hit = await search.execute({ query: 'bcrypt', limit: 5 }, fakeExec(session))
+  const text = (hit as { text: string }).text
+  assert.match(text, /Matches for "bcrypt"/)
+  // The message doc must claim the ORIGINAL (tier-1) block, not the tier-2 summary.
+  assert.match(text, new RegExp(`in block ${tier1.blockId}`), 'the message hit points at the innermost block whose decompress recovers the original')
 })
 
 test('M3: acp_status renders the upstream kernel breakdown without window rows', async () => {

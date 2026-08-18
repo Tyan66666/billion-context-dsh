@@ -11,7 +11,7 @@
  */
 
 import { defineTool, type ToolDefinition, type ToolRunContext } from '@deepseek-ai/dsh-tools'
-import { buildStatusReport, defaultCountTokens, type CompressionCore } from 'acp-kernel'
+import { buildStatusReport, defaultCountTokens, searchBlocks, type CompressionCore, type MessageRole, type SearchDoc } from 'acp-kernel'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
 import type { AcpStateStore } from './state.ts'
@@ -463,28 +463,77 @@ interface SearchArgs {
   limit?: number
 }
 
+/** Event type → kernel message role (drives hybrid role weighting). */
+function roleOfEvent(event: SessionEvent): MessageRole | null {
+  switch (event.type) {
+    case 'user/message': return 'user'
+    case 'assistant/message': return 'assistant'
+    case 'tool/result': return 'tool'
+    default: return null
+  }
+}
+
+/**
+ * Build the unified SearchDoc[] from the log: one block doc per ledger entry
+ * (ref = compactionId, so `decompress({ blockId })` closes the loop) plus one
+ * message doc per shadowed ORIGINAL (expanded through distilled parents; each
+ * seq is claimed by the earliest/innermost block that covered it, mirroring
+ * pi's owner map — decompress on that block recovers the original).
+ */
+function buildSearchDocs(session: Session): SearchDoc[] {
+  const ledger = rebuildBlockLedger(session.events)
+  const docs: SearchDoc[] = []
+  const claimed = new Set<number>()
+  for (const block of ledger) {
+    docs.push({
+      kind: 'block',
+      ref: block.blockId,
+      text: block.summary,
+      title: block.summary.slice(0, 60) || block.blockId,
+      blockId: block.blockId,
+      tier: block.tier,
+      tokens: defaultCountTokens(block.summary),
+    })
+    for (const seq of expandShadowedSeqs(session, block.blockId)) {
+      if (claimed.has(seq)) continue
+      claimed.add(seq)
+      const event = session.events[seq]
+      if (event === undefined) continue
+      const role = roleOfEvent(event)
+      const text = extractEventText(event)
+      if (role === null || text.length === 0) continue
+      docs.push({
+        kind: 'message',
+        ref: `seq ${seq}`,
+        text,
+        title: `${role}: ${text.slice(0, 60)}`,
+        role,
+        blockId: block.blockId,
+        tier: block.tier,
+        tokens: defaultCountTokens(text),
+      })
+    }
+  }
+  return docs
+}
+
 function handleSearch(_env: ToolEnvironment, rawArgs: SearchArgs, exec: ToolRunContext): TextOutput {
   const args = unwrapEnvelope<SearchArgs>(rawArgs)
   const session = requireAgent(exec).session
-  const ledger = rebuildBlockLedger(session.events)
-  const terms = args.query.toLowerCase().split(/\s+/).filter(Boolean)
-  const scored: Array<{ blockId: string; score: number; summary: string }> = []
-  for (const block of ledger) {
-    const original = block.shadowedSeqs
-      .map((seq) => extractEventText(session.events[seq]!))
-      .join('\n')
-    const haystack = `${block.summary}\n${original}`.toLowerCase()
-    let score = 0
-    for (const term of terms) score += haystack.split(term).length - 1
-    if (score > 0) scored.push({ blockId: block.blockId, score, summary: block.summary })
-  }
-  scored.sort((a, b) => b.score - a.score)
-  const top = scored.slice(0, args.limit ?? 5)
-  if (top.length === 0) return { text: `search_context: no matches for "${args.query}"` }
+  if (args.query.trim() === '') return { text: 'search_context: empty query (no matches)' }
+  const docs = buildSearchDocs(session)
+  // Trust the kernel: hybrid (0.7×BM25 stemmed + 0.3×fuzzy n-gram) is the
+  // algorithm contract — no engine-side gate or threshold re-implements
+  // search policy. Scores are surfaced so the model can judge a weak hit
+  // (fuzzy-only tops out near 0.3).
+  const results = searchBlocks(docs, args.query, { limit: args.limit ?? 5, previewLength: 160 })
+  if (results.length === 0) return { text: `search_context: no matches for "${args.query}"` }
+  const lines = results.map((r) => {
+    const kind = r.kind === 'block' ? `block ${r.ref}` : `message ${r.ref} (${r.role ?? '?'}, in block ${r.blockId ?? '?'})`
+    return `  - ${kind} (score ${r.score.toFixed(2)}): ${r.preview}`
+  })
   return {
-    text: `Matches for "${args.query}":\n`
-      + top.map((hit) => `  - ${hit.blockId} (score ${hit.score}): ${hit.summary.slice(0, 160)}`).join('\n')
-      + '\n\nDecompress with: decompress({ blockId })',
+    text: `Matches for "${args.query}":\n${lines.join('\n')}\n\nDecompress with: decompress({ blockId })`,
   }
 }
 
