@@ -123,9 +123,11 @@ test('M4/prompts 2b: default nudge renders through the kernel renderNudgeText pa
   assert.ok(text.startsWith('This is an efficiency nudge to compress early and keep context lean — not an overflow warning.'), 'kernel EFFICIENCY_NOTE frame')
   assert.ok(text.includes('HOW TO COMPRESS'), 'kernel HOW_TO_COMPRESS_RULES')
   assert.ok(text.endsWith('💡 Compress all ranges in one call (pass multiple content entries: `content: [{...}, {...}]`).'), 'kernel batch tip at end')
-  // Ref-ID rangesStr replaced by the surface-seq table
-  assert.ok(!text.includes('oldest first'), 'kernel ref rangesStr header gone')
+  // Ref-ID rangesStr replaced by the surface-seq table. The title KEEPS the
+  // kernel header format ("N, oldest first") with the seq dialect appended —
+  // the kernel mN range rows are what must be gone.
   assert.ok(!text.includes('m00150'), 'kernel ref range sample gone')
+  assert.ok(text.includes('exact surface seqs — usable as-is'), 'seq-dialect title injected')
   assert.ok(text.includes('seq 1..7'), 'surface-seq range table injected')
   assert.ok(text.includes('Surface: 12 nodes, seqs 1..12'), 'surface summary present')
   // No usage statement; the only mNNNNN tokens are inside kernel's own
@@ -154,8 +156,8 @@ test('M4/prompts 4: range table snapshot (with ranges) and zero-range early retu
   assert.equal(
     rangeTable(buildTextSession(12)),
     `\nSurface: 12 nodes, seqs 1..12
-Compressible ranges (suggestions only — compress any consumed span; refs are surface seqs):
-  - seq 1..7 — 7 messages, ~7227 tokens
+Compressible ranges (1, oldest first; exact surface seqs — usable as-is):
+  - seq 1..7 — 7 messages, ~7227 tokens [tool 0% | text 100%]
 Compress with: compress({ content: [{ startSeq, endSeq, summary }] }) — content is an array: batch multiple unrelated segments in one call, each entry its own block. Keep ranges disjoint.
 Snapshot taken at nudge time: the seqs go stale once the surface moves (a later compress shadows them), so re-run acp_status for fresh refs before compressing.`,
   )
@@ -165,11 +167,11 @@ test('M4/prompts 5: tool descriptions render the defaults byte-identical', () =>
   const descriptions = Object.fromEntries(makeTools(makeEnv(128000)).map((t) => [t.name, t.description]))
   assert.equal(
     descriptions['compress'],
-    'Replace older conversation ranges with dense summaries you write. Each message seq is a surface reference. Single range: compress({ content: [{ startSeq, endSeq, summary }] }). Batch multiple unrelated ranges in one call (each content entry becomes its own block); keep ranges disjoint. Never compress content the current step is actively using. Compress boundaries are SURFACE SEQS (acp_status Surface: row, latest nudge table) — NOT the block refs (bN, e.g. b1) that acp_status COMPRESSED BLOCKS shows, which are for decompress only. Seq refs must come from the CURRENT surface (acp_status or the latest nudge): a span whose edges were shadowed by an earlier compress is auto-remapped to its still-live content, a fully compressed span is reported as already compressed, and invented/other-session seqs fail with guidance.',
+    'Replace older conversation ranges with dense summaries you write. Each message seq is a surface reference. Single range: compress({ content: [{ startSeq, endSeq, summary }] }). Batch multiple unrelated ranges in one call (each content entry becomes its own block); keep ranges disjoint. Never compress content the current step is actively using. Compress boundaries are SURFACE SEQS (acp_status Surface: row, latest nudge table) — NOT the block refs (bN, e.g. b1) that acp_status COMPRESSED BLOCKS shows, which are for decompress only. Drilldown mN refs (e.g. m00306) are ALSO accepted as startSeq/endSeq — they are auto-mapped to the live surface seq; an unknown mN (never assigned on the current surface) fails with guidance. Seq refs must come from the CURRENT surface (acp_status or the latest nudge): a span whose edges were shadowed by an earlier compress is auto-remapped to its still-live content, a fully compressed span is reported as already compressed, and invented/other-session seqs fail with guidance.',
   )
   assert.equal(descriptions['decompress'], 'Recover the original content of a compressed block by its blockId — the kernel block ref `bN` shown by acp_status (e.g. b1), or a compaction id from search_context (read-only; does not unshadow the range).')
   assert.equal(descriptions['search_context'], 'Search inside compressed blocks (summaries and original content) for information the model no longer sees in context.')
-  assert.equal(descriptions['acp_status'], 'Context status: overview of the current context — CONTEXT BREAKDOWN (tool/text/summaries token shares of the visible total), COMPRESSED BLOCKS ledger, and the nudge decision. No args = overview. Percentages are shares of the visible content, not the context window. Note: the block refs in COMPRESSED BLOCKS (bN, e.g. b1) are for decompress; compress uses the Surface: seq range, not bN. Drilldown: pass scope:"compressed" for a per-block list, or scope:"uncompressed" with view:"messages" (every visible message) / view:"ranges" (merged ranges); tool filters to one tool name, sort reorders (size/time/tool; age for compressed), limit caps rows (default 30). Drilldown row refs are kernel ids (mN) for size awareness only — compress always uses the Surface: seqs, never mN.')
+  assert.equal(descriptions['acp_status'], 'Context status: overview of the current context — CONTEXT BREAKDOWN (tool/text/summaries token shares of the visible total), COMPRESSED BLOCKS ledger, and the nudge decision. No args = overview. Percentages are shares of the visible content, not the context window. Note: the block refs in COMPRESSED BLOCKS (bN, e.g. b1) are for decompress; compress uses the Surface: seq range, not bN. Drilldown: pass scope:"compressed" for a per-block list, or scope:"uncompressed" with view:"messages" (every visible message) / view:"ranges" (merged ranges); tool filters to one tool name, sort reorders (size/time/tool; age for compressed), limit caps rows (default 30). Drilldown row refs are kernel ids (mN) — feed them straight to compress as startSeq/endSeq (auto-mapped to the live surface seq); bN is for decompress, Surface: seqs also work in compress.')
 })
 
 test('M4/prompts 6: partial overrides merge per key; key/group null falls back to default', () => {
