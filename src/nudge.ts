@@ -87,6 +87,8 @@ export function rangeTable(
       end: range.end,
       count: range.count,
       tokens: range.tokens,
+      toolPct: range.toolPct,
+      textPct: 100 - range.toolPct,
     }),
   )
   return [

@@ -458,6 +458,16 @@ export interface SeqCompressibleRange {
   readonly end: number
   readonly count: number
   readonly tokens: number
+  /** Share of messages that are tool messages (tool-call or tool-result), 0-100 — kernel `toolPct` parity. */
+  readonly toolPct: number
+}
+
+/** Whether a surface message event is a tool message (tool-call or tool-result) — kernel `isToolMessage` parity. */
+function isToolEvent(event: SessionEvent): boolean {
+  if (event.type === 'tool/result') return true
+  if (event.type !== 'assistant/message') return false
+  const content = (event.data as { message?: { content?: unknown } }).message?.content
+  return Array.isArray(content) && content.some((block) => (block as { type?: unknown })?.type === 'tool-call')
 }
 
 /** Whether a surface user message is a compaction checkpoint node (already compressed). */
@@ -747,8 +757,8 @@ export function deferCompressPairHide(
  * kernel's ref map, which can drift after surface replacements in long
  * sessions and hide large tool results from the nudge range table. Skips the
  * recent protected tail, the last user message, and compaction checkpoints;
- * edges are then balanced through resolveSurfaceRange. Ranges are ordered by
- * size (largest reclaimed first).
+ * edges are then balanced through resolveSurfaceRange. Ranges are ordered
+ * oldest-first (stable across turns — matches the kernel's `oldest first`).
  */
 export function buildCompressibleSeqRanges(
   session: Session,
@@ -761,7 +771,11 @@ export function buildCompressibleSeqRanges(
   const nodes = session.surface.nodes
   const preserve = opts.preserveRecent ?? 5
   const protectedSeqs = new Set<number>()
-  for (const seq of nodes.slice(-preserve)) protectedSeqs.add(seq)
+  // `nodes.slice(-preserve)` would protect EVERYTHING when preserve is 0
+  // (`slice(-0) === slice(0)`) — guard so 0 means "no recent protection".
+  if (preserve > 0) {
+    for (const seq of nodes.slice(-preserve)) protectedSeqs.add(seq)
+  }
   for (let index = nodes.length - 1; index >= 0; index -= 1) {
     const event = session.events[nodes[index]!]
     if (event?.type === 'user/message' && !isCheckpointNode(event)) {
@@ -769,8 +783,8 @@ export function buildCompressibleSeqRanges(
       break
     }
   }
-  const raw: SeqCompressibleRange[] = []
-  let cur: SeqCompressibleRange | null = null
+  const raw: Array<{ start: number; end: number; count: number; tokens: number; toolCount: number }> = []
+  let cur: { start: number; end: number; count: number; tokens: number; toolCount: number } | null = null
   const flush = (): void => {
     if (cur !== null) raw.push(cur)
     cur = null
@@ -790,10 +804,11 @@ export function buildCompressibleSeqRanges(
       cur = null
     }
     const tokens = defaultCountTokens(extractEventText(event))
+    const isTool = isToolEvent(event)
     if (cur === null) {
-      cur = { start: seq, end: seq, count: 1, tokens }
+      cur = { start: seq, end: seq, count: 1, tokens, toolCount: isTool ? 1 : 0 }
     } else {
-      cur = { start: cur.start, end: seq, count: cur.count + 1, tokens: cur.tokens + tokens }
+      cur = { start: cur.start, end: seq, count: cur.count + 1, tokens: cur.tokens + tokens, toolCount: cur.toolCount + (isTool ? 1 : 0) }
     }
   }
   flush()
@@ -802,12 +817,22 @@ export function buildCompressibleSeqRanges(
     try {
       const { start, end } = resolveSurfaceRange(session, range.start, range.end)
       const count = range.count
-      out.push({ start, end, count, tokens: range.tokens })
+      out.push({
+        start,
+        end,
+        count,
+        tokens: range.tokens,
+        toolPct: count > 0 ? Math.round((range.toolCount / count) * 100) : 0,
+      })
     } catch {
       // Cannot be balanced into a compressible span — skip.
     }
   }
-  return out.sort((a, b) => b.tokens - a.tokens)
+  // Oldest-first: the order is stable across turns (the oldest ranges do not
+  // move as new messages land), so the model can consume ranges front-to-back
+  // without re-ranking each nudge — matching the kernel's `oldest first` list
+  // and the host's own front-to-back compression rhythm.
+  return out.sort((a, b) => a.start - b.start)
 }
 
 /**

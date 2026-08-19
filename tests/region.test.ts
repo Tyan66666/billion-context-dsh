@@ -415,6 +415,30 @@ test('M5: stripOrphanedSurfaceToolMessages removes orphan results and orphan cal
   assert.doesNotThrow(() => buildCompressibleSeqRanges(session, { preserveRecent: 0 }), 'orphan cleanup leaves the range table computable')
 })
 
+test('M5: buildCompressibleSeqRanges carries kernel-parity toolPct and oldest-first order', () => {
+  // Mixed session: a text turn, then the last user message (always protected,
+  // breaking the segment), then an assistant reply + tool pair. The range
+  // table must report the tool share per range (kernel `toolPct` parity) and
+  // order ranges oldest-first (stable across turns, kernel `oldest first`).
+  const session = Session.create('toolpct')
+  appendTurn(session, 1)
+  appendUser(session, longText('q0', 0))                  // seq 1 — text segment
+  appendAssistant(session, longText('a0', 1), 1, 1)       // seq 2 — text segment
+  appendUser(session, longText('q1', 2))                  // seq 3 — last user → protected → break
+  appendAssistant(session, longText('a1', 3), 1, 2)       // seq 4 — joins the tool segment
+  appendToolCall(session, longText('call', 4), 'call_1', 1, 3)   // seq 5 — tool
+  appendToolResult(session, longText('result', 5), 'call_1', 1, 4) // seq 6 — tool
+
+  const ranges = buildCompressibleSeqRanges(session, { preserveRecent: 0 })
+  assert.equal(ranges.length, 2, 'protected user message splits the surface into two ranges')
+  assert.equal(ranges[0]!.toolPct, 0, 'text-only range reports toolPct 0')
+  assert.equal(ranges[1]!.toolPct, Math.round((2 / 3) * 100), '2-tool-of-3-msg range reports the tool share (67)')
+  // Oldest-first: start seqs are non-decreasing (stable ordering for the model).
+  for (let index = 1; index < ranges.length; index += 1) {
+    assert.ok(ranges[index]!.start >= ranges[index - 1]!.start, 'ranges ordered oldest-first')
+  }
+})
+
 test('M5: stripOrphanedSurfaceToolMessages preserves an in-flight tool call', () => {
   const session = Session.create('in-flight')
   appendTurn(session, 1)
