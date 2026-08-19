@@ -378,6 +378,7 @@ async function handleCompress(env: ToolEnvironment, args: CompressArgs, exec: To
       model: agent.options.model ?? '',
       tier,
       kernelBlockId: block.blockId,
+      ...(range.topic === undefined ? {} : { topic: range.topic }),
       ...(parentBlockIds.length === 0 ? {} : { parentBlockIds }),
       // Record the kernel block's raw coverage so a restarted engine
       // rehydrates the SAME effective messages (a tier-2 block's coverage is
