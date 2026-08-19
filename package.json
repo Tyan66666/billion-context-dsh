@@ -45,14 +45,12 @@
 		"build": "tsup && tsc --emitDeclarationOnly",
 		"test": "node --import tsx --test tests/*.test.ts"
 	},
-	"dependencies": {
-		"acp-kernel": "0.0.24"
-	},
 	"peerDependencies": {
 		"@deepseek-ai/cordis": "^4.0.1",
 		"@deepseek-ai/dsh-compaction": "^0.1.0-rc.6"
 	},
 	"devDependencies": {
+		"acp-kernel": "0.0.29",
 		"@deepseek-ai/cordis": "4.0.1",
 		"@deepseek-ai/dsh-agent": "0.1.0-rc.6",
 		"@deepseek-ai/dsh-commands": "0.1.0-rc.6",
