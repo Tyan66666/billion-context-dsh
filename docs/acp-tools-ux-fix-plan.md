@@ -24,10 +24,10 @@
 
 ```diff
 - title: 'Compressible ranges (suggestions only — compress any consumed span; refs are surface seqs):',
-+ title: 'Compressible ranges (exact surface seqs — usable as-is in compress, no re-verification needed):',
++ title: 'Compressible ranges ({count}, oldest first; exact surface seqs — usable as-is):',
 ```
 
-footer 的 stale 提醒保留（"精确≠不过期"：边界可直接用，但会随 surface 移动过期）。
+保留 kernel 原文标题格式 `Compressible ranges (N, oldest first):`（`nudge-text.ts:120`），只追加最小 seq 方言说明（"exact surface seqs — usable as-is"）；footer 的 stale 提醒保留（"精确≠不过期"：边界可直接用，但会随 surface 移动过期）。
 
 ### B. compress 接受 mN（问题 2+3 核心）
 

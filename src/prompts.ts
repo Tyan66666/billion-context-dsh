@@ -200,7 +200,7 @@ export const DEFAULT_PROMPTS: ResolvedPrompts = {
   },
   rangeTable: {
     header: 'Surface: {surface}',
-    title: 'Compressible ranges (exact surface seqs — usable as-is in compress, no re-verification needed):',
+    title: 'Compressible ranges ({count}, oldest first; exact surface seqs — usable as-is):',
     line: '  - seq {start}..{end} — {count} messages, ~{tokens} tokens',
     footer: 'Compress with: compress({ content: [{ startSeq, endSeq, summary }] }) — content is an array: batch multiple unrelated segments in one call, each entry its own block. Keep ranges disjoint.\n'
       + 'Snapshot taken at nudge time: the seqs go stale once the surface moves (a later compress shadows them), so re-run acp_status for fresh refs before compressing.',
