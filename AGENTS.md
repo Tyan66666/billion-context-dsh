@@ -14,7 +14,7 @@ The model decides *when* and *what* to compress — not a hard limit. Automatic 
 |---|---|
 | Language | TypeScript (strict, ESM, `.ts` import suffixes) |
 | Build | tsup (bundles, **inlines acp-kernel**; `@deepseek-ai/*` stays external) |
-| Test | Node.js built-in: `node --import tsx --test tests/*.test.ts` |
+| Test | Node.js built-in: `node --import tsx --test tests/*.test.ts tests/kernel-upstream/*.test.ts` |
 | Runtime Deps | `acp-kernel` (inlined at build); peer: `@deepseek-ai/dsh-compaction`, `@deepseek-ai/cordis` |
 | Host | DeepSeek Harness (composition row `name: 'billion-context-dsh'`) |
 
@@ -66,7 +66,7 @@ These are NOT style preferences — each cost a live-session bug:
 ```bash
 npm install
 npm run typecheck   # strict TS, --noEmit
-npm test            # node --import tsx --test tests/*.test.ts
+npm test            # node --import tsx --test tests/*.test.ts tests/kernel-upstream/*.test.ts
 npm run build       # tsup (inlines acp-kernel) + tsc --emitDeclarationOnly
 ```
 
@@ -106,7 +106,7 @@ The PR title is enforced by CI (`.github/workflows/pr-lint.yml` → `scripts/che
    - ref assignment / `compressibleRanges` — we self-compute the range table as a labeled `UPSTREAM:` workaround for kernel ref-map drift (rule 3 / rule 11); on every bump CHECK whether the drift is fixed upstream — if so, DROP the workaround and use kernel `compressibleRanges` again
    - `CoreMessage` / `NudgeDecision` types — `messages.ts`, `nudge.ts`
 3. Bump the exact version in `package.json`, run `npm install` (refreshes lock), then `npm run typecheck && npm test && npm run build`.
-4. **The test suite is the safety net**: 108 tests cover the battle-hardened behaviors (CJK estimation, lone-tool expansion, surface range table, ledger backfill, ref-tag projection, orphan-tool pruning, broken-pair healing, deferred compress call/result hiding, in-flight call preservation, batch resilience, acp_status upstream alignment, dual-id bN decompress, tool-result toolName backfill, acp_status drilldown passthrough + mN/seq separation + checkpoint row exclusion + multi-call survival, compress accepts drilldown mN refs (mapped to live surface seqs; unknown mN fails with guidance), nudge range table tool/text share + oldest-first ordering, wrapped-`{ arguments }` envelope peel, searchBlocks hybrid retrieval: stemmed/CJK matching, shadowed-message hits, innermost tier-1 block back-link). Any kernel behavior change that breaks one of those turns red here — do NOT release on red.
+4. **The test suite is the safety net**: 148 tests cover the battle-hardened behaviors (CJK estimation, lone-tool expansion, surface range table, ledger backfill, ref-tag projection, orphan-tool pruning, broken-pair healing, deferred compress call/result hiding, in-flight call preservation, batch resilience, acp_status upstream alignment, dual-id bN decompress, tool-result toolName backfill, acp_status drilldown passthrough + mN/seq separation + checkpoint row exclusion + multi-call survival, compress accepts drilldown mN refs (mapped to live surface seqs; unknown mN fails with guidance), nudge range table tool/text share + oldest-first ordering, wrapped-`{ arguments }` envelope peel, searchBlocks hybrid retrieval: stemmed/CJK matching, shadowed-message hits, innermost tier-1 block back-link; plus `tests/kernel-upstream/` — 36 vendored upstream acp-kernel search tests (searchBlocks/blockDocs/messageDocs role weighting, algorithm selection, CJK/fuzzy gates, async-misuse guard) migrated to the public API, see issue #30). Any kernel behavior change that breaks one of those turns red here — do NOT release on red.
 5. Optionally enable new kernel features deliberately (e.g. `createBpeTokenizer()` behind a config flag) — never adopt silently.
 6. Release per the workflow below (bump own version, publish, `gh release create`).
 

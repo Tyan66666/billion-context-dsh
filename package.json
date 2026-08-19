@@ -1,7 +1,7 @@
 {
 	"name": "billion-context-dsh",
 	"version": "0.2.4",
-	"description": "Active Context Pruning (ACP) for the DeepSeek Harness — model-driven context management as a CompactionEngine backend.",
+	"description": "Active Context Pruning (ACP) for the DeepSeek Harness \u2014 model-driven context management as a CompactionEngine backend.",
 	"keywords": [
 		"deepseek",
 		"harness",
@@ -43,7 +43,7 @@
 	"scripts": {
 		"typecheck": "tsc --noEmit",
 		"build": "tsup && tsc --emitDeclarationOnly",
-		"test": "node --import tsx --test tests/*.test.ts"
+		"test": "node --import tsx --test tests/*.test.ts tests/kernel-upstream/*.test.ts"
 	},
 	"peerDependencies": {
 		"@deepseek-ai/cordis": "^4.0.1",
