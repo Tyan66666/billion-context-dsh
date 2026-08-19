@@ -290,7 +290,7 @@ scope:'compressed' for block drilldown.
 
 ## 9. 未决项与后续
 
-- **`Compressible ranges` / `Delegate usage`**：上游有，但依赖 `billion-context-kit`（`viableRanges`）与 delegate 三件套。移植版无此依赖；当前 ranges 信息由 nudge 范围表（`src/nudge.ts`）承载。**本 PR 不做**，记为后续项：引入 `billion-context-kit` 后补齐。
+- **`Compressible ranges` / `Delegate usage`**：上游有，但依赖 `billion-context-kit`（`viableRanges`）与 delegate 三件套。移植版无此依赖；当前 ranges 信息由 nudge 范围表（`src/nudge.ts`）承载。**本 PR 不做**，记为后续项：引入 `billion-context-kit` 后补齐。移植版 seq 范围表已对齐上游展示语义：oldest-first 排序 + 每行 `[tool X% | text Y%]` 组成占比（kernel `toolPct` parity，见 AGENTS.md rule 3）。
 - **scope 钻取**：上游支持 `scope:'compressed'/'uncompressed'` 钻取。**本 PR 已实现**：`statusParameters` 提供 `scope`/`view`/`tool`/`sort`/`limit` 五个可选参数（schema 全 optional，DSH 编译器支持 `string`+`enum`/`integer`），`handleStatus` 原样转发给 `buildStatusReport`；`scope` 有值时镜像上游 `if (args.scope) return base`——只返回 kernel 报告 + `Surface:` 行，**不加** Nudge 行；`scope:'uncompressed'` 模式追加引擎 `Note:` 行。**P2-3 处置（[SUPERSEDED by issue #31]）**：钻取行保持 kernel 原生 `mN` ref，引擎不改写文本（保持规则 9——kernel 渲染、engine 拼装）；`Note:` 行明确「mN 仅供体量感知，压缩用 `Surface:` 的 seq」，prompts 描述同步写死三套 id 分界（seq 可压缩 / bN 可解压 / mN 仅展示）。**#22/#23 预留**：search_context 消息级将采用 surface seq 方言（PR #23），届时若需钻取行与 search 同方言，再把 mN→seq 适配（`turn.state.messageRefs.byRef[mN] → id → seq`，nudge.ts 的 ref-ID 适配先例）作为后续项实施——方向已定，本 PR 不含该适配。**issue #31 已实施**：compress 接受钻取 mN（`handleCompress` 经当前 turn 的 `messageRefs.byRef` 反查为 live surface seq，未知 mN 报错引导，span 已压缩走 rule 7）；`Note:` 行改为「mN 可直喂 compress」；描述四处（prompts 工具描述×2 + systemPromptTemplate + tools.ts 注释）同步。
 - **Tip 行**：D7 决定逐字保留；若评审认为暴露内部函数名不可接受，可后续裁剪（记入 CHANGELOG 的偏差说明）。
 

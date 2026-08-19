@@ -94,6 +94,16 @@
 - `docs/acp-status-align-design.md`：§9 P2-3 处置段（~line 294）更新；D4 决策表（:244）加 `[SUPERSEDED by issue #31]` 标记（MINOR-7，可选）。
 - issue #31 状态更新（实施后）。
 
+### G. 范围表增强（追加实施，与 pi 对齐——760b679）
+
+mN 修复完成后，按「与 pi 语义对齐」讨论追加两项范围表改进（用户决策：两者都改）：
+
+1. **tool/text 组成占比**：范围行带 `[tool {toolPct}% | text {textPct}%]`——`toolPct` 按**消息数占比**（kernel `isToolMessage` parity：`contentType === 'tool-call' | 'tool-result'`；事件层 = `event.type === 'tool/result'` 或 assistant 含 `tool-call` block）。给模型直接的压缩安全信号：tool 占比高 = 主要是工具输出 = 已消费候选（对应 rule 4 "压缩单个已消费 tool 输出是常态"）。
+2. **排序 size 降序 → oldest-first**：`buildCompressibleSeqRanges` 返回改为 `sort((a, b) => a.start - b.start)`。理由（用户提出，采纳）：范围表顺序跨 turn 稳定（最老段不随新消息移动），模型可按序消化无需每次重排（认知缓存命中），与 kernel `oldest first` 列表及宿主压缩节奏一致；size 降序每次排名随新消息抖动，还把模型引向"当前最大段"（往往是刚产生、还在用的输出）。
+3. **顺带修复 `slice(-0)` 陷阱**：`preserveRecent: 0` 时 `nodes.slice(-0) === slice(0)` 会保护全部节点——原"不保护"语义失效（region.test.ts 既有调用只 doesNotThrow 未暴露）。加 `if (preserve > 0)` 守卫。
+
+落点：`src/region.ts`（`SeqCompressibleRange.toolPct` + `isToolEvent` + 排序）、`src/nudge.ts`（renderTemplate 传 `toolPct`/`textPct`）、`src/prompts.ts`（rangeTable.line 模板加 `[tool {toolPct}% | text {textPct}%]`）、`tests/region.test.ts`（新增 toolPct 0/67 + oldest-first 断言）、`tests/prompts.test.ts`（快照 `[tool 0% | text 100%]`）。测试 112/112。
+
 ## 三、设计决策（审阅确认）
 
 | 决策 | 理由 |
@@ -115,8 +125,8 @@
 
 ## 五、验收清单
 
-- [ ] typecheck / test / build 全绿（含新增 mN 生产形态测试）
-- [ ] 四处 "never mN"（prompts:209/212/240 + tools.ts 注释）全清；Note 行新文案
-- [ ] README/README.en/INSTALL 工具表同步
-- [ ] AGENTS.md rule 9 + §4b 更新
-- [ ] 真实 dsh：drilldown 拿 mN → compress(mN) 成功；nudge 措辞不再诱导 drilldown
+- [x] typecheck / test / build 全绿（112/112，含 mN 生产形态 + toolPct + oldest-first）
+- [x] 四处 "never mN"（prompts:209/212/240 + tools.ts 注释）全清；Note 行新文案
+- [x] README/README.en/INSTALL 工具表同步
+- [x] AGENTS.md rule 9 + §4b 更新
+- [x] 真实 dsh：drilldown 拿 mN → compress(mN) 成功（stale advisory + unknown mN guidance 实测）；nudge 措辞不再诱导 drilldown；范围表带 [tool X% | text Y%] + oldest-first（重启后 nudge 实测）
