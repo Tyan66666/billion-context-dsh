@@ -241,7 +241,7 @@ scope:'compressed' for block drilldown.
 | D1 | 模型工具删窗口行，`/acp` 保留 | 对齐上游"模型无窗口、人类有窗口"的双路径；窗口仍是人类排查手段 |
 | D2 | 用 kernel `buildStatusReport` 而非自研 | 上游 status-tool 即此职责划分；百分比"占可见总量"、块列表格式、Tip 行全部逐字复用；kernel 升级自动跟随 |
 | D3 | nudge 行直接用 kernel reason | `buildNudge` 已走 `env.kernel.processTurn`（`nudge.ts:133`）；reason 字符串（`max compressible ... < threshold ...`）由 kernel 生成，零手抄 |
-| D4 | `byRaw` 自映射而非分配真实 mNNNNN ref（且**排除 checkpoint 节点**，P1-3） | overview 不显示 ref（§3.3.4）；分配真实 ref 会与 DSH seq 语义冲突、无收益；排除 checkpoint 杜绝摘要双重计数 |
+| D4 | `byRaw` 自映射而非分配真实 mNNNNN ref（且**排除 checkpoint 节点**，P1-3） | overview 不显示 ref（§3.3.4）；分配真实 ref 会与 DSH seq 语义冲突、无收益；排除 checkpoint 杜绝摘要双重计数。**[SUPERSEDED by issue #31]**：kernel 实际分配真实 mNNNNN ref（`assignRefs`），且 compress 已接受 mN（经 `turn.state.messageRefs.byRef` 反查为 live seq）——"无收益"判断已被 mN→seq 适配推翻 |
 | D5 | 保留 `Surface: seqs` 行 | DSH 压缩锚点是 seq（`compress({ startSeq, endSeq })`），删掉模型无法定位范围；上游 ref 语义不适用 |
 | D6 | `session` 头仅 `/acp` 保留 | 上游模型工具无头；人类命令保留便于多会话排查 |
 | D7 | Tip 行逐字保留（不裁剪） | 对齐优先；裁剪会造成与上游字节级偏差，且 kernel 升级可能调整该行文案 |
@@ -291,7 +291,7 @@ scope:'compressed' for block drilldown.
 ## 9. 未决项与后续
 
 - **`Compressible ranges` / `Delegate usage`**：上游有，但依赖 `billion-context-kit`（`viableRanges`）与 delegate 三件套。移植版无此依赖；当前 ranges 信息由 nudge 范围表（`src/nudge.ts`）承载。**本 PR 不做**，记为后续项：引入 `billion-context-kit` 后补齐。
-- **scope 钻取**：上游支持 `scope:'compressed'/'uncompressed'` 钻取。**本 PR 已实现**：`statusParameters` 提供 `scope`/`view`/`tool`/`sort`/`limit` 五个可选参数（schema 全 optional，DSH 编译器支持 `string`+`enum`/`integer`），`handleStatus` 原样转发给 `buildStatusReport`；`scope` 有值时镜像上游 `if (args.scope) return base`——只返回 kernel 报告 + `Surface:` 行，**不加** Nudge 行；`scope:'uncompressed'` 模式追加引擎 `Note:` 行。**P2-3 处置（实现后定稿）**：钻取行保持 kernel 原生 `mN` ref，引擎不改写文本（保持规则 9——kernel 渲染、engine 拼装）；`Note:` 行明确「mN 仅供体量感知，压缩用 `Surface:` 的 seq」，prompts 描述同步写死三套 id 分界（seq 可压缩 / bN 可解压 / mN 仅展示）。**#22/#23 预留**：search_context 消息级将采用 surface seq 方言（PR #23），届时若需钻取行与 search 同方言，再把 mN→seq 适配（`turn.state.messageRefs.byRef[mN] → id → seq`，nudge.ts 的 ref-ID 适配先例）作为后续项实施——方向已定，本 PR 不含该适配。
+- **scope 钻取**：上游支持 `scope:'compressed'/'uncompressed'` 钻取。**本 PR 已实现**：`statusParameters` 提供 `scope`/`view`/`tool`/`sort`/`limit` 五个可选参数（schema 全 optional，DSH 编译器支持 `string`+`enum`/`integer`），`handleStatus` 原样转发给 `buildStatusReport`；`scope` 有值时镜像上游 `if (args.scope) return base`——只返回 kernel 报告 + `Surface:` 行，**不加** Nudge 行；`scope:'uncompressed'` 模式追加引擎 `Note:` 行。**P2-3 处置（[SUPERSEDED by issue #31]）**：钻取行保持 kernel 原生 `mN` ref，引擎不改写文本（保持规则 9——kernel 渲染、engine 拼装）；`Note:` 行明确「mN 仅供体量感知，压缩用 `Surface:` 的 seq」，prompts 描述同步写死三套 id 分界（seq 可压缩 / bN 可解压 / mN 仅展示）。**#22/#23 预留**：search_context 消息级将采用 surface seq 方言（PR #23），届时若需钻取行与 search 同方言，再把 mN→seq 适配（`turn.state.messageRefs.byRef[mN] → id → seq`，nudge.ts 的 ref-ID 适配先例）作为后续项实施——方向已定，本 PR 不含该适配。**issue #31 已实施**：compress 接受钻取 mN（`handleCompress` 经当前 turn 的 `messageRefs.byRef` 反查为 live surface seq，未知 mN 报错引导，span 已压缩走 rule 7）；`Note:` 行改为「mN 可直喂 compress」；描述四处（prompts 工具描述×2 + systemPromptTemplate + tools.ts 注释）同步。
 - **Tip 行**：D7 决定逐字保留；若评审认为暴露内部函数名不可接受，可后续裁剪（记入 CHANGELOG 的偏差说明）。
 
 ## 9b. 双 id 空间：acp_status 显示 `bN`，decompress 接受 `bN` 与 compaction id（后续实现，已评审）

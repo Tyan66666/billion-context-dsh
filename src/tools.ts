@@ -127,6 +127,56 @@ function parseSeq(value: number | string): number {
   return seq
 }
 
+/**
+ * Match a drilldown mN ref: "m00306" / "m306" (kernel `refToIndex` semantics,
+ * `m0*(\d{1,5})`), tolerating a trailing `#callId` fragment (symmetric with
+ * `parseSeq`'s `#` handling). Returns the ref index, or null for non-mN input.
+ */
+const MN_RE = /^m0*(\d{1,5})(?:#.*)?$/i
+
+function mnRefIndex(value: string): number | null {
+  const match = MN_RE.exec(value.trim())
+  if (match === null) return null
+  const index = Number(match[1])
+  return index >= 1 && index <= 99999 ? index : null
+}
+
+/**
+ * Resolve a compress boundary arg to a surface seq. Accepts:
+ *  - a bare surface seq (number, "295", "295#call_00_x" — `parseSeq`);
+ *  - a drilldown mN ref ("m00306" / "m306") — reverse-mapped via the CURRENT
+ *    turn's `messageRefs.byRef` (CoreMessage.id = seq or "seq#callId" → split
+ *    on "#"). Unknown mN (never assigned on the current surface) fails with
+ *    guidance; a valid mN whose span was already compressed falls through to
+ *    the existing recover-stale / already-compressed semantics (rule 7).
+ * `byRef` MUST come from `turn.state.messageRefs` (after `processTurn`), not
+ * the persisted store state: acp_status's turn is never persisted, so mN refs
+ * shown in a drilldown (including refs for messages that arrived since the
+ * last nudge/compress) only exist on the current turn's ref map — a lookup
+ * against the stored state would report a false "unknown mN" and dead-loop
+ * the model between acp_status and compress.
+ */
+function parseBoundary(value: number | string, byRef: Record<string, string>): number {
+  const text = String(value)
+  const index = mnRefIndex(text)
+  if (index === null) return parseSeq(value)
+  // Normalize to the kernel's padded key ("m00306") — byRef holds exact keys.
+  const ref = `m${String(index).padStart(5, '0')}`
+  const raw = byRef[ref]
+  if (raw === undefined) {
+    throw new Error(
+      `billion-context-dsh: mN "${text}" not found on the current surface — re-run acp_status for fresh refs (the surface may have moved)`,
+    )
+  }
+  const seq = Number(String(raw).split('#')[0]!)
+  if (!Number.isInteger(seq) || seq < 0) {
+    throw new Error(
+      `billion-context-dsh: mN "${text}" maps to a non-seq id "${raw}" — re-run acp_status`,
+    )
+  }
+  return seq
+}
+
 interface CompressArgs {
   /** Tolerated wrapped-arguments form (model-generated double-nesting). */
   arguments?: string | { content?: CompressArgs['content'] }
@@ -207,6 +257,11 @@ async function handleCompress(env: ToolEnvironment, args: CompressArgs, exec: To
   const turn = env.kernel.processTurn({ messages: coreMessages, state, config, tokenCount })
   env.store.set(session, turn.state)
   const byRaw = turn.state.messageRefs.byRaw
+  // mN drilldown refs resolve against the CURRENT turn's ref map (not the
+  // stored state) — acp_status's turn is never persisted, so its mN rows only
+  // exist here; the deterministic re-assignment yields the same mN for the
+  // same messages (see parseBoundary).
+  const byRef = turn.state.messageRefs.byRef
 
   // Tolerate the wrapped-arguments forms some models emit (double-nested
   // `{ arguments: "..." }`), which the old DSH validator surfaced as
@@ -233,8 +288,8 @@ async function handleCompress(env: ToolEnvironment, args: CompressArgs, exec: To
   // They land as advisory warnings, never as errors or phantom blocks.
   const alreadyCompressedNotes: string[] = []
   for (const range of args.content!) {
-    const startSeq = parseSeq(range.startSeq)
-    const endSeq = parseSeq(range.endSeq)
+    const startSeq = parseBoundary(range.startSeq, byRef)
+    const endSeq = parseBoundary(range.endSeq, byRef)
     let resolved: ResolvedSurfaceRange
     try {
       // Balance edges FIRST: the requested edges may sit on multi-tool-call
@@ -634,12 +689,12 @@ async function handleStatus(env: ToolEnvironment, rawArgs: StatusArgs, exec: Too
     }
   }
   lines.push('', `Surface: ${surfaceSummary(session)}`)
-  // Drilldown rows carry kernel refs (mN, dense log-order ids). The model must
-  // NOT feed them to compress — compress speaks surface seqs, and the Surface
-  // anchor above is the only compressible-ref source (design §9 P2-3). Slated
-  // for direct seq adaptation when the search_context seq dialect lands (#23).
+  // Drilldown rows carry kernel refs (mN, dense log-order ids) — compress
+  // accepts them directly (handleCompress reverse-maps mN → live surface seq
+  // via the current turn's messageRefs.byRef; issue #31). The Surface anchor
+  // remains the model's compressible-seq locator for nudge-style ranges.
   if (args.scope === 'uncompressed') {
-    lines.push('', 'Note: drilldown rows are kernel refs (mN) for size awareness — compress uses the Surface: seqs above, never mN.')
+    lines.push('', 'Note: drilldown rows are kernel refs (mN) — feed them straight to compress (auto-mapped to the live surface seq); an unknown mN fails with guidance.')
   }
   return { text: lines.join('\n') }
 }

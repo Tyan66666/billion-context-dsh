@@ -471,18 +471,67 @@ test('M3: acp_status drilldown passes scope/view/tool/sort/limit to the kernel r
   assert.match((compressed as { text: string }).text, /COMPRESSED — 0 blocks/, 'zero-block compressed drilldown renders without crashing')
 })
 
-test('M3: acp_status drilldown labels kernel refs (mN) and separates them from compress seqs', async () => {
-  // P1-1: kernel drilldown rows are mN (dense log-order refs), which must NOT
-  // be fed to compress (surface seqs). The engine appends an explicit note in
-  // uncompressed drilldown mode so the model never mistakes mN for seqs.
+test('M3: acp_status drilldown labels kernel refs (mN) and notes they are compress-acceptable', async () => {
+  // P1-1/issue #31: kernel drilldown rows are mN (dense log-order refs). Since
+  // the mN→seq adaptation, compress accepts them (auto-mapped to live seqs),
+  // so the drilldown note tells the model to feed mN straight to compress.
   const env = makeEnv()
   const session = buildTextSession(12)
   const status = toolOf(env, 'acp_status')
   const text = (await status.execute({ scope: 'uncompressed', view: 'messages' }, fakeExec(session)) as { text: string }).text
-  assert.match(text, /Note: drilldown rows are kernel refs \(mN\) for size awareness — compress uses the Surface: seqs above, never mN\./, 'explicit mN-vs-seq note in drilldown mode')
+  assert.match(text, /Note: drilldown rows are kernel refs \(mN\) — feed them straight to compress \(auto-mapped to the live surface seq\); an unknown mN fails with guidance\./, 'explicit mN-acceptable note in drilldown mode')
   // Overview mode does NOT carry the drilldown note (it has no mN rows).
   const overview = await toolOf(env, 'acp_status').execute({}, fakeExec(session))
   assert.ok(!/drilldown rows are kernel refs/.test((overview as { text: string }).text), 'note is drilldown-only')
+})
+
+test('M3: compress accepts drilldown mN refs, mapped to the live surface seqs', async () => {
+  // Issue #31 production shape: acp_status runs FIRST and its turn is NOT
+  // persisted — the mN rows only exist on that turn's ref map. The compress
+  // turn re-assigns the same mN deterministically, so the mN must resolve
+  // against the current turn's byRef (a persisted-store lookup would fail).
+  const env = makeEnv()
+  const session = buildTextSession(12)
+  const status = toolOf(env, 'acp_status')
+  const drill = await status.execute({ scope: 'uncompressed', view: 'messages', limit: 50 }, fakeExec(session))
+  const mns = [...(drill as { text: string }).text.matchAll(/\bm\d{5}\b/g)].map((match) => match[0])
+  assert.ok(mns.length >= 2, 'drilldown shows at least two mN rows')
+
+  const compress = toolOf(env, 'compress')
+  const result = await compress.execute({
+    content: [{
+      startSeq: mns[0]!,
+      endSeq: mns[mns.length - 1]!,
+      summary: 'Compressed via drilldown mN refs: authentication flow, JWT access tokens, Redis refresh tokens, rate limiting, bcrypt.',
+    }],
+  } as never, fakeExec(session))
+  assert.match((result as { text: string }).text, /Compressed 1 block/)
+  const ledger = rebuildBlockLedger(session.events)
+  assert.equal(ledger.length, 1, 'the mN-targeted range landed a durable block')
+})
+
+test('M3: compress rejects unknown mN refs with guidance; mixed mN/seq boundaries work', async () => {
+  const env = makeEnv()
+  const session = buildTextSession(12)
+  const compress = toolOf(env, 'compress')
+
+  // Unknown mN (never assigned on the current surface) fails loudly.
+  await assert.rejects(
+    compress.execute({ content: [{ startSeq: 'm99999', endSeq: 'm99999', summary: 'bogus' }] } as never, fakeExec(session)),
+    /mN "m99999" not found on the current surface — re-run acp_status/,
+  )
+
+  // Mixed boundary: startSeq as mN, endSeq as a bare seq.
+  const drill = await toolOf(env, 'acp_status').execute({ scope: 'uncompressed', view: 'messages', limit: 50 }, fakeExec(session))
+  const first = ((drill as { text: string }).text.match(/\bm\d{5}\b/) ?? [])[0] as string
+  const result = await compress.execute({
+    content: [{
+      startSeq: first,
+      endSeq: 5,
+      summary: 'Mixed mN/seq boundary: authentication flow, tokens, rate limiting, bcrypt hashing.',
+    }],
+  } as never, fakeExec(session))
+  assert.match((result as { text: string }).text, /Compressed 1 block/)
 })
 
 test('M3: acp_status uncompressed drilldown excludes the checkpoint summary node', async () => {
