@@ -759,6 +759,9 @@ export function deferCompressPairHide(
  * recent protected tail, the last user message, and compaction checkpoints;
  * edges are then balanced through resolveSurfaceRange. Ranges are ordered
  * oldest-first (stable across turns — matches the kernel's `oldest first`).
+ * UPSTREAM: this self-computation is a labeled workaround for kernel
+ * ref-map drift after surface replacements (AGENTS.md rule 11) — drop it and
+ * use kernel compressibleRanges once the drift is fixed upstream.
  */
 export function buildCompressibleSeqRanges(
   session: Session,
