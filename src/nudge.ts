@@ -73,6 +73,9 @@ export function resolveTokenCount(agent: Agent, coreMessages: CoreMessage[]): nu
  * Render the compressible-range table as seq refs for the model.
  * Computed directly from the surface (not the kernel's ref map, which can
  * drift and hide large tool results) — see buildCompressibleSeqRanges.
+ * UPSTREAM: this self-computation is a labeled workaround for kernel
+ * ref-map drift after surface replacements (AGENTS.md rule 11) — drop it and
+ * use kernel compressibleRanges once the drift is fixed upstream.
  */
 export function rangeTable(
   session: import('@deepseek-ai/dsh-session').Session,
@@ -87,6 +90,8 @@ export function rangeTable(
       end: range.end,
       count: range.count,
       tokens: range.tokens,
+      toolPct: range.toolPct,
+      textPct: 100 - range.toolPct,
     }),
   )
   return [

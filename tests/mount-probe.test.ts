@@ -58,16 +58,18 @@ test('M1: DSH surface events project to acp-kernel CoreMessage', () => {
         turn: 1,
         step: 2,
         message: {
-          // Real DSH ToolResultBlock: nested content array inside a
-          // 'tool-result' block. Regression: extractText must recurse or the
-          // result projects to empty text and its seq never gets a ref.
+          // REAL DSH tool-result shape (hard-won rule 10): NO
+          // message.toolName / message.toolCallId — identity lives in the
+          // nested 'tool-result' block's toolCallId and message.source.callId;
+          // the tool name is backfilled from the assistant tool-call index.
+          id: 'res-call_1',
+          role: 'user',
           content: [{
             type: 'tool-result',
             toolCallId: 'call_1',
             content: [{ type: 'text', text: 'tool output' }],
           }],
-          toolName: 'bash',
-          toolCallId: 'call_1',
+          source: { kind: 'tool', callId: 'call_1' },
         },
       },
     },
@@ -83,7 +85,8 @@ test('M1: DSH surface events project to acp-kernel CoreMessage', () => {
   assert.equal(msgs[2]!.toolName, 'bash')
   assert.ok(msgs[2]!.text!.includes('ls'), 'tool-call arguments ride the text body')
   assert.equal(msgs[3]!.contentType, 'tool-result')
-  assert.equal(msgs[3]!.toolCallId, 'call_1')
+  assert.equal(msgs[3]!.toolCallId, 'call_1', 'toolCallId backfilled from the result event identity')
+  assert.equal(msgs[3]!.toolName, 'bash', 'toolName backfilled from the assistant tool-call index')
   assert.equal(msgs[3]!.role, 'tool')
   assert.equal(msgs[3]!.text, 'tool output', 'nested tool-result text must project')
 })
@@ -95,6 +98,41 @@ test('M1: non-surface events project to nothing', () => {
   ] as never[]
   const projected = events.map((event) => projectEvent(event as never))
   assert.deepEqual(projected, [[], []])
+})
+
+test('M1: tool/result with no call identity stays untagged — never falls into the text bucket', () => {
+  // Regression (P3-8): a tool-result whose message carries neither a nested
+  // 'tool-result' toolCallId nor a source.callId must project with
+  // toolName '' (the kernel then shows it under the empty-named bucket), NOT
+  // undefined — `toolName ?? "text"` in the kernel would mislabel it as text.
+  const msgs = eventsToCoreMessages([
+    { type: 'tool/result', seq: 0, data: { turn: 1, step: 1, message: { id: 'res', role: 'user', content: [{ type: 'tool-result', content: [{ type: 'text', text: 'orphan output' }] }] } } },
+  ] as never)
+  const result = msgs.find((m) => m.contentType === 'tool-result')
+  assert.ok(result, 'the text projects even without a call identity')
+  assert.equal(result.toolName, '', 'no key → empty tool name (not "text")')
+  assert.equal(result.toolCallId, '', 'no key → empty toolCallId')
+})
+
+test('M1: tool/result preceding its assistant tool-call still resolves the name (index pre-scan)', () => {
+  // The index scans ALL events up front, so log order is irrelevant (P3-9).
+  const msgs = eventsToCoreMessages([
+    {
+      type: 'tool/result', seq: 0, data: {
+        turn: 1, step: 1,
+        message: { id: 'res', role: 'user', content: [{ type: 'tool-result', toolCallId: 'call_y', content: [{ type: 'text', text: 'early output' }] }], source: { kind: 'tool', callId: 'call_y' } },
+      },
+    },
+    {
+      type: 'assistant/message', seq: 1, data: {
+        turn: 1, step: 1,
+        message: { content: [{ type: 'text', text: 'calling' }, { type: 'tool-call', id: 'call_y', name: 'bash', arguments: '{}' }] },
+      },
+    },
+  ] as never)
+  const result = msgs.find((m) => m.contentType === 'tool-result')
+  assert.ok(result)
+  assert.equal(result.toolName, 'bash', 'out-of-order result still attributed via the pre-scanned index')
 })
 
 // Regression: issue #5 — ACP systemPrompt section must not be silently dropped

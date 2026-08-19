@@ -6,11 +6,18 @@ import { AcpStateStore } from '../src/state.ts'
 import {
   AlreadyCompressedRangeError,
   assertNoActiveCompaction,
+  blockIdOfKernelRef,
+  blockRegistry,
+  buildCompressibleSeqRanges,
+  deferCompressPairHide,
   findOpenTurn,
+  hideCompressToolPair,
+  openToolCallIds,
   rebuildBlockLedger,
   resolveSurfaceRange,
   runCompactionTransaction,
   shadowedSeqsOf,
+  stripOrphanedSurfaceToolMessages,
 } from '../src/region.ts'
 import { appendTurn, appendToolCall, appendToolResult, appendMultiToolCall, appendUser, appendAssistant, buildTextSession, longText } from './helpers.ts'
 
@@ -94,6 +101,81 @@ test('M5: the block ledger rebuilds from the log without kernel state', () => {
   assert.deepEqual(ledger[0]!.shadowedSeqs, [1, 2, 3, 4])
   assert.equal(ledger[1]!.shadowedTokenCount, 2000)
   assert.equal(ledger[1]!.start, 6)
+})
+
+test('M5: blockIdOfKernelRef resolves the bN the model tool shows back to the compaction id', () => {
+  const session = buildTextSession(8)
+  runCompactionTransaction(session, {
+    start: 1,
+    end: 4,
+    shadowedSeqs: [1, 2, 3, 4],
+    summary: [{ type: 'text', text: 'First block summary with plenty of detail.' }],
+    shadowedTokenCount: 1000,
+    provider: 'p',
+    model: 'm',
+    kernelBlockId: 'b1',
+  })
+  runCompactionTransaction(session, {
+    start: 6,
+    end: 8,
+    shadowedSeqs: [6, 7, 8],
+    summary: [{ type: 'text', text: 'Second block summary with plenty of detail.' }],
+    shadowedTokenCount: 2000,
+    provider: 'p',
+    model: 'm',
+    kernelBlockId: 'b2',
+  })
+  const ledger = rebuildBlockLedger(session.events)
+  // The acp_status block rows (bN) must resolve to the durable ids the
+  // decompress/search tools accept — the whole point of the dual-id support.
+  assert.equal(blockIdOfKernelRef(session, 'b1'), ledger[0]!.blockId)
+  assert.equal(blockIdOfKernelRef(session, 'b2'), ledger[1]!.blockId)
+  // Unknown / malformed refs are not resolved (caller falls back to prefix).
+  assert.equal(blockIdOfKernelRef(session, 'b99'), null)
+  assert.equal(blockIdOfKernelRef(session, 'b0'), null)
+  assert.equal(blockIdOfKernelRef(session, 'b01'), null, 'no zero-padding normalisation')
+  assert.equal(blockIdOfKernelRef(session, 'B1'), null, 'case-sensitive')
+  assert.equal(blockIdOfKernelRef(session, 'b1 '), null, 'no trailing-space tolerance')
+  assert.equal(blockIdOfKernelRef(session, ledger[0]!.blockId.slice(0, 8)), null, 'a UUID prefix is not a kernel ref')
+})
+
+test('M5: rebuildKernelBlocks and blockRegistry synthesise identical bN ids (no id-space drift)', () => {
+  // P1-2: two independent bN syntheses exist (region.ts blockRegistry and
+  // state.ts rebuildKernelBlocks, via AcpStateStore). acp_status displays the
+  // kernel state's blockId while decompress resolves through blockRegistry —
+  // if the two ever drift, the model tool shows bN ids that decompress cannot
+  // resolve (the exact bug this feature fixes). Pin them together.
+  const session = buildTextSession(8)
+  runCompactionTransaction(session, {
+    start: 1,
+    end: 4,
+    shadowedSeqs: [1, 2, 3, 4],
+    summary: [{ type: 'text', text: 'First block summary with plenty of detail.' }],
+    shadowedTokenCount: 1000,
+    provider: 'p',
+    model: 'm',
+  })
+  runCompactionTransaction(session, {
+    start: 6,
+    end: 8,
+    shadowedSeqs: [6, 7, 8],
+    summary: [{ type: 'text', text: 'Second block summary with plenty of detail.' }],
+    shadowedTokenCount: 2000,
+    provider: 'p',
+    model: 'm',
+  })
+  // Fresh store forces the log-rebuild path (the "restarted engine" case).
+  const kernelBlocks = new AcpStateStore().stateFor(session).blocks
+  const registry = blockRegistry(session)
+  assert.equal(kernelBlocks.length, registry.length)
+  for (let index = 0; index < kernelBlocks.length; index += 1) {
+    assert.equal(
+      kernelBlocks[index]!.blockId,
+      registry[index]!.kernelBlockId,
+      `block ${index}: kernel state bN must equal the registry bN`,
+    )
+    assert.equal(blockIdOfKernelRef(session, kernelBlocks[index]!.blockId), registry[index]!.blockId)
+  }
 })
 
 test('M5: resolveSurfaceRange rejects missing, reversed, and pair-broken ranges', () => {
@@ -310,4 +392,188 @@ test('M5: ledger backfills shadowedTokenCount for legacy blocks written as 0', (
   const ledger = rebuildBlockLedger(session.events)
   assert.equal(ledger.length, 1)
   assert.ok(ledger[0]!.shadowedTokenCount > 0, 'legacy 0 is backfilled from shadowed originals')
+})
+
+test('M5: stripOrphanedSurfaceToolMessages removes orphan results and orphan calls', () => {
+  const session = Session.create('orphans')
+  appendTurn(session, 1)
+  appendUser(session, longText('q0', 0))                // seq 1
+  appendToolResult(session, 'orphan result', 'result-orphan') // seq 2 (no call anywhere before it)
+  appendUser(session, longText('q1', 1))                // seq 3
+  appendToolCall(session, 'orphan call', 'call-orphan') // seq 4 (no result)
+  // Surface before cleanup: [1, 2, 3, 4] — the orphan result drives the
+  // pairing balance negative, so every range resolve throws.
+  assert.throws(() => resolveSurfaceRange(session, 1, 4), /no matching tool-call/)
+
+  const hidden = stripOrphanedSurfaceToolMessages(session)
+  assert.equal(hidden, 2, 'both the orphan call and the orphan result are pruned')
+
+  // The empty assistant pruning nodes derive to nothing: only q0/q1 remain.
+  assert.equal(session.deriveMessages().length, 2)
+  // The pairing cache is healthy again and the surface yields compressible spans.
+  assert.doesNotThrow(() => resolveSurfaceRange(session, 1, session.surface.nodes[session.surface.nodes.length - 1]!))
+  assert.doesNotThrow(() => buildCompressibleSeqRanges(session, { preserveRecent: 0 }), 'orphan cleanup leaves the range table computable')
+})
+
+test('M5: buildCompressibleSeqRanges carries kernel-parity toolPct and oldest-first order', () => {
+  // Mixed session: a text turn, then the last user message (always protected,
+  // breaking the segment), then an assistant reply + tool pair. The range
+  // table must report the tool share per range (kernel `toolPct` parity) and
+  // order ranges oldest-first (stable across turns, kernel `oldest first`).
+  const session = Session.create('toolpct')
+  appendTurn(session, 1)
+  appendUser(session, longText('q0', 0))                  // seq 1 — text segment
+  appendAssistant(session, longText('a0', 1), 1, 1)       // seq 2 — text segment
+  appendUser(session, longText('q1', 2))                  // seq 3 — last user → protected → break
+  appendAssistant(session, longText('a1', 3), 1, 2)       // seq 4 — joins the tool segment
+  appendToolCall(session, longText('call', 4), 'call_1', 1, 3)   // seq 5 — tool
+  appendToolResult(session, longText('result', 5), 'call_1', 1, 4) // seq 6 — tool
+
+  const ranges = buildCompressibleSeqRanges(session, { preserveRecent: 0 })
+  assert.equal(ranges.length, 2, 'protected user message splits the surface into two ranges')
+  assert.equal(ranges[0]!.toolPct, 0, 'text-only range reports toolPct 0')
+  assert.equal(ranges[1]!.toolPct, Math.round((2 / 3) * 100), '2-tool-of-3-msg range reports the tool share (67)')
+  // Oldest-first: start seqs are non-decreasing (stable ordering for the model).
+  for (let index = 1; index < ranges.length; index += 1) {
+    assert.ok(ranges[index]!.start >= ranges[index - 1]!.start, 'ranges ordered oldest-first')
+  }
+})
+
+test('M5: stripOrphanedSurfaceToolMessages preserves an in-flight tool call', () => {
+  const session = Session.create('in-flight')
+  appendTurn(session, 1)
+  appendUser(session, longText('q', 0))
+  appendToolCall(session, 'running compress', 'call-acp') // result not appended yet
+  const before = session.deriveMessages().length
+  const hidden = stripOrphanedSurfaceToolMessages(session, new Set(['call-acp']))
+  assert.equal(hidden, 0, 'the executing compress call is not treated as an orphan')
+  assert.equal(session.deriveMessages().length, before, 'the in-flight call stays on the surface')
+  assert.ok(session.surface.nodes.includes(session.events.find((event) => event.type === 'assistant/message')!.seq), 'the assistant call node remains visible')
+})
+
+test('M5: hideCompressToolPair removes the compress call/result from the invalid surface', () => {
+  const session = Session.create('compress-pair')
+  appendTurn(session, 1)
+  appendUser(session, longText('old', 0))                       // seq 1
+  appendToolCall(session, 'compressing history', 'call-acp')    // seq 2 (the compress tool call)
+  // The compress tool runs mid-turn: its durable summary node is inserted
+  // before the current tool/result, producing [summary, compress-call, result].
+  runCompactionTransaction(session, {
+    start: 1,
+    end: 1,
+    shadowedSeqs: [1],
+    summary: [{ type: 'text', text: 'Compression summary with enough technical detail to replace the old message.' }],
+    shadowedTokenCount: 1000,
+    provider: 'test-provider',
+    model: 'test-model',
+  })
+  const result = session.append('tool/result', {
+    turn: 1,
+    step: 1,
+    message: {
+      id: 'res-acp',
+      role: 'user',
+      content: [{ type: 'tool-result', toolCallId: 'call-acp', content: [{ type: 'text', text: 'ok' }] }],
+      source: { kind: 'tool', callId: 'call-acp' },
+    },
+  } as never, { surfaceOp: 'append' })
+  const before = session.deriveMessages()
+  assert.ok(before.some((message) => message.role === 'assistant' && message.content.some((block) => (block as { type?: string }).type === 'tool-call')), 'the invalid surface has the compress tool-call visible')
+
+  assert.equal(hideCompressToolPair(session, 'call-acp', result.seq), true)
+  const after = session.deriveMessages()
+  assert.equal(after.length, 2, 'the compaction summary plus the preserved compress result text remain visible')
+  assert.ok(!after.some((message) => message.role === 'assistant' && message.content.some((block) => (block as { type?: string }).type === 'tool-call')), 'compress call is hidden')
+  assert.ok(!after.some((message) => message.role === 'user' && message.content.some((block) => (block as { type?: string }).type === 'tool-result')), 'compress result is hidden as a tool-result')
+  assert.ok(after.some((message) => message.role === 'user' && message.content.some((block) => (block as { type?: string }).type === 'text' && (block as { text?: string }).text === 'ok')), 'the compress outcome text is preserved for the model')
+  assert.ok(session.events.some((event) => event.type === 'compaction/prune'), 'the hide is recorded as a durable prune')
+})
+
+test('M5: stripOrphanedSurfaceToolMessages prunes legacy broken pairs (call → summary → result)', () => {
+  const session = Session.create('broken-pair')
+  appendTurn(session, 1)
+  appendUser(session, longText('q', 0))                                   // seq 1
+  appendToolCall(session, 'compress call', 'call-broken')                 // seq 2
+  appendUser(session, 'Legacy compaction summary inserted between call and result.') // seq 3
+  appendToolResult(session, 'ok', 'call-broken')                          // seq 4 — non-adjacent result
+  assert.equal(session.deriveMessages().length, 4)
+  const hidden = stripOrphanedSurfaceToolMessages(session)
+  assert.equal(hidden, 2, 'the broken call and its non-adjacent result are both pruned')
+  const after = session.deriveMessages()
+  assert.equal(after.length, 2, 'only the two user messages remain visible')
+  assert.ok(!after.some((message) => message.role === 'tool'), 'no orphaned tool result remains')
+  assert.ok(!after.some((message) => message.role === 'assistant' && message.content.some((block) => (block as { type?: string }).type === 'tool-call')), 'no orphaned tool-call remains')
+  assert.doesNotThrow(() => buildCompressibleSeqRanges(session, { preserveRecent: 0 }), 'the healed surface is range-solvable')
+})
+
+test('M5: stripOrphanedSurfaceToolMessages keeps healthy multi-call pairs', () => {
+  const session = Session.create('multi-call')
+  appendTurn(session, 1)
+  appendUser(session, longText('q', 0))
+  appendMultiToolCall(session, 'compress + other', ['call-a', 'call-b'])
+  appendToolResult(session, 'a ok', 'call-a')
+  appendToolResult(session, 'b ok', 'call-b')
+  const hidden = stripOrphanedSurfaceToolMessages(session)
+  assert.equal(hidden, 0, 'adjacent multi-call results are healthy — nothing pruned')
+  assert.equal(session.deriveMessages().length, 4, 'the whole pair stays on the surface')
+})
+
+test('M5: openToolCallIds reports exactly the in-flight calls', () => {
+  const session = Session.create('open-calls')
+  appendTurn(session, 1)
+  appendUser(session, longText('q', 0))
+  appendToolCall(session, 'compress', 'call-acp')
+  appendToolCall(session, 'other tool', 'call-other')
+  assert.deepEqual([...openToolCallIds(session)].sort(), ['call-acp', 'call-other'])
+  appendToolResult(session, 'ok', 'call-other')
+  assert.deepEqual([...openToolCallIds(session)], ['call-acp'], 'only the unanswered call remains open')
+})
+
+test('M5: hideCompressToolPair refuses a multi-call node (hiding would orphan siblings)', () => {
+  const session = Session.create('multi-call-hide')
+  appendTurn(session, 1)
+  appendUser(session, longText('old', 0))
+  appendMultiToolCall(session, 'compress + other', ['call-acp', 'call-other'])
+  appendToolResult(session, 'ok', 'call-acp') // adjacent to the call node
+  assert.equal(hideCompressToolPair(session, 'call-acp'), false, 'a multi-call node is never hidden')
+  const after = session.deriveMessages()
+  assert.ok(after.some((message) => message.content.some((block) => (block as { type?: string }).type === 'tool-result')), 'the sibling result stays visible')
+  assert.ok(after.some((message) => message.role === 'assistant' && message.content.some((block) => (block as { type?: string }).type === 'tool-call')), 'the tool-call node stays visible')
+})
+
+test('M5: deferCompressPairHide lands the hide on the microtask queue', async () => {
+  const session = Session.create('deferred-hide')
+  appendTurn(session, 1)
+  appendUser(session, longText('old', 0))                    // seq 1
+  appendToolCall(session, 'compressing history', 'call-acp') // seq 2
+  // The compress tool runs mid-turn: its durable summary node is inserted
+  // before the current tool/result, producing [summary, compress-call, result].
+  runCompactionTransaction(session, {
+    start: 1,
+    end: 1,
+    shadowedSeqs: [1],
+    summary: [{ type: 'text', text: 'Compression summary with enough technical detail to replace the old message.' }],
+    shadowedTokenCount: 1000,
+    provider: 'test-provider',
+    model: 'test-model',
+  })
+  const result = session.append('tool/result', {
+    turn: 1,
+    step: 1,
+    message: {
+      id: 'res-acp',
+      role: 'user',
+      content: [{ type: 'tool-result', toolCallId: 'call-acp', content: [{ type: 'text', text: 'ok' }] }],
+      source: { kind: 'tool', callId: 'call-acp' },
+    },
+  } as never, { surfaceOp: 'append' })
+  let errored: unknown = null
+  deferCompressPairHide(session, 'call-acp', result.seq, (error) => { errored = error })
+  // Synchronously the pair is still on the surface — the hide is deferred.
+  assert.ok(session.deriveMessages().some((message) => message.role === 'assistant' && message.content.some((block) => (block as { type?: string }).type === 'tool-call')), 'hide is deferred — the pair is still visible synchronously')
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  assert.equal(errored, null, 'the deferred hide does not error')
+  const after = session.deriveMessages()
+  assert.ok(!after.some((message) => message.role === 'assistant' && message.content.some((block) => (block as { type?: string }).type === 'tool-call')), 'the pair is hidden after the microtask drains')
+  assert.ok(after.some((message) => message.role === 'user' && message.content.some((block) => (block as { type?: string }).type === 'text' && (block as { text?: string }).text === 'ok')), 'the compress result text is preserved')
 })

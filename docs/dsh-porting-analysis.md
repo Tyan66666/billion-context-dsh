@@ -73,7 +73,7 @@ DSH 仓库里的 `packages/acp` 是 **Agent Client Protocol**（进程间自动�
 | `pi.on('before_agent_start')` 系统提示词 | `dsh-system-prompt` persona / prompt sections（`dsh-persona`、各插件 section） | 🟢 直接对应 |
 | `pi.registerTool(compress)` | `ctx.tools.register(ToolDefinition)`（`dsh-tools` registry） | 🟢 直接对应 |
 | `pi.registerTool(decompress)` | 需自实现"反遮蔽"：把 checkpoint 节点 replace 回原文（原文仍在日志中，可回放恢复） | 🟡 设计取舍 |
-| `pi.registerTool(search_context)` | `ctx.sessionQuery.searchEvents()`（SQLite 全文索引，opt-in 开启） | 🟡 依赖 opt-in |
+| `pi.registerTool(search_context)` | 落地为：从日志重建统一文档集（块摘要 + 被遮蔽原文），交 acp-kernel `searchBlocks`（hybrid：BM25 词干化 + CJK bigram + 字符 n-gram 模糊）打分；**信任内核**——引擎不做无命中闸门/阈值等二级搜索策略，评分直接呈现给模型自行判断；消息命中回链最内层所属块。`ctx.sessionQuery` 全文索引（`openAt: 'first-search'`）留作二期可选项 | 🟢 直接复用内核（无 opt-in 依赖） |
 | `pi.registerTool(acp_status)` | `ctx.tokenMeter` 投影（`contextPressure`/`contextBreakdown`） | 🟢 直接对应 |
 | `pi.registerCommand(/acp)` | `ctx.commands`（`dsh-command-compact` 是现成参考） | 🟢 直接对应 |
 | 状态持久化 `*.acp.json` 旁车文件 | 会话日志本身 durable；ACP 块状态可写成自定义日志事件（如 `acp/block`，回放友好，且自动获得 checkpoint）或 storage key | 🟢 更优 |

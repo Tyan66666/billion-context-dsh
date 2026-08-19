@@ -44,6 +44,7 @@ import { buildNudge } from './nudge.ts'
 import { ACP_SYSTEM_PROMPT_ORDER } from './system-prompt.ts'
 import { renderSystemPrompt, resolvePrompts, type AcpPrompts, type ResolvedPrompts } from './prompts.ts'
 import { DEFAULT_CONTEXT_WINDOW, detectContextWindow, type AcpWindow } from './window.ts'
+import { deferCompressPairHide, stripOrphanedSurfaceToolMessages } from './region.ts'
 
 export { AcpStateStore } from './state.ts'
 export { kernelConfigFor, type KernelConfigInput } from './config.ts'
@@ -84,6 +85,8 @@ export {
   compactionIdsOfKernelBlocks,
   summarySeqOfKernelBlock,
   expandShadowedSeqs,
+  hideCompressToolPair,
+  stripOrphanedSurfaceToolMessages,
   type AcpBlockLedgerEntry,
   type CompactionTransactionInput,
   type ResolvedSurfaceRange,
@@ -175,6 +178,8 @@ export class AcpCompactionEngine extends CompactionEngine {
   readonly prompts: ResolvedPrompts
 
   private readonly lastNudgeTurn = new Map<string, number>()
+  /** Successful compress call ids awaiting their tool/result so the pair can be hidden. */
+  private readonly compressCallIdsToHide = new Set<string>()
   /** Per provider/model route the resolved window (probe failures cached too). */
   private readonly windowCache = new Map<string, AcpWindow>()
 
@@ -199,6 +204,7 @@ export class AcpCompactionEngine extends CompactionEngine {
       coreOverrides: this.config.coreOverrides,
       windowFor: (agent) => this.windowFor(agent),
       prompts: this.prompts,
+      compressCallIdsToHide: this.compressCallIdsToHide,
     }
 
     // Tools and commands may not be registered yet on cold start: cordis
@@ -241,16 +247,47 @@ export class AcpCompactionEngine extends CompactionEngine {
         if (name === 'commands') registerCommand()
       })
     }
-    if (this.config.autoNudge) {
-      ctx.on('agent/pre-step', async (payload, next) => {
-        const decision = await next()
-        if (decision.kind === 'reject') return decision
-        const window = await this.windowFor(payload.agent)
-        const outcome = buildNudge(payload.agent, { ...env, modelContextLimit: window.limit }, this.lastNudgeTurn)
-        if (outcome === null) return decision
-        return { kind: 'enter', messages: [...decision.messages, outcome.message] }
+    // After a successful compress tool result is appended, hide its
+    // call/result pair. The durable summary node was inserted mid-turn (before
+    // the result), so leaving the pair visible would put a user message between
+    // an assistant tool_calls block and its tool response — strict providers
+    // reject that request with HTTP 400 (issue #18).
+    ctx.on('session/event', (session, event) => {
+      if (event.type !== 'tool/result') return
+      const message = event.data.message
+      const block = message.content[0]
+      const callId = block?.toolCallId ?? message.source.callId
+      if (typeof callId !== 'string' || !this.compressCallIdsToHide.has(callId)) return
+      this.compressCallIdsToHide.delete(callId)
+      // session.append is NOT reentrant: calling it synchronously inside this
+      // session/event dispatch (the outer append still holds the reentry lock)
+      // throws "session append cannot reenter while another append is being
+      // published" on live, store-attached sessions, and the dispatcher
+      // silently swallows the error — the hide would be a no-op. Defer it to a
+      // microtask: microtasks drain after the append fully publishes and
+      // before the agent loop resumes, so the pair is hidden before the next
+      // request is built.
+      deferCompressPairHide(session, callId, event.seq, (error) => {
+        ctx.logger.warn(`billion-context-dsh: hide compress call/result pair failed: ${String(error)}`)
       })
-    }
+    })
+    ctx.on('agent/pre-step', async (payload, next) => {
+      // A crash-interrupted tool leaves an orphan call/result on the surface:
+      // it corrupts the pairing balance cache AND can 400 the next request
+      // (strict providers reject tool messages without their call/response).
+      // Clean them before EVERY step — not only when a nudge fires — so a
+      // low-pressure session never hits the orphan 400 (issue #18). No call is
+      // in flight at pre-step (the previous step's tools all landed), so the
+      // default empty in-flight set is safe.
+      stripOrphanedSurfaceToolMessages(payload.agent.session)
+      if (!this.config.autoNudge) return next()
+      const decision = await next()
+      if (decision.kind === 'reject') return decision
+      const window = await this.windowFor(payload.agent)
+      const outcome = buildNudge(payload.agent, { ...env, modelContextLimit: window.limit }, this.lastNudgeTurn)
+      if (outcome === null) return decision
+      return { kind: 'enter', messages: [...decision.messages, outcome.message] }
+    })
     // The load-bearing ACP guidance lives in the system prompt ONCE; nudges
     // stay short and advisory (model-driven: the model decides). The
     // systemPrompt service may not be registered yet on cold start (cordis

@@ -3,7 +3,7 @@
 [English](./README.en.md) | [中文](./README.md)
 
 > **⚠️ Beta notice — not for production use**
-> This project (**v0.2.1**) is a work-in-progress beta. The [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) itself is also in **public beta**. **Do not use either in engineering / production environments** — expect breaking changes and rough edges.
+> This project (**v0.2.4**) is a work-in-progress beta. The [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) itself is also in **public beta**. **Do not use either in engineering / production environments** — expect breaking changes and rough edges.
 
 <p align="center">
 <strong>Built with gratitude on top of these projects</strong> — please give them a ⭐:
@@ -41,10 +41,11 @@ When conversations get long, the model runs out of context. Most tools hard-trun
 
 Unlike DSH's built-in auto-compaction (which replaces a range with an automatically generated summary), billion-context-dsh:
 
-- **Model-driven** — the model writes the summary itself; there is no second LLM summarization call (the ACP cost win)
+- **Model-driven** — the model writes the summary itself; there is no second LLM summarization call
 - **Advisory, never imperative** — automatic policy only *nudges*; the model decides whether and when to compress
 - **Durable & recoverable** — a compressed range becomes a checkpoint node, the originals stay in the append-only session log; `decompress` restores them, `search_context` finds information inside blocks
-- **Seq-based refs** — no message tags; surface seqs are carried by the nudge's range table, with auto-balanced range edges and `#callId` tolerance
+- **Long tasks hold steady** — every step builds on the results before it; key conclusions stay usable and compound, so very long tasks actually finish
+- **Context stays lean** — every request rides on a small, distilled slice of context with only the key information; no bulk compression of large ranges, so details don't decay with it — and tokens stay low
 
 This is the DeepSeek Harness port of [billion-context-pi](https://github.com/ranxianglei/billion-context-pi) (the Pi coding-agent adapter): the compression core ([acp-kernel](https://github.com/ranxianglei/acp-kernel)) is reused verbatim, and the adapter layer was rewritten against DSH's durable-surface model — see [docs](https://github.com/Tyan66666/billion-context-dsh/tree/main/docs) for the verified mapping.
 
@@ -88,7 +89,7 @@ That's it. Then add a composition row where a compaction backend is expected —
         modelContextLimit: 128000   # optional; omit to auto-detect the model's real window (fallback 128000)
 ```
 
-**(Optional) Custom prompt copy — `config.prompts`.** Every model-visible prompt (normal/emergency nudge opener, context breakdown, growth line, batch tip, tier line, range table, the ACP system-prompt section, the four tool descriptions) defaults to **acp-kernel's own `renderNudgeText`** — the efficiency note, context breakdown, compression rules, and batch tip all come from the kernel verbatim; only the range table is swapped for the surface-seq version (the kernel uses mNNNNN refs, and DSH has no `<acp>` tags). Overriding any nudge slot switches to template rendering. Templates support named placeholders (e.g. `{pct}` and `{philosophy}` for nudges, `{surface}` for the range table) and are **validated at construction**: a misspelled placeholder fails engine startup (fail-fast) instead of leaking a literal `{pct}` into the model context:
+**(Optional) Custom prompt copy — `config.prompts`.** Every model-visible prompt (normal/emergency nudge opener, context breakdown, growth line, batch tip, tier line, range table, the ACP system-prompt section, the four tool descriptions) defaults to **acp-kernel's own `renderNudgeText`** — the efficiency note, context breakdown, compression rules, and batch tip all come from the kernel verbatim; only the range table is swapped for the surface-seq version (the kernel uses mNNNNN refs, and DSH has no `<acp>` tags; the seq range table likewise carries a `[tool X% | text Y%]` composition share and oldest-first ordering, matching the kernel's display semantics). Overriding any nudge slot switches to template rendering. Templates support named placeholders (e.g. `{pct}` and `{philosophy}` for nudges, `{surface}` for the range table) and are **validated at construction**: a misspelled placeholder fails engine startup (fail-fast) instead of leaking a literal `{pct}` into the model context:
 
 ```yaml
       config:
@@ -128,8 +129,8 @@ DSH derives every model request from its append-only session log (the *surface*)
 | refs (`m00001` tags) | surface seqs, carried by the nudge's compressible-range table |
 | nudge ("efficiency note — compress early and keep context lean") | injected at `agent/pre-step` by the kernel's pressure decision — efficiency note + context breakdown + compression rules, tone aligned with kernel/pi; never an order |
 | `decompress` | read-only recovery of shadowed originals from the log |
-| `search_context` | scores block summaries + originals rebuilt from the log |
-| `acp_status` | block ledger + context pressure |
+| `search_context` | scores a unified doc set (block summaries + shadowed originals) rebuilt from the log via acp-kernel `searchBlocks` (hybrid: stemming + CJK bigrams + char n-gram fuzzy); hits link back to the owning block |
+| `acp_status` | CONTEXT BREAKDOWN (tool/text/summaries shares of the visible total) + compressed-block ledger + nudge decision line; no context-window rows; scope/view/tool/sort/limit drilldown supported |
 | block state | in-memory kernel state + **log-rebuilt ledger** (no sidecar files) |
 | tiered distillation (T2/T3) | re-compressing a block's summary node distills that block (tier 2); distilling a tier-2 block yields tier 3. Tier + kernel block ids are persisted to the log, so kernel state rehydrates from the log after a restart and stays distillable |
 
@@ -146,9 +147,9 @@ A walkthrough of the ACP philosophy this project inherits — how active context
 | Tool | What it does |
 | --- | --- |
 | `compress` | Replace a seq range with a dense summary you write (edges auto-balanced to tool-pair boundaries); re-compressing a block's summary node distills it (tier 2/3) |
-| `decompress` | Restore a previously compressed block's original content (read-only) |
-| `search_context` | Search compressed block summaries and originals by keyword |
-| `acp_status` | Context usage, compressed blocks, compressible ranges |
+| `decompress` | Restore a previously compressed block's original content (read-only); accepts the `bN` ref shown by acp_status or a compaction id |
+| `search_context` | Search compressed block summaries and originals by keyword (acp-kernel hybrid retrieval: stemming + CJK bigrams + fuzzy); hits link back to the owning block |
+| `acp_status` | CONTEXT BREAKDOWN (tool/text/summaries shares of the visible total) + compressed-block ledger + nudge decision line; no context-window rows. Drilldown supported: `scope:"compressed"` per block, `scope:"uncompressed"` + `view:"messages"`/`"ranges"` per message/range, with `tool` filter, `sort` order and `limit` cap. Drilldown row refs are kernel ids (mN) — feed them straight to `compress` as `startSeq`/`endSeq` (auto-mapped to the live surface seq); `Surface:` seqs work too |
 | `/acp` | status / compress / decompress from the command bar |
 
 ## Upstream & credits
@@ -169,7 +170,7 @@ This project reuses `acp-kernel`'s compression core and `billion-context-pi`'s d
 | Key | Default | Meaning |
 |---|---|---|
 | `modelContextLimit` | auto-detected (fallback `128000`) | Context window used for the kernel's pressure decisions; an explicit value wins and skips the probe |
-| `autoModelContextLimit` | `true` | Probe the model's real window from the model API (`agent.ctx.llm.resolveModelInfo`); fall back to the default on failure, `acp_status` shows the window source |
+| `autoModelContextLimit` | `true` | Probe the model's real window from the model API (`agent.ctx.llm.resolveModelInfo`); fall back to the default on failure, the `/acp` command shows the window source (the `acp_status` model tool carries no window info) |
 | `nudgeMinContextLimitPct` | kernel default `0.45` | Nudge window lower bound (usage fraction) — validation only; the growth-driven trigger has no percentage floor — same default as billion-context-pi |
 | `nudgeMaxContextLimitPct` | engine default `0.70` (kernel/pi default `0.75`) | Over-limit line: above this the nudge fires regardless of growth — deliberately below the host compaction-basic 80% auto-compaction line so the forced nudge fires first; an explicit value wins |
 | `nudgeEmergencyThresholdPct` | engine default `0.85` (kernel/pi default `0.95`) | Emergency nudge (bypasses the per-turn dedup) — lowered from `0.95`: at 95% the model has no room to act and the 80% auto-compaction line shadows it; an explicit value wins |

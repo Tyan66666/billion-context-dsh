@@ -34,7 +34,7 @@
 
 - 模型工具：`ctx.tools.register(ToolDefinition)`（`packages/core/tools/src/index.ts:1037`），`ToolDefinition` 含 `output`、`execute(args, exec)`、`finalizeContent?`、`timeoutMs?`、`isConcurrencySafe?`。
 - 命令：`ctx.commands.register(CommandDefinition)`（`packages/interaction/commands/src/index.ts:245`），`command-compact` 是 `/compact` 的现成参考。
-- 搜索：`ctx.sessionQuery.searchEvents(request, exec)` / `searchSessions`（`packages/session-query/session-query/src/index.ts:113-124`），SQLite 后端 `openAt: 'never' | 'first-search' | 'startup'`（默认 `never`，需在组合中改为 `first-search` 才启用全文搜索）。
+- 搜索：`ctx.sessionQuery.searchEvents(request, exec)` / `searchSessions`（`packages/session-query/session-query/src/index.ts:113-124`），SQLite 后端 `openAt: 'never' | 'first-search' | 'startup'`（默认 `never`，需在组合中改为 `first-search` 才启用全文搜索）——能力已验证但**本引擎未采用**（见 D6：改用 acp-kernel `searchBlocks`，无 opt-in 依赖）。
 - 状态持久化备选：web 组合里有 `ctx.storage`（`dsh-storage-json`，root `$DSH_HOME/storages`）。
 
 ### V4. 不存在"内存改写"钩子（最关键的负向验证）✅
@@ -113,7 +113,7 @@ PROBE OK
 | D3 | **decompress**：读取日志原始事件，replace 回原文 | V5 |
 | D4 | **自动触发**：`agent/pre-step` + `agent/request-error`，与 compaction-basic 相同 | V2 架构事实 2 |
 | D5 | **块状态**：ACP block 状态写成会话日志事件（如 `acp/block`，回放/checkpoint 免费）或 `ctx.storage` key | V5、V3 |
-| D6 | **搜索**：`search_context` 基于 `ctx.sessionQuery.searchEvents`；acp-kernel `searchBlocks` 仅作块内兜底 | V3、V1 |
+| D6 | **搜索**：`search_context` 从日志重建统一文档集（块摘要 + 被遮蔽的原始消息），交给 acp-kernel `searchBlocks`（默认 hybrid：BM25 词干化 + CJK bigram + 字符 n-gram 模糊）；**信任内核**——引擎不设无命中闸门/阈值（曾有一版 BM25 闸门过滤 fuzzy 假阳性，实测误杀 6/46 条同义词与词干化查询，违反"算法归内核"原则后移除），评分直接呈现，弱命中（fuzzy 兜底分 ≈0.3 上下）由模型凭分数判断；消息命中回链最内层所属块 | V3、V1 |
 | D7 | **nudge**：pre-step 注入（现有注入通道，会成为日志中的 `user/message`） | V4 中 pre-step 语义 |
 | D8 | **delegate 工具**：直接映射 DSH 现有 subagent/jobs 体系，不移植 Pi 专用实现 | 组合现状 |
 
@@ -150,15 +150,27 @@ PROBE OK
 | 4 | 压缩单条工具结果报 `no tool-pairing-balanced range` | `resolveSurfaceRange` 只向内收缩，单条 tool 消息收缩到空 | 收缩失败时**向外扩展到最小完整配对**（单条结果自动带上其调用） |
 | 5 | 模型说"压无可压"（大工具结果在范围表隐形） | kernel 的 ref 映射在长会话压缩后漂移，`compressibleRanges` 漏掉大段 | nudge 范围表改为**从 surface 自算**（跳过保护区 + 摘要节点，边界配对平衡） |
 | 6 | 旧块 `tokens compressed` 仍为 0 | 修复前写入的块没有 token 数据 | 账本重建时对 0 值**从日志原文补算** |
+| 7 | 官方 API 在 compress 后下一请求 400（摘要插在 compress call 与 result 之间） | `compress` 工具在 turn 中途执行，摘要 `user/message` 先于当前 `tool/result` 落库；且 `session.append` **不可重入**——在 `session/event` 监听内同步 append 会抛 "session append cannot reenter" 并被 dispatcher 静默吞掉 | `session/event` 监听把隐藏推迟到**微任务**（`deferCompressPairHide`，在下一个请求构建前落库），把该 call/result 对整体替换为普通 user 消息（保留结果文本）；只隐藏**单 call 节点**（多 call 节点隐藏会孤儿化兄弟结果，留作可见对——当前 harness 按 surface 位置序序列化，本就安全） |
+| 8 | nudge 范围表只剩 ~28 tokens / 大段 compress 被 `no tool-pairing-balanced` 拒绝 | 孤儿工具消息（无配对 result 的 call、无配对 call 的 result）破坏配对平衡缓存或打碎大段；老版本 bug 还在 call 与 result 之间插入摘要形成死锁 "broken pair" | 范围求解前自动剥离孤儿（`compaction/prune` + 空 assistant 替换）：`agent/pre-step` **无条件执行**（低压力会话也不被崩溃孤儿 400）+ `buildCompressibleSeqRanges` + `handleCompress` 顶部；剥离覆盖孤儿 result、全孤儿 call 节点、以及 call→非工具节点→result 的 broken pair（自动治愈遗留死锁会话）；`handleCompress` 保护当前 step **全部 in-flight call**（`openToolCallIds`），兄弟工具不会被误剪 |
+| 9 | 批量 compress 中单个 kernel 拒绝的范围拖垮整个调用（成功块被丢弃） | kernel 对"已被活动块 `effectiveMessageIds` 吸收但仍存活于 surface"的范围抛 `Range contains no compressible messages`；旧代码对任一 error 即整体返回失败并丢弃 `applied.state` | 仅当 `blocksCreated === 0` 才整体失败；否则照常落账成功块，失败范围作为 advisory 行报告（phantom range 不再毒化批次） |
 
-**实机验证数据**（修复后）：
+**实机验证数据**（修复后；acp_status 自 v0.2.2 起为上游对齐格式——CONTEXT BREAKDOWN 占可见总量、无窗口行，见 docs/acp-status-align-design.md）：
 
 ```
 compress({ startSeq: 64757, endSeq: 265056, ... })
 → Compressed 1 block(s), ~139200 tokens reclaimed. block 9458eab3, 583 messages shadowed
-→ acp_status: blocks: 16 | tokens compressed: 145305 | estimated context: 26165 / 128000 (20%)
+→ acp_status: CONTEXT BREAKDOWN ... | COMPRESSED BLOCKS — 16 active ... | Nudge: idle/ACTIVE — reason
 ```
 
-一次压缩回收 **~13.9 万 tokens**，上下文 **129% → 20%**，模型自述"当前摘要块里完整保留了所有关键信息（提交历史、代码架构、mask 编码、本地化、测试命令、点击问题结论），后续任何需求都能无缝接续"——ACP 闭环在真实长会话中完整走通。
+一次压缩回收 **~13.9 万 tokens**，模型自述"当前摘要块里完整保留了所有关键信息（提交历史、代码架构、mask 编码、本地化、测试命令、点击问题结论），后续任何需求都能无缝接续"——ACP 闭环在真实长会话中完整走通。
+
+**issue #18 修复实机验证**（2026-08-17，v0.2.1，PR #21 `c1d4045`，DSH web profile 符号链接直连 worktree 构建，重启加载）：
+
+- **deferred pair-hide 落库序列**（逐事件核对会话日志）：`assistant/message(compress 调用) → tool/result 落地 → compaction/prune shadowedSeqs=[callSeq,resultSeq] → user/message surfaceOp replace（携带 compress 结果文本，sourceEventSeqs=[callSeq,resultSeq]）`——隐藏发生在 `tool/result` 之后的微任务（修复 A：`deferCompressPairHide`），监听内不再同步 append；compress 后每一轮请求正常，无 400。
+- **nudge 范围表恢复真实数字**：把 profile `cordis.patch.yml` 的 `nudgeMaxContextLimitPct` 临时调低到 0.03（配 `nudgeMinContextLimitPct: 0.02`），nudge 在 ~5% 压力下于下一 pre-step 立即触发（证明 profile 补丁被 HMR 热重载、无需重启；重启后 growth 基线清零，只有阈值降低能触发）。范围表显示真实大小：
+  `Surface: 143 nodes, seqs 82609..204994; ranges: seq 143804..196596 — 111 messages, ~37634 tokens; seq 197852..203758 — 21 messages, ~5018 tokens`
+  ——issue #18 的 "~28 tokens" 死值消失（修复 8 的 `buildCompressibleSeqRanges` 实机输出真实范围）；大范围把旧 compress 对（surface 相邻健康对）正常纳入，不再整段 reject。测完已恢复 `0.5`。
 
 **关键教训**：`acp-kernel` 的 ref 映射在**经过 surface 替换（压缩）的超长会话**中会漂移（范围表出现 `end < start` 的乱序段、大工具结果拿不到 ref）。任何依赖 kernel `compressibleRanges` 的宿主侧逻辑都应**从 surface 自算兜底**——这是移植中最值得记住的一课。
+
+> **`UPSTREAM:` workaround 追踪（AGENTS.md design decision 7 / rule 11）**——上述"从 surface 自算范围表"（`buildCompressibleSeqRanges`）是对 kernel ref-map 漂移缺陷的**临时宿主侧绕行**，不是长期架构。按 rule 11，该缺陷的最终修复属于上游 acp-kernel（issue + PR）；**每次 kernel bump 时检查漂移是否已在上游修复，若已修复则删除 `buildCompressibleSeqRanges` 自算逻辑、改回 kernel `compressibleRanges`**（AGENTS.md §4b hot-spot 第 3 条已同步此检查项）。当前上游状态：漂移未确认修复；本项目追踪 issue #38（含完整机制分析 + 上游修复候选方向）。

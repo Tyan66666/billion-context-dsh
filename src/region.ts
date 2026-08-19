@@ -19,15 +19,17 @@ import {
   toolPairingBalancedAfter,
   toolPairingBalancedBefore,
 } from '@deepseek-ai/dsh-compaction'
-import { createUserMessage, type ContentBlock } from '@deepseek-ai/dsh-llm'
+import { createAssistantMessage, createUserMessage, type ContentBlock } from '@deepseek-ai/dsh-llm'
 import { defaultCountTokens } from 'acp-kernel'
-import { extractEventText, extractText } from './messages.ts'
+import { extractEventText, extractText, toolCallIdOfResultEvent } from './messages.ts'
 
 /** One durable ACP block as rebuilt from the session log. */
 export interface AcpBlockLedgerEntry {
   /** The compaction transaction id (stable block identity). */
   readonly blockId: string
   readonly summary: string
+  /** The block's short label (kernel `CompressionBlock.topic`), when the compress request carried one. */
+  readonly topic?: string
   readonly shadowedSeqs: readonly number[]
   readonly shadowedTokenCount: number
   readonly start: number
@@ -309,6 +311,8 @@ export interface CompactionTransactionInput {
   readonly shadowedTokenCount: number
   readonly provider: string
   readonly model: string
+  /** Short block label (kernel `CompressionBlock.topic`) — persisted so a restarted engine rehydrates it. */
+  readonly topic?: string
   /** Compression tier of this block (default 1). */
   readonly tier?: 1 | 2 | 3
   /** The acp-kernel block id (`bN`) created by the kernel for this transaction. */
@@ -328,6 +332,8 @@ export interface CompactionTransactionInput {
 export interface AcpCompactionSummaryFields {
   /** Compression tier (1/2/3) — 1 = message range, 2 = distills tier-1, 3 = distills tier-2. */
   readonly tier?: 1 | 2 | 3
+  /** Short block label (kernel `CompressionBlock.topic`) — the acp_status block title. */
+  readonly topic?: string
   /** The acp-kernel block id (`bN`) created for this transaction. */
   readonly kernelBlockId?: string
   /** Durable compaction ids of the blocks distilled into this one. */
@@ -373,6 +379,7 @@ export function runCompactionTransaction(
     model: input.model,
     tier: input.tier ?? 1,
     ...(input.kernelBlockId === undefined ? {} : { kernelBlockId: input.kernelBlockId }),
+    ...(input.topic === undefined ? {} : { topic: input.topic }),
     ...(input.parentBlockIds === undefined || input.parentBlockIds.length === 0
       ? {}
       : { parentBlockIds: [...input.parentBlockIds] }),
@@ -428,6 +435,7 @@ export function rebuildBlockLedger(events: readonly SessionEvent[]): AcpBlockLed
     ledger.push({
       blockId: data.compactionId,
       summary: extractText(data.summary),
+      ...(typeof data.topic === 'string' ? { topic: data.topic } : {}),
       shadowedSeqs: [...data.shadowedSeqs],
       shadowedTokenCount,
       start: data.shadowedRange.start,
@@ -450,6 +458,16 @@ export interface SeqCompressibleRange {
   readonly end: number
   readonly count: number
   readonly tokens: number
+  /** Share of messages that are tool messages (tool-call or tool-result), 0-100 — kernel `toolPct` parity. */
+  readonly toolPct: number
+}
+
+/** Whether a surface message event is a tool message (tool-call or tool-result) — kernel `isToolMessage` parity. */
+function isToolEvent(event: SessionEvent): boolean {
+  if (event.type === 'tool/result') return true
+  if (event.type !== 'assistant/message') return false
+  const content = (event.data as { message?: { content?: unknown } }).message?.content
+  return Array.isArray(content) && content.some((block) => (block as { type?: unknown })?.type === 'tool-call')
 }
 
 /** Whether a surface user message is a compaction checkpoint node (already compressed). */
@@ -459,22 +477,308 @@ function isCheckpointNode(event: SessionEvent): boolean {
   return source?.plugin === 'compact'
 }
 
+/** Tool-call ids carried by one assistant surface message. */
+function toolCallIdsOfEvent(event: SessionEvent): string[] {
+  if (event.type !== 'assistant/message') return []
+  const content = (event.data as { message?: { content?: unknown } }).message?.content
+  if (!Array.isArray(content)) return []
+  const ids: string[] = []
+  for (const block of content) {
+    if (block === null || typeof block !== 'object') continue
+    const b = block as { type?: unknown; id?: unknown }
+    if (b.type === 'tool-call' && typeof b.id === 'string') ids.push(b.id)
+  }
+  return ids
+}
+
+/**
+ * Provider/model to stamp on a synthetic empty assistant pruning node.
+ */
+function assistantProviderModel(event: SessionEvent): { provider: string; model: string } {
+  if (event.type === 'assistant/message') {
+    const message = (event.data as { message?: { source?: { provider?: unknown; model?: unknown } } }).message
+    return {
+      provider: typeof message?.source?.provider === 'string' ? message.source.provider : 'billion-context-dsh',
+      model: typeof message?.source?.model === 'string' ? message.source.model : 'surface-prune',
+    }
+  }
+  return { provider: 'billion-context-dsh', model: 'surface-prune' }
+}
+
+/**
+ * Durable model-free prune: append `compaction/prune` as the shadow price, then
+ * replace the given surface seqs with either a user message carrying `text`
+ * (used for compress call/result hiding, so the model still sees the tool
+ * outcome) or an EMPTY assistant message (used for orphan cleanup, which DSH
+ * derives to nothing). The originals remain in the append-only log.
+ */
+function hideSurfaceSeqs(
+  session: Session,
+  seqs: readonly number[],
+  provider: string,
+  model: string,
+  text?: string,
+): void {
+  if (seqs.length === 0) return
+  const start = seqs[0]!
+  const end = seqs[seqs.length - 1]!
+  let shadowedTokenCount = 0
+  for (const seq of seqs) {
+    const event = session.events[seq]
+    if (event !== undefined) shadowedTokenCount += defaultCountTokens(extractEventText(event))
+  }
+  session.append('compaction/prune', {
+    shadowedRange: { start, end },
+    shadowedSeqs: [...seqs],
+    shadowedTokenCount,
+  })
+  if (text !== undefined) {
+    session.append('user/message', createUserMessage({
+      content: [{ type: 'text', text }],
+      source: { kind: 'plugin', plugin: 'billion-context-dsh' },
+    }), {
+      surfaceOp: { op: 'replace', start, end },
+      sourceEventSeqs: [...seqs],
+    })
+    return
+  }
+  session.append('assistant/message', {
+    turn: findOpenTurn(session.events) ?? 0,
+    step: 0,
+    message: createAssistantMessage({ content: [], source: { provider, model } }),
+  }, {
+    surfaceOp: { op: 'replace', start, end },
+    sourceEventSeqs: [...seqs],
+  })
+}
+
+/**
+ * Hide one successful `compress` tool's call/result pair after its tool/result
+ * has been logged. The durable compaction summary is inserted BEFORE the
+ * current tool result (the compress tool runs mid-turn), so leaving the pair on
+ * the surface would produce `assistant(tool_calls) → user(summary) →
+ * tool(result)` — rejected by strict providers. Replacing both nodes with a
+ * plain user message (the result text) removes the pair from the derived
+ * surface without touching the compaction block.
+ */
+export function hideCompressToolPair(session: Session, callId: string, resultSeq?: number): boolean {
+  let callSeq: number | null = null
+  for (const event of session.events) {
+    if (event.type !== 'assistant/message') continue
+    if (toolCallIdsOfEvent(event).includes(callId)) {
+      callSeq = event.seq
+      break
+    }
+  }
+  if (callSeq === null) return false
+  // Only hide a node that carries EXACTLY the compress call. Hiding a
+  // multi-call node replaces the whole assistant message, which would orphan
+  // the sibling calls' results (their call ids vanish with the node).
+  const callNodeIds = toolCallIdsOfEvent(session.events[callSeq]!)
+  if (callNodeIds.length !== 1 || callNodeIds[0] !== callId) return false
+  let resolvedResultSeq = resultSeq ?? null
+  if (resolvedResultSeq === null) {
+    for (const event of session.events) {
+      if (event.type === 'tool/result' && toolCallIdOfResultEvent(event) === callId) {
+        resolvedResultSeq = event.seq
+        break
+      }
+    }
+  }
+  if (resolvedResultSeq === null) return false
+  const nodes = session.surface.nodes
+  const startIdx = nodes.indexOf(callSeq)
+  const endIdx = nodes.indexOf(resolvedResultSeq)
+  // Only hide an actually adjacent pair; never shadow unrelated messages that
+  // happen to sit between a stale call and result.
+  if (startIdx < 0 || endIdx < 0 || endIdx - startIdx !== 1) return false
+  const { provider, model } = assistantProviderModel(session.events[callSeq]!)
+  const resultEvent = session.events[resolvedResultSeq]
+  const resultText = resultEvent === undefined ? '' : extractEventText(resultEvent)
+  hideSurfaceSeqs(session, [callSeq, resolvedResultSeq], provider, model, resultText.trim().length > 0 ? resultText : undefined)
+  return true
+}
+
+/**
+ * Surface-level orphan cleanup: hide tool/result nodes with no matching call,
+ * assistant tool-call nodes whose calls all lack results, and "broken pairs"
+ * whose result is NOT adjacent to the call node on the surface (a
+ * non-tool/result node — typically the compaction summary a buggy older
+ * version inserted between a compress call and its result — sits between
+ * them). A single orphan result corrupts the whole tool-pairing balance cache
+ * (every range resolve throws), orphan calls fragment large ranges into tiny
+ * uncompressed fragments, and a broken pair cannot serialize for strict
+ * providers — the mechanisms behind issue #18's "only ~28 tokens visible".
+ * Uses the same durable prune protocol as `hideSurfaceSeqs`, so the removed
+ * nodes stay recoverable from the append-only log.
+ */
+export function stripOrphanedSurfaceToolMessages(
+  session: Session,
+  inFlightCallIds: ReadonlySet<string> = new Set(),
+): number {
+  const nodes = session.surface.nodes
+  const callIdsBySeq = new Map<number, string[]>()
+  // callId -> surface position of the assistant node carrying it, for calls
+  // whose result has not been decided yet.
+  const open = new Map<string, { seq: number; index: number }>()
+  const orphanResultSeqs: number[] = []
+  // result seq -> call node seq, for pairs whose result landed but is not
+  // adjacent to the call node on the surface.
+  const brokenResults = new Map<number, number>()
+  for (let index = 0; index < nodes.length; index += 1) {
+    const seq = nodes[index]!
+    const event = session.events[seq]
+    if (event === undefined) continue
+    if (event.type === 'assistant/message') {
+      const ids = toolCallIdsOfEvent(event)
+      if (ids.length === 0) continue
+      callIdsBySeq.set(seq, ids)
+      for (const id of ids) {
+        if (!open.has(id)) open.set(id, { seq, index })
+      }
+    } else if (event.type === 'tool/result') {
+      const id = toolCallIdOfResultEvent(event)
+      if (id === null) continue
+      const call = open.get(id)
+      if (call === undefined) {
+        orphanResultSeqs.push(seq)
+        continue
+      }
+      // A pair is healthy only when every node between the call and this
+      // result is a tool/result of the SAME call node (multi-call messages).
+      // Any other node in between makes the pair unserializable for strict
+      // providers: prune both ends.
+      const callNodeIds = callIdsBySeq.get(call.seq)
+      let adjacent = false
+      if (callNodeIds !== undefined) {
+        adjacent = true
+        for (let mid = call.index + 1; mid < index; mid += 1) {
+          const midEvent = session.events[nodes[mid]!]
+          if (midEvent === undefined || midEvent.type !== 'tool/result') {
+            adjacent = false
+            break
+          }
+          const midId = toolCallIdOfResultEvent(midEvent)
+          if (midId === null || !callNodeIds.includes(midId)) {
+            adjacent = false
+            break
+          }
+        }
+      }
+      open.delete(id)
+      if (!adjacent) brokenResults.set(seq, call.seq)
+    }
+  }
+  // call node seq -> ids of that node whose result is broken (non-adjacent).
+  const brokenIdsByCallSeq = new Map<number, string[]>()
+  for (const [resultSeq, callSeq] of brokenResults) {
+    const id = toolCallIdOfResultEvent(session.events[resultSeq]!)
+    if (id !== null) {
+      const list = brokenIdsByCallSeq.get(callSeq) ?? []
+      list.push(id)
+      brokenIdsByCallSeq.set(callSeq, list)
+    }
+  }
+  const hiddenSet = new Set<number>(orphanResultSeqs)
+  for (const resultSeq of brokenResults.keys()) hiddenSet.add(resultSeq)
+  for (const [callSeq, ids] of callIdsBySeq) {
+    const brokenIds = brokenIdsByCallSeq.get(callSeq)
+    // Only hide an assistant node when NONE of its calls are usable: every id
+    // must lack a result (open) or have a broken result. A mixed node (some
+    // healthy results) must stay so its valid results are not orphaned by
+    // hiding the call — and a node carrying an in-flight call can never be
+    // pruned, or the pending result lands orphaned.
+    const allUnpaired = !ids.some((candidate) => inFlightCallIds.has(candidate))
+      && ids.every((candidate) => open.has(candidate) || brokenIds?.includes(candidate) === true)
+    if (allUnpaired) hiddenSet.add(callSeq)
+  }
+  const hidden = [...hiddenSet].sort((a, b) => a - b)
+  let count = 0
+  for (const seq of hidden) {
+    const event = session.events[seq]
+    if (event === undefined) continue
+    const { provider, model } = assistantProviderModel(event)
+    hideSurfaceSeqs(session, [seq], provider, model)
+    count += 1
+  }
+  return count
+}
+
+/**
+ * All tool-call ids currently visible on the surface with no matching
+ * tool/result yet — the in-flight calls of the current step. Sibling tools
+ * called in the same assistant message as `compress` are in-flight too, so
+ * `handleCompress` must protect the whole set (not just its own call id) or
+ * the sibling call would be pruned as an orphan and its result would land
+ * orphaned (HTTP 400 until the next cleanup).
+ */
+export function openToolCallIds(session: Session): Set<string> {
+  const open = new Set<string>()
+  for (const seq of session.surface.nodes) {
+    const event = session.events[seq]
+    if (event === undefined) continue
+    if (event.type === 'assistant/message') {
+      for (const id of toolCallIdsOfEvent(event)) open.add(id)
+    } else if (event.type === 'tool/result') {
+      const id = toolCallIdOfResultEvent(event)
+      if (id !== null) open.delete(id)
+    }
+  }
+  return open
+}
+
+/**
+ * Schedule `hideCompressToolPair` on the microtask queue. `session.append`
+ * is NOT reentrant: running it synchronously inside a `session/event`
+ * listener (while the outer append is still publishing) throws "session
+ * append cannot reenter while another append is being published" on live,
+ * store-attached sessions, and the dispatcher silently swallows the error —
+ * so a synchronous hide is a silent no-op in production. A microtask drains
+ * after the current append fully publishes and before the agent loop resumes,
+ * so the pair is hidden before the next request is built.
+ */
+export function deferCompressPairHide(
+  session: Session,
+  callId: string,
+  resultSeq: number,
+  onError?: (error: unknown) => void,
+): void {
+  queueMicrotask(() => {
+    try {
+      hideCompressToolPair(session, callId, resultSeq)
+    } catch (error) {
+      onError?.(error)
+    }
+  })
+}
+
 /**
  * Compute compressible spans directly from the surface — independent of the
  * kernel's ref map, which can drift after surface replacements in long
  * sessions and hide large tool results from the nudge range table. Skips the
  * recent protected tail, the last user message, and compaction checkpoints;
- * edges are then balanced through resolveSurfaceRange. Ranges are ordered by
- * size (largest reclaimed first).
+ * edges are then balanced through resolveSurfaceRange. Ranges are ordered
+ * oldest-first (stable across turns — matches the kernel's `oldest first`).
+ * UPSTREAM: this self-computation is a labeled workaround for kernel
+ * ref-map drift after surface replacements (AGENTS.md rule 11) — drop it and
+ * use kernel compressibleRanges once the drift is fixed upstream.
  */
 export function buildCompressibleSeqRanges(
   session: Session,
   opts: { preserveRecent?: number } = {},
 ): SeqCompressibleRange[] {
+  // Orphan tool messages corrupt the pairing balance cache and fragment every
+  // large span. Prune them before scanning so the range table reflects the
+  // actually compressible surface (issue #18).
+  stripOrphanedSurfaceToolMessages(session)
   const nodes = session.surface.nodes
   const preserve = opts.preserveRecent ?? 5
   const protectedSeqs = new Set<number>()
-  for (const seq of nodes.slice(-preserve)) protectedSeqs.add(seq)
+  // `nodes.slice(-preserve)` would protect EVERYTHING when preserve is 0
+  // (`slice(-0) === slice(0)`) — guard so 0 means "no recent protection".
+  if (preserve > 0) {
+    for (const seq of nodes.slice(-preserve)) protectedSeqs.add(seq)
+  }
   for (let index = nodes.length - 1; index >= 0; index -= 1) {
     const event = session.events[nodes[index]!]
     if (event?.type === 'user/message' && !isCheckpointNode(event)) {
@@ -482,8 +786,8 @@ export function buildCompressibleSeqRanges(
       break
     }
   }
-  const raw: SeqCompressibleRange[] = []
-  let cur: SeqCompressibleRange | null = null
+  const raw: Array<{ start: number; end: number; count: number; tokens: number; toolCount: number }> = []
+  let cur: { start: number; end: number; count: number; tokens: number; toolCount: number } | null = null
   const flush = (): void => {
     if (cur !== null) raw.push(cur)
     cur = null
@@ -503,10 +807,11 @@ export function buildCompressibleSeqRanges(
       cur = null
     }
     const tokens = defaultCountTokens(extractEventText(event))
+    const isTool = isToolEvent(event)
     if (cur === null) {
-      cur = { start: seq, end: seq, count: 1, tokens }
+      cur = { start: seq, end: seq, count: 1, tokens, toolCount: isTool ? 1 : 0 }
     } else {
-      cur = { start: cur.start, end: seq, count: cur.count + 1, tokens: cur.tokens + tokens }
+      cur = { start: cur.start, end: seq, count: cur.count + 1, tokens: cur.tokens + tokens, toolCount: cur.toolCount + (isTool ? 1 : 0) }
     }
   }
   flush()
@@ -515,12 +820,22 @@ export function buildCompressibleSeqRanges(
     try {
       const { start, end } = resolveSurfaceRange(session, range.start, range.end)
       const count = range.count
-      out.push({ start, end, count, tokens: range.tokens })
+      out.push({
+        start,
+        end,
+        count,
+        tokens: range.tokens,
+        toolPct: count > 0 ? Math.round((range.toolCount / count) * 100) : 0,
+      })
     } catch {
       // Cannot be balanced into a compressible span — skip.
     }
   }
-  return out.sort((a, b) => b.tokens - a.tokens)
+  // Oldest-first: the order is stable across turns (the oldest ranges do not
+  // move as new messages land), so the model can consume ranges front-to-back
+  // without re-ranking each nudge — matching the kernel's `oldest first` list
+  // and the host's own front-to-back compression rhythm.
+  return out.sort((a, b) => a.start - b.start)
 }
 
 /**
@@ -535,8 +850,15 @@ export function buildCompressibleSeqRanges(
 export function surfaceSummary(session: Session): string {
   const nodes = session.surface.nodes
   if (nodes.length === 0) return 'empty'
-  const first = nodes[0]!
-  const last = nodes[nodes.length - 1]!
+  // Surface nodes are NOT guaranteed to be ordered: a compaction replace lands
+  // the checkpoint node first, so [15, 6, 7, …]. Report the span as min..max
+  // rather than first..last, which would read "seqs 15..12" after a compress.
+  let first = nodes[0]!
+  let last = nodes[0]!
+  for (const seq of nodes) {
+    if (seq < first) first = seq
+    if (seq > last) last = seq
+  }
   return `${nodes.length} nodes, seqs ${first}..${last}`
 }
 
@@ -620,6 +942,20 @@ export function compactionIdsOfKernelBlocks(session: Session, kernelBlockIds: re
   return kernelBlockIds
     .map((id) => byKernel.get(id))
     .filter((id): id is string => id !== undefined)
+}
+
+/**
+ * Resolve a kernel block ref (`bN`) — as shown by the model tool `acp_status`
+ * (kernel `buildStatusReport` renders `block.blockId`) — to the durable
+ * compaction id the decompress/search tools accept. Returns null when `bN` is
+ * not an exact registry key (unknown ref). Only matches the canonical `bN`
+ * form (`/^b\d+$/`); anything else is not a kernel ref and returns null so the
+ * caller falls back to its compaction-id prefix match.
+ */
+export function blockIdOfKernelRef(session: Session, kernelRef: string): string | null {
+  if (!/^b\d+$/.test(kernelRef)) return null
+  const entry = blockRegistry(session).find((r) => r.kernelBlockId === kernelRef)
+  return entry?.blockId ?? null
 }
 
 /** The checkpoint summary seq of an ACTIVE kernel block (`bN`), or null. */
