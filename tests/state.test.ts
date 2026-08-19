@@ -98,3 +98,33 @@ test('M2: rehydrated blocks stay anchorable — tier 3 works after a restart', a
   assert.deepEqual(after[2]!.parentBlockIds, [ledger2[1]!.blockId])
   assert.equal(after[2]!.kernelBlockId, 'b3', 'the post-restart kernel block id is recorded too')
 })
+
+test('M2: block topic persists through the log — the acp_status block title survives a restart', async () => {
+  const env = makeEnv()
+  const session = buildTextSession(12)
+  const compress = toolOf(env, 'compress')
+  await compress.execute({
+    content: [{ startSeq: 1, endSeq: 5, summary: TIER_SUMMARY, topic: 'auth subsystem' }],
+  } as never, fakeExec(session))
+
+  // The durable compaction/summary event and the log-rebuilt ledger carry the topic.
+  const ledger = rebuildBlockLedger(session.events)
+  assert.equal(ledger[0]!.topic, 'auth subsystem')
+
+  // A FRESH store (restarted engine) rehydrates the kernel block WITH the
+  // topic, so buildStatusReport's `block.topic` block-title row survives.
+  const fresh = new AcpStateStore()
+  const state = fresh.stateFor(session)
+  assert.equal(state.blocks[0]!.topic, 'auth subsystem')
+
+  // Optional semantics: a compress without topic records no topic field, and
+  // the rehydrated block has none (kernel renders "(no topic)" — unchanged).
+  const plain = buildTextSession(12)
+  await toolOf(env, 'compress').execute({
+    content: [{ startSeq: 1, endSeq: 5, summary: TIER_SUMMARY }],
+  } as never, fakeExec(plain))
+  const plainLedger = rebuildBlockLedger(plain.events)
+  assert.equal(plainLedger[0]!.topic, undefined)
+  const plainState = new AcpStateStore().stateFor(plain)
+  assert.equal(plainState.blocks[0]!.topic, undefined)
+})

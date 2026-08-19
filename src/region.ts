@@ -28,6 +28,8 @@ export interface AcpBlockLedgerEntry {
   /** The compaction transaction id (stable block identity). */
   readonly blockId: string
   readonly summary: string
+  /** The block's short label (kernel `CompressionBlock.topic`), when the compress request carried one. */
+  readonly topic?: string
   readonly shadowedSeqs: readonly number[]
   readonly shadowedTokenCount: number
   readonly start: number
@@ -309,6 +311,8 @@ export interface CompactionTransactionInput {
   readonly shadowedTokenCount: number
   readonly provider: string
   readonly model: string
+  /** Short block label (kernel `CompressionBlock.topic`) — persisted so a restarted engine rehydrates it. */
+  readonly topic?: string
   /** Compression tier of this block (default 1). */
   readonly tier?: 1 | 2 | 3
   /** The acp-kernel block id (`bN`) created by the kernel for this transaction. */
@@ -328,6 +332,8 @@ export interface CompactionTransactionInput {
 export interface AcpCompactionSummaryFields {
   /** Compression tier (1/2/3) — 1 = message range, 2 = distills tier-1, 3 = distills tier-2. */
   readonly tier?: 1 | 2 | 3
+  /** Short block label (kernel `CompressionBlock.topic`) — the acp_status block title. */
+  readonly topic?: string
   /** The acp-kernel block id (`bN`) created for this transaction. */
   readonly kernelBlockId?: string
   /** Durable compaction ids of the blocks distilled into this one. */
@@ -373,6 +379,7 @@ export function runCompactionTransaction(
     model: input.model,
     tier: input.tier ?? 1,
     ...(input.kernelBlockId === undefined ? {} : { kernelBlockId: input.kernelBlockId }),
+    ...(input.topic === undefined ? {} : { topic: input.topic }),
     ...(input.parentBlockIds === undefined || input.parentBlockIds.length === 0
       ? {}
       : { parentBlockIds: [...input.parentBlockIds] }),
@@ -428,6 +435,7 @@ export function rebuildBlockLedger(events: readonly SessionEvent[]): AcpBlockLed
     ledger.push({
       blockId: data.compactionId,
       summary: extractText(data.summary),
+      ...(typeof data.topic === 'string' ? { topic: data.topic } : {}),
       shadowedSeqs: [...data.shadowedSeqs],
       shadowedTokenCount,
       start: data.shadowedRange.start,

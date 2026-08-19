@@ -71,6 +71,7 @@ function rebuildKernelBlocks(events: readonly SessionEvent[]): CompressionBlock[
       runId: `r${blocks.length + 1}`,
       tier: entry.tier,
       summary: entry.summary,
+      ...(entry.topic === undefined ? {} : { topic: entry.topic }),
       directMessageIds: [...direct],
       effectiveMessageIds: [...effective],
       directBlockIds: parentKernelIds.get(entry.blockId) ?? [],
