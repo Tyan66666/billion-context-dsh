@@ -8,6 +8,7 @@ import type { CommandDefinition } from '@deepseek-ai/dsh-commands'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { ToolEnvironment } from './tools.ts'
 import { resolveTokenCount } from './nudge.ts'
+import { kernelConfigFor } from './config.ts'
 import {
   blockIdOfKernelRef,
   blockRefForSummarySeq,
@@ -17,7 +18,7 @@ import {
   runCompactionTransaction,
   shadowedSeqsOf,
 } from './region.ts'
-import { eventsToCoreMessages, extractEventText, surfaceEventsOf } from './messages.ts'
+import { allLogMessages, eventsToCoreMessages, extractEventText, surfaceEventsOf } from './messages.ts'
 import { defaultConfig, defaultCountTokens } from 'acp-kernel'
 import { windowSourceLabel } from './window.ts'
 
@@ -25,8 +26,11 @@ async function statusText(env: ToolEnvironment, agent: Agent): Promise<string> {
   const session = agent.session
   const ledger = rebuildBlockLedger(session.events)
   const totalTokens = ledger.reduce((sum, block) => sum + block.shadowedTokenCount, 0)
-  const coreMessages = eventsToCoreMessages(surfaceEventsOf(session))
-  const estimated = resolveTokenCount(agent, coreMessages)
+  // Full log for the kernel (so block anchors survive — same input as the
+  // nudge path); the measured token count stays a SURFACE measurement.
+  const coreMessages = allLogMessages(session)
+  const surfaceMessages = eventsToCoreMessages(surfaceEventsOf(session))
+  const estimated = resolveTokenCount(agent, surfaceMessages)
   const window = env.windowFor === undefined
     ? { limit: env.modelContextLimit, source: 'explicit' as const }
     : await env.windowFor(agent)
@@ -38,6 +42,21 @@ async function statusText(env: ToolEnvironment, agent: Agent): Promise<string> {
     `  estimated context: ${estimated} / ${limit} (${Math.round((estimated / limit) * 100)}%)`,
     `  context window: ${limit} (${windowSourceLabel(window)})`,
   ]
+  // Nudge arbitration on the SAME inputs the nudge path uses — a read-only
+  // diagnostic, so run on a cloned state and never write it back to the store.
+  const state = structuredClone(env.store.stateFor(session))
+  const config = kernelConfigFor({ ...env, modelContextLimit: limit })
+  const turn = env.kernel.processTurn({ messages: coreMessages, state, config, tokenCount: estimated })
+  const nudge = turn.nudge
+  if (nudge !== undefined) {
+    const label = nudge.shouldInject ? (nudge.tier !== null ? `ACTIVE [T${nudge.tier}]` : 'ACTIVE') : 'idle'
+    lines.push(`  nudge: ${label} — ${nudge.reason}`)
+    if (!nudge.shouldInject) {
+      const maxPct = config.nudge.maxContextLimitPct
+      const toNudge = Math.max(0, Math.round(maxPct * limit - estimated))
+      lines.push(`  next nudge: ~${toNudge.toLocaleString()} tokens to go (usage ${Math.round(nudge.contextUsage * 100)}% → ${Math.round(maxPct * 100)}% line)`)
+    }
+  }
   for (const block of ledger.slice(0, 10)) {
     const tier = block.tier > 1 ? ` [T${block.tier}]` : ''
     lines.push(`  - ${block.blockId.slice(0, 8)}${tier}: seqs ${block.start}..${block.end} — ${block.summary.slice(0, 80)}`)
