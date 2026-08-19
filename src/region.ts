@@ -763,7 +763,6 @@ export function deferCompressPairHide(
  * ref-map drift after surface replacements (AGENTS.md rule 11) — drop it and
  * use kernel compressibleRanges once the drift is fixed upstream.
  */
- */
 export function buildCompressibleSeqRanges(
   session: Session,
   opts: { preserveRecent?: number } = {},

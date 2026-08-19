@@ -173,4 +173,4 @@ compress({ startSeq: 64757, endSeq: 265056, ... })
 
 **关键教训**：`acp-kernel` 的 ref 映射在**经过 surface 替换（压缩）的超长会话**中会漂移（范围表出现 `end < start` 的乱序段、大工具结果拿不到 ref）。任何依赖 kernel `compressibleRanges` 的宿主侧逻辑都应**从 surface 自算兜底**——这是移植中最值得记住的一课。
 
-> **`UPSTREAM:` workaround 追踪（AGENTS.md design decision 7 / rule 11）**——上述"从 surface 自算范围表"（`buildCompressibleSeqRanges`）是对 kernel ref-map 漂移缺陷的**临时宿主侧绕行**，不是长期架构。按 rule 11，该缺陷的最终修复属于上游 acp-kernel（issue + PR）；**每次 kernel bump 时检查漂移是否已在上游修复，若已修复则删除 `buildCompressibleSeqRanges` 自算逻辑、改回 kernel `compressibleRanges`**（AGENTS.md §4b hot-spot 第 3 条已同步此检查项）。当前上游状态：待提交 issue（漂移未确认修复）。
+> **`UPSTREAM:` workaround 追踪（AGENTS.md design decision 7 / rule 11）**——上述"从 surface 自算范围表"（`buildCompressibleSeqRanges`）是对 kernel ref-map 漂移缺陷的**临时宿主侧绕行**，不是长期架构。按 rule 11，该缺陷的最终修复属于上游 acp-kernel（issue + PR）；**每次 kernel bump 时检查漂移是否已在上游修复，若已修复则删除 `buildCompressibleSeqRanges` 自算逻辑、改回 kernel `compressibleRanges`**（AGENTS.md §4b hot-spot 第 3 条已同步此检查项）。当前上游状态：漂移未确认修复；本项目追踪 issue #38（含完整机制分析 + 上游修复候选方向）。
