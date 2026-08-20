@@ -52,9 +52,27 @@ billion-context-dsh 目前是**会话内**上下文管理:模型通过 compress 
 └──────────────────────────────────────────────┘
 ```
 
-## 3. 写入路径
+## 3. 写入路径(双路径:压缩块沉淀 + nudge 表态提取)
 
-### 3.1 `memory_commit` 工具(模型侧,纯意图表达)
+### 3.0 核心认知:压缩块本身就是长期记忆候选
+
+每次 compress 生成的 tier-1 块(b1)摘要本身就是适合长期存储的内容——记忆沉淀 = 压缩的自然副产物,不是另起炉灶的独立系统。
+
+**路径 A(默认,零额外开销):压缩块即记忆候选**——引擎把符合条件的块(如蒸馏到 tier-2/3 的稳定摘要)自动归档进记忆库,不需要模型额外表态。
+
+**路径 B(模型显式表态):nudge 挂钩 + fork 提取**——模型判断"这段有压缩块覆盖不到但值得跨会话记住的内容"时,走本路径(见下)。
+
+### 3.1 三工具权限分离(用户定稿)
+
+| 工具 | 谁可见 | 干什么 |
+|---|---|---|
+| `memory_commit(type, note)` | **主对话** | 表态"这段值得记"(type 枚举 + note 聚焦提示);不写内容 |
+| `memory_recall(query)` | **主对话** | 读回:检索记忆库取全文(见 §5) |
+| `memory_write(content)` | **仅 fork 会话** | 真正写记忆库;**主对话物理上无写权限** |
+
+主对话只有"请求写"的能力、没有"写"的能力——写记忆库只能通过 fork 会话的 memory_write 完成,权限天然隔离(fork = 带 memory_write 工具定义的一次性 LLM 调用,宿主把工具输出落库)。
+
+### 3.2 `memory_commit` 工具(主对话侧,纯意图表达)
 
 - **语义**:nudge 时模型觉得有值得跨会话保留的内容 → 调用本工具**表态**(不写内容,写内容由 fork 完成)。
 - **参数**:
@@ -62,17 +80,18 @@ billion-context-dsh 目前是**会话内**上下文管理:模型通过 compress 
   - `note`:可选,一句话聚焦提示(如"关于 session.append 可重入的教训"),帮助提取定向。
 - **negative constraints(待定 T1)**:提示词需写"何时**不要**调用"(代码模式、临时任务状态、已在会话内的内容)——实现时补。
 
-### 3.2 一次性 LLM 调用(引擎侧,替代 fork 子对话)
+### 3.3 一次性 LLM 调用(引擎侧,fork 会话)
 
 **用户决策**:DSH 用**一次性 LLM 调用**即可,不需要真正的子对话/fork 会话。
 
-- 引擎收到 `memory_commit` → 发起一次独立 LLM 调用:
-  - 输入 = 当前完整对话文本(与主对话 surface 一致)+ 插入指令"提取目前需要的记忆,重点关于:X"(同模型,prefix cache 可命中);
-  - 输出 = 记忆条目正文(精炼态、自包含陈述句);
+- 引擎收到 `memory_commit` → 发起一次独立 LLM 调用(fork):
+  - 输入 = 当前完整对话文本(与主对话 surface 一致)+ 插入指令"提取目前需要的记忆,重点:{note}"(同模型,prefix cache 可命中);
+  - 工具面 = 仅暴露 `memory_write`(写记忆库)+ 只读工具;
+  - 输出 = 模型调用 `memory_write(content)`,宿主把提炼结果(精炼态、自包含陈述句)落库;
 - **一次性**:无会话状态、无归档/删除需求、不占常驻资源(对比 Claude Code runForkedAgent 是完整 fork 会话——我们对齐其缓存命中的好处,但免除会话生命周期管理);
 - **fire-and-forget**:不阻塞主对话;返回"后台已写入"(话术待定 T2)。
 
-### 3.3 记忆条目格式
+### 3.4 记忆条目格式
 
 ```
 标题(一行,自包含)
@@ -155,13 +174,15 @@ score = importance + min(days_since_last_read / 30, 5) + uniform(0, 0.5)
 | **memory_recall 检索算法** | kernel 已有 `searchBlocks` hybrid(MRR 0.898)——扩展它搜记忆库是 kernel 的事(报告 P1-5 语义检索走 upstream 同方向) |
 | **记忆库数据结构**(若复用 blocks/refs 概念) | 块/ref 管理是 kernel 拥有的 |
 | **nudge 记忆提示文案**("有稳定结论→memory_commit") | 规则 9:kernel owns the prompt/format——nudge 文案属 kernel `renderNudgeText`(或经 config.prompts 模板层覆盖,那是宿主 wiring) |
+| **三工具接口语义**(commit/recall/write 的 schema 与可见性:write 仅 fork) | 工具接口语义是 kernel 拥有的定义,宿主只做 DSH 工具面注册 |
 
 ### B 类:留宿主(billion-context-dsh)
 
 | 设计成分 | 归属理由 |
 |---|---|
-| **memory_commit / memory_recall 工具注册** | DSH 工具面是宿主 wiring(决策 7) |
-| **一次性 LLM 调用提取** | 宿主 LLM 运行时能力 |
+| **memory_commit / memory_recall / memory_write 工具注册** | DSH 工具面是宿主 wiring(决策 7);memory_write 注册到 fork 会话的工具面(仅 fork 可见) |
+| **一次性 LLM 调用(fork)实现** | 宿主 LLM 运行时能力;fork 带 memory_write 工具定义 |
+| **memory_write 落库** | 宿主把 fork 的 memory_write 工具输出写入 markdown 记忆库 |
 | **markdown 文件存储 + citation(会话+seq)** | seq 方言是宿主的(决策 7);文件系统是宿主 |
 | **常驻索引注入 system prompt** | system-prompt.ts 是宿主 wiring |
 | **/acp memory list** | 宿主命令 |
