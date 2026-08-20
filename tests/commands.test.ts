@@ -113,6 +113,48 @@ test('M4: /acp status lists compressed blocks from the ledger', async () => {
   assert.match(text, /\n  - [0-9a-f]{8}: seqs /, 'block listing line')
 })
 
+test('M4: /acp status lists ALL blocks, not just the oldest 10 (issue #47)', async () => {
+  const env = makeEnv(128000)
+  // 70 messages = 12 non-overlapping 5-message compress ranges (1..60), with
+  // the last 10 messages left live so no range hits the kernel protected zone
+  // (the last 5 messages are never compressible).
+  const session = buildSession(70)
+  const { makeTools } = await import('../src/tools.ts')
+  const compress = makeTools(env).find((definition) => definition.name === 'compress')!
+  const agent = fakeAgent(session)
+
+  const blockPrefixes: string[] = []
+  for (let batch = 0; batch < 12; batch += 1) {
+    const start = batch * 5 + 1
+    const result = await compress.execute({
+      content: [{
+        startSeq: start,
+        endSeq: start + 4,
+        summary: `Batch ${batch}: authentication subsystem, JWT access tokens with 15 minute expiry, refresh tokens in Redis with 30 day TTL, login flow in src/auth/login.ts with sliding-window rate limiting.`,
+      }],
+    } as never, {
+      callId: `call-batch-${batch}`,
+      name: 'compress',
+      arguments: {},
+      signal: new AbortController().signal,
+      agent,
+    } as never) as { text: string }
+    const prefix = result.text.match(/block ([0-9a-f]{8})/)?.[1]
+    assert.ok(prefix !== undefined, `batch ${batch} lands a block`)
+    blockPrefixes.push(prefix)
+  }
+  assert.equal(blockPrefixes.length, 12, '12 batches → 12 blocks')
+
+  const text = await runAcp(env, agent, 'status')
+  assert.ok(text.includes('blocks: 12'), 'ledger counts all 12 blocks')
+  // The old slice(0, 10) hid everything past the 10th block — the 11th and
+  // 12th must now be listed (issue #47 regression).
+  assert.ok(text.includes(blockPrefixes[10]!), `11th block ${blockPrefixes[10]} is listed`)
+  assert.ok(text.includes(blockPrefixes[11]!), `12th block ${blockPrefixes[11]} is listed`)
+  const listingLines = text.split('\n').filter((line) => /^  - [0-9a-f]{8}: seqs /.test(line))
+  assert.equal(listingLines.length, 12, 'all 12 block rows are listed')
+})
+
 test('M4: /acp decompress resolves both the compaction-id prefix and the kernel bN ref', async () => {
   const env = makeEnv(128000)
   const session = buildSession(12)

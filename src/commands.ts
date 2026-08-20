@@ -57,7 +57,10 @@ async function statusText(env: ToolEnvironment, agent: Agent): Promise<string> {
       lines.push(`  next nudge: ~${toNudge.toLocaleString()} tokens to go (usage ${Math.round(nudge.contextUsage * 100)}% → ${Math.round(maxPct * 100)}% line)`)
     }
   }
-  for (const block of ledger.slice(0, 10)) {
+  // Show ALL blocks, not just the oldest 10: /acp status is how the user
+  // confirms recent work survived compression, and the block list is folded
+  // in the GUI anyway, so length has no cost (issue #47).
+  for (const block of ledger) {
     const tier = block.tier > 1 ? ` [T${block.tier}]` : ''
     lines.push(`  - ${block.blockId.slice(0, 8)}${tier}: seqs ${block.start}..${block.end} — ${block.summary.slice(0, 80)}`)
   }
