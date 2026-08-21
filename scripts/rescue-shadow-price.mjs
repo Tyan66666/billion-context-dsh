@@ -22,15 +22,19 @@
  *     session in the GUI BEFORE applying; a live host will overwrite the fix
  *     or fight the file edit).
  *   - --dry-run (default when no --force) only reports what would change.
- *   - Requires the `zstd` CLI (or python3 with `zstandard`) on PATH for
- *     decode/encode; the claim pricing imports the engine's own mirror
- *     (`src/host-tokens.ts`), so there is exactly ONE estimator.
+ *   - Decode uses the `zstd` CLI (or python3 `zstandard`) for reading; encode
+ *     uses node:zlib and reproduces the host's MULTI-FRAME layout (header line
+ *     in frame 1, events in frame 2) — a single whole-file frame fails the
+ *     host's assertZstdHeaderFrame and blocks DSH startup.
+ *   - The claim pricing imports the engine's own mirror (`src/host-tokens.ts`),
+ *     so there is exactly ONE estimator.
  */
 
 import { execFileSync } from 'node:child_process'
-import { existsSync, readFileSync, writeFileSync, copyFileSync, statSync, readdirSync } from 'node:fs'
+import { existsSync, writeFileSync, copyFileSync, readdirSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
+import { zstdCompressSync, constants } from 'node:zlib'
 import { hostPriceEvent } from '../src/host-tokens.ts'
 
 const SESSIONS_ROOT = join(homedir(), '.dsh', 'sessions')
@@ -44,15 +48,24 @@ function decodeZstd(path) {
   }
 }
 
+/**
+ * Encode a session log in the DSH persistence format (multi-frame zstd):
+ * frame 1 = the header line ALONE, frame 2 = all event lines — each frame
+ * compressed with node:zlib + checksum, mirroring the host's
+ * `encodeMaterialization` (dsh-session-persistence-jsonl). A single
+ * whole-file frame breaks the host's `assertZstdHeaderFrame` ("first frame is
+ * not exactly one header line") and blocks DSH startup — do NOT compress the
+ * whole log as one frame.
+ */
 function encodeZstd(path, text) {
-  try {
-    writeFileSync(path + '.tmp', text, 'utf8')
-    execFileSync('zstd', ['-q', '-f', path + '.tmp', '-o', path])
-  } catch {
-    execFileSync('python3', ['-c', 'import sys,zstandard as z; z.ZstdCompressor().copy_stream(open(sys.argv[1],"rb"),open(sys.argv[2],"wb"))', path + '.tmp', path])
-  } finally {
-    try { execFileSync('rm', ['-f', path + '.tmp']) } catch { /* best effort */ }
-  }
+  const nl = text.indexOf('\n')
+  if (nl === -1) throw new Error('session log has no header line')
+  const header = Buffer.from(text.slice(0, nl + 1), 'utf8')
+  const body = Buffer.from(text.slice(nl + 1), 'utf8')
+  const options = { params: { [constants.ZSTD_c_checksumFlag]: 1 } }
+  const headerFrame = zstdCompressSync(header, options)
+  const bodyFrame = zstdCompressSync(body, options)
+  writeFileSync(path, Buffer.concat([headerFrame, bodyFrame]))
 }
 
 /** Find the session.jsonl.zstd for a session id, walking the encoded-cwd dirs. */
@@ -109,18 +122,21 @@ const args = process.argv.slice(2)
 const sessionArg = args.find((a) => a.startsWith('--session='))?.split('=')[1]
 const sessionPos = args.indexOf('--session')
 const sessionId = sessionArg ?? (sessionPos >= 0 ? args[sessionPos + 1] : undefined)
+const pathArg = args.find((a) => a.startsWith('--path='))?.split('=')[1]
+const pathPos = args.indexOf('--path')
+const directPath = pathArg ?? (pathPos >= 0 ? args[pathPos + 1] : undefined)
 const dryRun = args.includes('--dry-run')
 const force = args.includes('--force')
 const noBackup = args.includes('--no-backup')
 
-if (!sessionId) {
-  console.error('usage: node --import tsx scripts/rescue-shadow-price.mjs --session <session-id> [--dry-run] [--force]')
+if (!sessionId && !directPath) {
+  console.error('usage: node --import tsx scripts/rescue-shadow-price.mjs --session <session-id> [--path <file>] [--dry-run] [--force]')
   process.exit(2)
 }
 
-const zstdPath = locateSession(sessionId)
-if (zstdPath === null) {
-  console.error(`session ${sessionId} not found under ${SESSIONS_ROOT}`)
+const zstdPath = directPath ?? (sessionId !== undefined ? locateSession(sessionId) : null)
+if (zstdPath === null || !existsSync(zstdPath)) {
+  console.error(`session file not found: ${directPath ?? `session ${sessionId} under ${SESSIONS_ROOT}`}`)
   process.exit(1)
 }
 console.log(`session file: ${zstdPath}`)
@@ -162,20 +178,10 @@ if (corrected.minMessageTokens < 0) {
 }
 // Dry-run by default: refuse to write unless --force is passed. A live host
 // rewrites session files from memory, so the session must be CLOSED in the
-// GUI before applying (the file mtime check below catches active writers).
+// GUI before applying.
 if (!force) {
   console.log('dry-run (no --force) — no changes written. Close the session in the GUI, then re-run with --force.')
   process.exit(0)
-}
-
-// Guard against a live host rewriting the file between scan and write.
-const statBefore = statSync(zstdPath).mtimeMs
-if (!force) {
-  const statAfter = statSync(zstdPath).mtimeMs
-  if (statBefore !== statAfter) {
-    console.error('session file changed during scan — the host is likely writing it. Close the session and re-run with --force.')
-    process.exit(1)
-  }
 }
 
 if (!noBackup) {
