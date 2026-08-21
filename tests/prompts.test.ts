@@ -167,11 +167,34 @@ test('M4/prompts 5: tool descriptions render the defaults byte-identical', () =>
   const descriptions = Object.fromEntries(makeTools(makeEnv(128000)).map((t) => [t.name, t.description]))
   assert.equal(
     descriptions['compress'],
-    'Replace older conversation ranges with dense summaries you write. Each message seq is a surface reference. Single range: compress({ content: [{ startSeq, endSeq, summary }] }). Batch multiple unrelated ranges in one call (each content entry becomes its own block); keep ranges disjoint. Never compress content the current step is actively using. Compress boundaries are SURFACE SEQS (acp_status Surface: row, latest nudge table) — NOT the block refs (bN, e.g. b1) that acp_status COMPRESSED BLOCKS shows, which are for decompress only. Drilldown mN refs (e.g. m00306) are ALSO accepted as startSeq/endSeq — they are auto-mapped to the live surface seq; an unknown mN (never assigned on the current surface) fails with guidance. Seq refs must come from the CURRENT surface (acp_status or the latest nudge): a span whose edges were shadowed by an earlier compress is auto-remapped to its still-live content, a fully compressed span is reported as already compressed, and invented/other-session seqs fail with guidance.',
+    'Replace older conversation ranges with dense summaries you write. Each message seq is a surface reference. Single range: compress({ content: [{ startSeq, endSeq, summary }] }). Batch multiple unrelated ranges in one call (each content entry becomes its own block); keep ranges disjoint. Never compress content the current step is actively using. Compress boundaries are SURFACE SEQS (acp_status Surface: row, latest nudge table) — NOT the block refs (bN, e.g. b1) that acp_status COMPRESSED BLOCKS shows, which are for decompress only. Drilldown mN refs (e.g. m00306) are ALSO accepted as startSeq/endSeq — they are auto-mapped to the live surface seq; an unknown mN (never assigned on the current surface) fails with guidance. Seq refs must come from the CURRENT surface (acp_status or the latest nudge): a span whose edges were shadowed by an earlier compress is auto-remapped to its still-live content, a fully compressed span is reported as already compressed, and invented/other-session seqs fail with guidance. Good compression moments: stage or subtask completion, strategy switches, intermediate milestones, and wrapping up failed exploration — when the details are consumed and no longer critical for the task ahead. When you write a summary, turn dead-end exploration into a conclusion (what was tried, why it failed, the next step) — not a blow-by-blow; and keep the summary the ONLY record: self-contained, so a later reader (or you, after decompress) can continue without the original.',
   )
   assert.equal(descriptions['decompress'], 'Recover the original content of a compressed block by its blockId — the kernel block ref `bN` shown by acp_status (e.g. b1), or a compaction id from search_context (read-only; does not unshadow the range).')
   assert.equal(descriptions['search_context'], 'Search inside compressed blocks (summaries and original content) for information the model no longer sees in context.')
   assert.equal(descriptions['acp_status'], 'Context status: overview of the current context — CONTEXT BREAKDOWN (tool/text/summaries token shares of the visible total), COMPRESSED BLOCKS ledger, and the nudge decision. No args = overview. Percentages are shares of the visible content, not the context window. Note: the block refs in COMPRESSED BLOCKS (bN, e.g. b1) are for decompress; compress uses the Surface: seq range, not bN. Drilldown: pass scope:"compressed" for a per-block list, or scope:"uncompressed" with view:"messages" (every visible message) / view:"ranges" (merged ranges); tool filters to one tool name, sort reorders (size/time/tool; age for compressed), limit caps rows (default 30). Drilldown row refs are kernel ids (mN) — feed them straight to compress as startSeq/endSeq (auto-mapped to the live surface seq); bN is for decompress, Surface: seqs also work in compress.')
+})
+
+test('M4/prompts 5b: default compress description ships the #43 semantic-timing and actionable-summary guidance', () => {
+  // issue #43 (AgentFold/CAT paper insights): the DEFAULT compress tool
+  // description must carry (a) semantic compression moments and (b) the
+  // actionable-summary rule (dead-end → conclusion, summary is the ONLY
+  // record). These were proven out locally via config.prompts overrides and
+  // are now promoted into the shipped default — byte-identical snapshot is
+  // test #5, this test pins the two semantic carriers explicitly.
+  const descriptions = Object.fromEntries(makeTools(makeEnv(128000)).map((t) => [t.name, t.description]))
+  const compress = descriptions['compress']
+  assert.ok(
+    compress.includes('Good compression moments: stage or subtask completion, strategy switches, intermediate milestones, and wrapping up failed exploration'),
+    'semantic compression moments present (issue #43)',
+  )
+  assert.ok(
+    compress.includes('turn dead-end exploration into a conclusion (what was tried, why it failed, the next step) — not a blow-by-blow'),
+    'actionable dead-end→conclusion rule present (issue #43)',
+  )
+  assert.ok(
+    compress.includes('keep the summary the ONLY record: self-contained, so a later reader (or you, after decompress) can continue without the original'),
+    'summary-as-only-record rule present (issue #43)',
+  )
 })
 
 test('M4/prompts 6: partial overrides merge per key; key/group null falls back to default', () => {
