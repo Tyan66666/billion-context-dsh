@@ -34,6 +34,7 @@ import {
   type ResolvedSurfaceRange,
 } from './region.ts'
 import { allLogMessages, buildToolCallIndex, eventsToCoreMessages, extractEventText, surfaceEventsOf } from './messages.ts'
+import { shadowedTokensViaMeter } from './host-tokens.ts'
 import { DEFAULT_RESOLVED, type ResolvedPrompts } from './prompts.ts'
 
 export interface ToolEnvironment extends KernelConfigInput {
@@ -413,14 +414,10 @@ async function handleCompress(env: ToolEnvironment, args: CompressArgs, exec: To
     // The edges were already balanced above; shadow exactly that span.
     const { start, end } = range
     const shadowed = shadowedSeqsOf(session, start, end)
-    // Estimate the reclaimed tokens from the actual shadowed messages so the
-    // durable ledger (compaction/summary.shadowedTokenCount) reports a real
-    // number instead of 0.
-    let shadowedTokens = 0
-    for (const seq of shadowed) {
-      const event = session.events[seq]
-      if (event !== undefined) shadowedTokens += defaultCountTokens(extractEventText(event))
-    }
+    // Price the reclaimed tokens in the HOST's token vocabulary (rule 12):
+    // prefer the live meter's per-node prices, fall back to the exact mirror.
+    // NEVER defaultCountTokens — that overdraws the meter on CJK (issue #54).
+    const shadowedTokens = shadowedTokensViaMeter(session, shadowed, agent.ctx)
     const tier = block.tier === 2 || block.tier === 3 ? block.tier : 1
     const parentBlockIds = compactionIdsOfKernelBlocks(session, block.directBlockIds)
     const { compactionId } = runCompactionTransaction(session, {
