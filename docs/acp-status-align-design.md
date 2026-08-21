@@ -133,7 +133,7 @@ Delegate usage: none this session.
 ### 3.3 关键语义（§3.1/§3.2 与移植版现状的差异）
 
 1. **百分比是占可见总量，不是占窗口**：`buildStatusReport` 内 `pct(n, total)` 的 `total = summaryTokens + totalTool + totalText`（`src/report.ts` 的 `renderOverview`），与模型上下文窗口无关。
-2. **token 数为估算**：`defaultCountTokens`（CJK 感知 chars/4），非 provider 实测；模型工具路径从不展示 `getContextUsage()` 的真实 usage。
+2. **token 数为估算**：`defaultCountTokens`（CJK 感知 chars/4），非 provider 实测；模型工具路径从不展示 `getContextUsage()` 的真实 usage。**例外（issue #54 / AGENTS.md 规则 12）**：写入宿主事件的 `shadowedTokenCount` 不是展示估算——它是宿主账本的影子价格，必须用宿主扁平 4 字符/token 词汇（`ctx.tokenMeter.measure` 优先，`src/host-tokens.ts` 镜像兜底）；`defaultCountTokens` 仅用于展示/内部估算路径。
 3. **窗口只进 nudge 决策，不进工具输出**：`usage = tokenCount / modelContextLimit` 仅用于 kernel nudge 决策（`minContextLimitPct 0.45 / maxContextLimitPct 0.75 / emergencyThresholdPct 0.95`，移植版经 `src/index.ts` DEFAULT_CONFIG 降为 0.70/0.85）与触发时 reason 里的 `usage X%`。
 4. **ref 语义（mNNNNN）仅出现在 ranges/钻取**：`buildStatusReport` 的 overview **不显示 ref**（§3 两例的 breakdown 与 blocks 均无 m 号）；ref 只在 `scope:'uncompressed', view:'messages'` 钻取模式与 `Compressible ranges` 里出现。
 

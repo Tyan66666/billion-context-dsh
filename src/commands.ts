@@ -19,7 +19,8 @@ import {
   shadowedSeqsOf,
 } from './region.ts'
 import { allLogMessages, eventsToCoreMessages, extractEventText, surfaceEventsOf } from './messages.ts'
-import { defaultConfig, defaultCountTokens } from 'acp-kernel'
+import { shadowedTokensViaMeter } from './host-tokens.ts'
+import { defaultConfig } from 'acp-kernel'
 import { windowSourceLabel } from './window.ts'
 
 async function statusText(env: ToolEnvironment, agent: Agent): Promise<string> {
@@ -85,12 +86,14 @@ function compressText(env: ToolEnvironment, agent: Agent, args: string[]): strin
   if (blockRefForSummarySeq(session, start) !== null || blockRefForSummarySeq(session, end) !== null) {
     return '/acp compress: the range touches a compressed block summary node — distill it with the compress tool (seq-based batch), not /acp compress'
   }
-  const shadowed = shadowedSeqsOf(session, startSeq, endSeq)
-  let shadowedTokens = 0
-  for (const seq of shadowed) {
-    const event = session.events[seq]
-    if (event !== undefined) shadowedTokens += defaultCountTokens(extractEventText(event))
-  }
+  // The RESOLVED edges define the claim span, never the raw inputs:
+  // resolveSurfaceRange may adjust them to a balanced cut, and a raw edge
+  // absent from the surface makes shadowedSeqsOf slice a garbage span that
+  // assertProvenance rejects when the transaction lands (AGENTS.md rule 12).
+  const shadowed = shadowedSeqsOf(session, start, end)
+  // Price the reclaimed tokens in the HOST's token vocabulary (rule 12):
+  // prefer the live meter's per-node prices, fall back to the exact mirror.
+  const shadowedTokens = shadowedTokensViaMeter(session, shadowed, agent.ctx)
   const { compactionId } = runCompactionTransaction(session, {
     start,
     end,

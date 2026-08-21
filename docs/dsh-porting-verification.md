@@ -146,7 +146,7 @@ PROBE OK
 |---|---|---|---|
 | 1 | `acp_status` 显示 `tokens compressed: 0`（多个大块） | 写事务时 `shadowedTokenCount` 写死 0 | 压缩时按实际遮蔽消息估算并写入账本 |
 | 2 | nudge 显示 `230%` 荒谬占用 | 用了 token-meter 的 `totalTokens`（请求+响应压力，含响应预估） | 改用 `surfaceTokens`（纯输入侧），显示 cap 100% |
-| 3 | 估算对中文失准 | 用了 `estimateTokensFast`（纯 4 字符/token） | 改用 acp-kernel 的 `defaultCountTokens`（CJK 1 字符/token + 其他 4 字符/token，与 billion-context-pi 一致） |
+| 3 | 估算对中文失准 | 用了 `estimateTokensFast`（纯 4 字符/token） | 改用 acp-kernel 的 `defaultCountTokens`（CJK 1 字符/token + 其他 4 字符/token，与 billion-context-pi 一致）——**后续演进（issue #54 / AGENTS.md 规则 12）**：`defaultCountTokens` 仅限内部估算与展示（nudge 百分比、账本、压缩结果文案）；写入宿主事件的 `shadowedTokenCount` 必须用宿主扁平 4 字符/token 词汇（`ctx.tokenMeter.measure` 优先，`src/host-tokens.ts` 镜像兜底）——中文密集会话曾因用 `defaultCountTokens` 计价 claim 被宿主账本扣穿而永久卡死（见 docs/shadow-price-host-vocabulary-design.md） |
 | 4 | 压缩单条工具结果报 `no tool-pairing-balanced range` | `resolveSurfaceRange` 只向内收缩，单条 tool 消息收缩到空 | 收缩失败时**向外扩展到最小完整配对**（单条结果自动带上其调用） |
 | 5 | 模型说"压无可压"（大工具结果在范围表隐形） | kernel 的 ref 映射在长会话压缩后漂移，`compressibleRanges` 漏掉大段 | nudge 范围表改为**从 surface 自算**（跳过保护区 + 摘要节点，边界配对平衡） |
 | 6 | 旧块 `tokens compressed` 仍为 0 | 修复前写入的块没有 token 数据 | 账本重建时对 0 值**从日志原文补算** |
@@ -174,3 +174,5 @@ compress({ startSeq: 64757, endSeq: 265056, ... })
 **关键教训**：`acp-kernel` 的 ref 映射在**经过 surface 替换（压缩）的超长会话**中会漂移（范围表出现 `end < start` 的乱序段、大工具结果拿不到 ref）。任何依赖 kernel `compressibleRanges` 的宿主侧逻辑都应**从 surface 自算兜底**——这是移植中最值得记住的一课。
 
 > **`UPSTREAM:` workaround 追踪（AGENTS.md design decision 7 / rule 11）**——上述"从 surface 自算范围表"（`buildCompressibleSeqRanges`）是对 kernel ref-map 漂移缺陷的**临时宿主侧绕行**，不是长期架构。按 rule 11，该缺陷的最终修复属于上游 acp-kernel（issue + PR）；**每次 kernel bump 时检查漂移是否已在上游修复，若已修复则删除 `buildCompressibleSeqRanges` 自算逻辑、改回 kernel `compressibleRanges`**（AGENTS.md §4b hot-spot 第 3 条已同步此检查项）。当前上游状态：漂移未确认修复；本项目追踪 issue #38（含完整机制分析 + 上游修复候选方向）。
+
+> **`UPSTREAM:` 宿主 token-meter 估算器未导出 + 扁平 4 字符/token 低估 CJK（AGENTS.md rule 12 / issue #54）**——影子价格必须说宿主词汇（`compaction/summary`/`compaction/prune` 的 `shadowedTokenCount`），引擎用 `ctx.tokenMeter.measure(session)` 的 `node.tokens`（宿主自算，exact by construction），兜底用 `src/host-tokens.ts` 的**镜像**（`estimateHostContent`/`estimateHostMessage`/`hostPriceEvent` 逐行复刻 `@deepseek-ai/dsh-token-meter/lib/types/estimate.js`）。该镜像是对宿主估算器**未从包导出**的临时绕行，且宿主扁平 4 字符/token 本身对 CJK 占用率低估 ~4×（宿主占用率显示偏低的既有问题）。按 rule 11/12：**当 dsh-token-meter 导出 `estimateContent`/`estimateMessage`（或宿主估算器改为 CJK-aware）时，删除镜像，改用导出的估算器并对拍 `meter.estimateMessage`**；L2 上游提议（dsh-token-meter CJK-aware 计价）见 issue #54。当前上游状态：估算器未导出；本项目追踪 issue #54（完整事故档案：session-3aa366c3 卡死、fold 复算、抢救脚本 `scripts/rescue-shadow-price.mjs`）。

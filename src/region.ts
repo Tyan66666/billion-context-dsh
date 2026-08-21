@@ -22,6 +22,7 @@ import {
 import { createAssistantMessage, createUserMessage, type ContentBlock } from '@deepseek-ai/dsh-llm'
 import { defaultCountTokens } from 'acp-kernel'
 import { extractEventText, extractText, toolCallIdOfResultEvent } from './messages.ts'
+import { hostPriceEvent } from './host-tokens.ts'
 
 /** One durable ACP block as rebuilt from the session log. */
 export interface AcpBlockLedgerEntry {
@@ -518,6 +519,7 @@ function hideSurfaceSeqs(
   provider: string,
   model: string,
   text?: string,
+  priceEvent: (event: SessionEvent) => number = hostPriceEvent,
 ): void {
   if (seqs.length === 0) return
   const start = seqs[0]!
@@ -525,7 +527,10 @@ function hideSurfaceSeqs(
   let shadowedTokenCount = 0
   for (const seq of seqs) {
     const event = session.events[seq]
-    if (event !== undefined) shadowedTokenCount += defaultCountTokens(extractEventText(event))
+    // The prune claim MUST speak the host's token vocabulary (rule 12): the
+    // default `hostPriceEvent` is the exact mirror of the host estimator.
+    // NEVER defaultCountTokens — that overdraws the meter on CJK (#54).
+    if (event !== undefined) shadowedTokenCount += priceEvent(event)
   }
   session.append('compaction/prune', {
     shadowedRange: { start, end },
