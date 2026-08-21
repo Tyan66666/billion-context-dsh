@@ -170,7 +170,7 @@ test('M4/prompts 5: tool descriptions render the defaults byte-identical', () =>
     'Replace older conversation ranges with dense summaries you write. Each message seq is a surface reference. Single range: compress({ content: [{ startSeq, endSeq, summary }] }). Batch multiple unrelated ranges in one call (each content entry becomes its own block); keep ranges disjoint. Never compress content the current step is actively using. Compress boundaries are SURFACE SEQS (acp_status Surface: row, latest nudge table) — NOT the block refs (bN, e.g. b1) that acp_status COMPRESSED BLOCKS shows, which are for decompress only. Drilldown mN refs (e.g. m00306) are ALSO accepted as startSeq/endSeq — they are auto-mapped to the live surface seq; an unknown mN (never assigned on the current surface) fails with guidance. Seq refs must come from the CURRENT surface (acp_status or the latest nudge): a span whose edges were shadowed by an earlier compress is auto-remapped to its still-live content, a fully compressed span is reported as already compressed, and invented/other-session seqs fail with guidance. Good compression moments: stage or subtask completion, strategy switches, intermediate milestones, and wrapping up failed exploration — when the details are consumed and no longer critical for the task ahead. When you write a summary, turn dead-end exploration into a conclusion (what was tried, why it failed, the next step) — not a blow-by-blow; and keep the summary the ONLY record: self-contained, so a later reader (or you, after decompress) can continue without the original.',
   )
   assert.equal(descriptions['decompress'], 'Recover the original content of a compressed block by its blockId — the kernel block ref `bN` shown by acp_status (e.g. b1), or a compaction id from search_context (read-only; does not unshadow the range).')
-  assert.equal(descriptions['search_context'], 'Search inside compressed blocks (summaries and original content) for information the model no longer sees in context.')
+  assert.equal(descriptions['search_context'], 'Search inside compressed blocks (summaries and original content) for information the model no longer sees in context. When a summary lacks a detail you need (exact values, error strings, decisions, verbatim code), SEARCH the compressed blocks FIRST — never guess or reconstruct from memory: search_context(query) locates the right block, then decompress only that block to recover the original.')
   assert.equal(descriptions['acp_status'], 'Context status: overview of the current context — CONTEXT BREAKDOWN (tool/text/summaries token shares of the visible total), COMPRESSED BLOCKS ledger, and the nudge decision. No args = overview. Percentages are shares of the visible content, not the context window. Note: the block refs in COMPRESSED BLOCKS (bN, e.g. b1) are for decompress; compress uses the Surface: seq range, not bN. Drilldown: pass scope:"compressed" for a per-block list, or scope:"uncompressed" with view:"messages" (every visible message) / view:"ranges" (merged ranges); tool filters to one tool name, sort reorders (size/time/tool; age for compressed), limit caps rows (default 30). Drilldown row refs are kernel ids (mN) — feed them straight to compress as startSeq/endSeq (auto-mapped to the live surface seq); bN is for decompress, Surface: seqs also work in compress.')
 })
 
@@ -194,6 +194,35 @@ test('M4/prompts 5b: default compress description ships the #43 semantic-timing 
   assert.ok(
     compress.includes('keep the summary the ONLY record: self-contained, so a later reader (or you, after decompress) can continue without the original'),
     'summary-as-only-record rule present (issue #43)',
+  )
+})
+
+test('M4/prompts 5c: search-first carriers ship in the default search_context description AND the system prompt quick-reference (issue #44)', () => {
+  // issue #44: when a summary lacks details, the model must SEARCH the
+  // compressed blocks first — never guess or reconstruct from memory.
+  // Two independent entry points carry the rule: (a) the default
+  // search_context TOOL description and (b) the system-prompt
+  // quick-reference line. Pinning both as semantic carriers (not
+  // byte-identical — that is test #5) guards against either drifting back
+  // to the old passive wording independently.
+  const descriptions = Object.fromEntries(makeTools(makeEnv(128000)).map((t) => [t.name, t.description]))
+  const searchCtxDesc = descriptions['search_context']
+  assert.ok(
+    searchCtxDesc.includes('SEARCH the compressed blocks FIRST — never guess or reconstruct from memory'),
+    'search-first rule present in the default search_context description (issue #44)',
+  )
+  assert.ok(
+    searchCtxDesc.includes('then decompress only that block to recover the original'),
+    'decompress-locates-then-recovers step present (issue #44)',
+  )
+  const rendered = renderSystemPrompt(resolvePrompts())
+  assert.ok(
+    rendered.includes('SEARCH the compressed blocks FIRST — never guess or reconstruct from memory'),
+    'search-first rule present in the system prompt quick-reference (issue #44)',
+  )
+  assert.ok(
+    rendered.includes('exact values, error strings, decisions, verbatim code'),
+    'quick-reference carrier list matches the tool description (issue #44)',
   )
 })
 
