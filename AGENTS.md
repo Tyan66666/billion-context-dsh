@@ -79,6 +79,15 @@ npm run build       # tsup (inlines acp-kernel) + tsc --emitDeclarationOnly
 - **Docs must stay in sync with every PR** — before opening a PR, review the diff against the documentation: any behavior the change alters must match what the docs describe, and docs that state the old behavior must be updated in the same PR. A PR that changes behavior without touching docs is incomplete.
 - **Feature work MUST document itself** — every feature (any behavior addition or change) must add an explanation of the new capability in the relevant docs: user-facing config/options in `README.md` / `README.en.md`, install-time composition options in `docs/INSTALL.md`, design decisions in `docs/*-design.md`, and the module map / hard-won rules in `AGENTS.md` itself. Precedent: the `config.prompts` feature shipped its README section, INSTALL note, config table row, and design doc in the same PR.
 
+### Plain-language writing (all human-facing text)
+
+Every piece of human-facing text — PR titles, PR descriptions, commit messages, code comments, docs — is written for a reader seeing it for the first time: no jargon, no private shorthand. If it can't be grasped in ~10 seconds by someone who has never seen the project, rewrite it.
+
+- **PR title**: one sentence saying what changed and what problem it fixes, phrased like you'd tell a teammate (it becomes the main-branch commit via squash).
+- **PR description**: organized as problem → cause → fix → verification; assume the reader doesn't know internal terms or abbreviations.
+- **Code comments**: explain WHY (background, the trap, the premise) — never restate what the code does.
+- **Commit messages**: plain-language subject; add a body only when there's background worth keeping.
+
 ### Commit messages
 
 The convention applies to the **squash-merge subject on main**, which IS the PR title (main is branch-protected; see §5). **Commits inside a PR are free-form** — only the final squash subject is constrained. Single-line subject, prefix by change kind (the description after the prefix is free-form, keep it informative):
