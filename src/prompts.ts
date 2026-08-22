@@ -31,7 +31,7 @@ export interface NudgePrompts {
   emergency: string
   /** 指导行（HOW_TO_COMPRESS_RULES）。无占位符 */
   guidance: string
-  /** tier 蒸馏行。占位符:{tier} {count} {prevTier} {tokens} {seqs} */
+  /** tier 蒸馏行。占位符:{tier} {count} {prevTier} {tokens} {seqs} {firstSeq} {lastSeq} */
   tier: string
   /** 上下文分解。占位符:{system} {tool} {summaries} {code} {text} */
   breakdown: string
@@ -82,7 +82,7 @@ const NUDGE_ALLOWED: { [K in keyof NudgePrompts]: ReadonlySet<string> } = {
   normal: new Set(['pct', 'philosophy']),
   emergency: new Set(['pct', 'philosophy']),
   guidance: new Set(),
-  tier: new Set(['tier', 'count', 'prevTier', 'tokens', 'seqs']),
+  tier: new Set(['tier', 'count', 'prevTier', 'tokens', 'seqs', 'firstSeq', 'lastSeq']),
   breakdown: new Set(['system', 'tool', 'summaries', 'code', 'text']),
   growth: new Set(['growth']),
   tip: new Set(),
@@ -193,7 +193,7 @@ export const DEFAULT_PROMPTS: ResolvedPrompts = {
     normal: 'This is an efficiency nudge to compress early and keep context lean — not an overflow warning. A separate, stronger alert will appear if the context is actually full.\n\n{philosophy}',
     emergency: '⚠️ Context limit reached — compress now. Prioritize consumed tool outputs.\n\n{philosophy}',
     guidance: HOW_TO_COMPRESS_RULES,
-    tier: 'Tier {tier}: {count} tier-{prevTier} block(s) distillable ({tokens} tokens) — compress their summary node(s) [seqs {seqs}] to reclaim the original messages.',
+    tier: 'Tier {tier}: {count} tier-{prevTier} block(s) distillable ({tokens} tokens) — distill them by compressing their checkpoint seq(s) [seqs {seqs}] as one range: compress({ content: [{ startSeq: {firstSeq}, endSeq: {lastSeq}, summary }] }).',
     breakdown: 'Context breakdown: {system}K system | {tool}K tool | {summaries}K summaries | {code}K code | {text}K text',
     growth: '+{growth}K since last nudge',
     tip: '💡 Compress all ranges in one call (pass multiple content entries: `content: [{...}, {...}]`).',

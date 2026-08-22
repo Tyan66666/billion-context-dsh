@@ -7,7 +7,7 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import { Session } from '@deepseek-ai/dsh-session'
 import { AcpStateStore } from '../src/state.ts'
 import { makeTools, type ToolEnvironment } from '../src/tools.ts'
-import { rebuildBlockLedger } from '../src/region.ts'
+import { blockRegistry, rebuildBlockLedger } from '../src/region.ts'
 import { rangeTable } from '../src/nudge.ts'
 import { appendTurn, appendToolResult, appendToolCall, appendMultiToolCall, appendUser, appendAssistant, buildTextSession, longText } from './helpers.ts'
 
@@ -362,6 +362,11 @@ test('M3: acp_status renders the upstream kernel breakdown without window rows',
   assert.match(filledText, /COMPRESSED BLOCKS — 1 active/, 'block ledger after compression')
   assert.match(filledText, /b\d+ \(T1\)/, 'kernel block row with tier')
   assert.match(filledText, /Surface: 8 nodes, seqs 6\.\.15/, '12 messages - 5 shadowed + 1 summary = 8 surface nodes; the span is min..max even though the checkpoint node lands first in surface.nodes')
+  // Issue #60 P2: acp_status ships the model's ONLY route to T2/T3 distillation
+  // — a live checkpoint seq per ACTIVE block (the report itself is blind to
+  // summary nodes, rule 9). After one tier-1 compress, b1 must map to its
+  // checkpoint seq.
+  assert.match(filledText, /Checkpoint seqs \(active blocks — compress a checkpoint seq to distill it\): b\d+ → seq \d+/, 'active blocks map their kernel ref to the checkpoint seq — the distill entry point')
   assert.ok(!/estimated context/.test(filledText), 'still no window-occupancy row after compression')
   assert.ok(!/context window/.test(filledText), 'still no window row after compression')
 })
@@ -455,6 +460,7 @@ test('M3: acp_status drilldown passes scope/view/tool/sort/limit to the kernel r
   assert.match(msgText, /3 of 12 shown\./, 'limit truncation reported')
   assert.match(msgText, /Surface: 12 nodes, seqs 1\.\.12/, 'the surface seq anchor stays in drilldown mode')
   assert.ok(!/Nudge:/.test(msgText), 'drilldown mode omits the nudge decision line (upstream `if (args.scope) return base`)')
+  assert.ok(!/Checkpoint seqs/.test(msgText), 'drilldown mode omits the overview-only checkpoint-seq row (issue #60 P2)')
 
   // Tool filter narrows rows; an empty filter renders a zero-row header.
   const filtered = await status.execute({ scope: 'uncompressed', view: 'messages', tool: 'text' }, fakeExec(session))
@@ -1001,4 +1007,67 @@ test('M3: a kernel-rejected range does not poison the rest of the compress call'
   assert.match(text, /protected zone/, 'the rejected range is reported, not fatal')
   const ledger = rebuildBlockLedger(session.events)
   assert.equal(ledger.length, 1, 'exactly the healthy range produced a block')
+})
+
+test('M3: issue #60 P3① — the nudge tier seqs (first..last) compress straight into a tier-2 block (end-to-end)', async () => {
+  const env = makeEnv()
+  const session = buildTextSession(12)
+  const compress = toolOf(env, 'compress')
+  // Two tier-1 blocks, exactly like the tier-2 nudge test builds (nudge.test.ts).
+  await compress.execute({ content: [{ startSeq: 1, endSeq: 5, summary: TIER_SUMMARY }] } as never, fakeExec(session))
+  await compress.execute({ content: [{ startSeq: 6, endSeq: 10, summary: TIER_SUMMARY }] } as never, fakeExec(session))
+
+  // The nudge tier line (buildNudgeText) now ships READY-MADE params — the
+  // model can feed the first/last checkpoint seq straight into compress
+  // without guessing whether to take the first, the last, or every single seq.
+  const registry = blockRegistry(session)
+  const activeSeqs = registry
+    .filter((entry) => entry.active && entry.summarySeq !== null)
+    .map((entry) => entry.summarySeq!)
+    .sort((a, b) => a - b)
+  assert.equal(activeSeqs.length, 2, 'two distillable tier-1 checkpoints on the surface')
+  const [firstSeq, lastSeq] = activeSeqs
+
+  const result = await compress.execute({
+    content: [{ startSeq: firstSeq, endSeq: lastSeq, summary: TIER_SUMMARY }],
+  } as never, fakeExec(session))
+  const text = (result as { text: string }).text
+  assert.match(text, /Compressed 1 block/)
+  assert.match(text, /tier 2/, 'distilling the nudge seqs as one range produces a tier-2 block')
+  assert.match(text, /messages shadowed, tier 2/, 'the tier label is always present (issue #60 P1②)')
+
+  const after = rebuildBlockLedger(session.events)
+  assert.equal(after.length, 3, 'the two tier-1 blocks plus one tier-2 block')
+  assert.equal(after[2]!.tier, 2, 'the distilled block is tier 2')
+  assert.deepEqual(after[2]!.parentBlockIds, [after[0]!.blockId, after[1]!.blockId], 'both parents are recorded durably')
+})
+
+test('M3: issue #60 P3② — every compress result reports its tier, including tier 1 (no silent downgrade)', async () => {
+  const env = makeEnv()
+  const session = buildTextSession(12)
+  const compress = toolOf(env, 'compress')
+  // A PLAIN tier-1 compress: before P1② the result line omitted the tier for
+  // tier 1 (tierLabel === ''), so a distill request that the range solver
+  // degraded to a plain fold looked IDENTICAL to a successful distillation —
+  // the model never learned the tier-2 block did not land. Now the tier is
+  // always present.
+  const result = await compress.execute({
+    content: [{ startSeq: 1, endSeq: 3, summary: 'Authentication system: JWT access tokens with 15 minute expiry, refresh tokens in Redis with 30 day TTL, login flow in src/auth/login.ts with sliding-window rate limiting at 10 requests per minute per IP address, bcrypt hashing at cost factor 12.' }],
+  } as never, fakeExec(session))
+  const text = (result as { text: string }).text
+  assert.match(text, /Compressed 1 block/)
+  assert.match(text, /, tier 1/, 'a plain tier-1 compress reports its tier explicitly — never a silent downgrade')
+
+  const ledger = rebuildBlockLedger(session.events)
+  assert.equal(ledger[0]!.tier, 1, 'the block really is tier 1')
+
+  // Distillation still reports tier 2 (the existing distill tests cover the
+  // tier-2 label; this assertion pins the label on the SAME result format).
+  await compress.execute({ content: [{ startSeq: 6, endSeq: 8, summary: TIER_SUMMARY }] } as never, fakeExec(session))
+  const ledger2 = rebuildBlockLedger(session.events)
+  const tier1Seq = ledger2[0]!.summarySeq!
+  const dist = await compress.execute({
+    content: [{ startSeq: tier1Seq, endSeq: tier1Seq, summary: TIER_SUMMARY }],
+  } as never, fakeExec(session))
+  assert.match((dist as { text: string }).text, /, tier 2/, 'the distilled block reports tier 2 in the same format')
 })
