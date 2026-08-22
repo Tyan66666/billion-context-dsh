@@ -22,6 +22,7 @@ import {
   AlreadyCompressedRangeError,
   blockIdOfKernelRef,
   blockRefForSummarySeq,
+  blockRegistry,
   compactionIdsOfKernelBlocks,
   expandShadowedSeqs,
   rebuildBlockLedger,
@@ -439,7 +440,11 @@ async function handleCompress(env: ToolEnvironment, args: CompressArgs, exec: To
       effectiveMessageIds: block.effectiveMessageIds,
     })
     const adjusted = start !== range.startSeq || end !== range.endSeq
-    const tierLabel = tier === 1 ? '' : `, tier ${tier}`
+    // Always report the tier, even tier 1: a silently-downgraded distill
+    // (boundary moved off the checkpoint seq → the kernel folds a plain
+    // message) must be visible to the model immediately, or the model keeps
+    // believing the distillation landed (issue #60, failure mode 2).
+    const tierLabel = `, tier ${tier}`
     const note = range.recovered === true
       ? ` (seqs ${range.startSeq}..${range.endSeq} were already shadowed — compressed the live remainder ${start}..${end})`
       : adjusted
@@ -683,6 +688,19 @@ async function handleStatus(env: ToolEnvironment, rawArgs: StatusArgs, exec: Too
     const nudge = turn.nudge
     if (nudge !== undefined) {
       lines.push('', `Nudge: ${nudge.shouldInject ? 'ACTIVE' : 'idle'} — ${nudge.reason}`)
+    }
+    // Issue #60 P2: the model's only route to T2/T3 distillation is a LIVE
+    // checkpoint seq — but acp_status (kernel buildStatusReport) is blind to
+    // summary nodes (they are excluded as messages, rule 9) and shows only bN
+    // refs. Append an engine-side mapping bN → checkpoint seq for ACTIVE
+    // blocks (only active blocks are distillable). Appending is the
+    // kernel-alignment contract: the kernel owns the report text, the engine
+    // owns the wiring — this row is wiring, never a rewrite of the report.
+    const checkpointRows = blockRegistry(session)
+      .filter((entry) => entry.active && entry.summarySeq !== null)
+      .map((entry) => `${entry.kernelBlockId} → seq ${entry.summarySeq}`)
+    if (checkpointRows.length > 0) {
+      lines.push('', `Checkpoint seqs (active blocks — compress a checkpoint seq to distill it): ${checkpointRows.join(', ')}`)
     }
   }
   lines.push('', `Surface: ${surfaceSummary(session)}`)

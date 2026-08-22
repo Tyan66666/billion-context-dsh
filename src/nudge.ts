@@ -243,6 +243,7 @@ function replaceTierTrigger(
   const summarySeqs = targets
     .map((block) => summarySeqOfKernelBlock(session, block.blockId))
     .filter((seq): seq is number => seq !== null)
+    .sort((a, b) => a - b)
   const pending = nudge.tier === 2 ? nudge.breakdown?.pendingT2 : nudge.breakdown?.pendingT3
   const tokens = typeof pending === 'number' ? pending : 0
   const tierValue = nudge.tier === null ? 2 : nudge.tier
@@ -252,6 +253,8 @@ function replaceTierTrigger(
     prevTier: tierValue - 1,
     tokens,
     seqs: summarySeqs.join(', '),
+    firstSeq: summarySeqs[0] ?? 'n/a',
+    lastSeq: summarySeqs[summarySeqs.length - 1] ?? 'n/a',
   })
   return text.slice(0, start) + '\n\n' + tierLine + text.slice(end)
 }
@@ -314,6 +317,7 @@ function renderNudgeFromTemplates(
     const summarySeqs = targets
       .map((block) => summarySeqOfKernelBlock(session, block.blockId))
       .filter((seq): seq is number => seq !== null)
+      .sort((a, b) => a - b)
     const pending = nudge.tier === 2 ? nudge.breakdown?.pendingT2 : nudge.breakdown?.pendingT3
     const tokens = typeof pending === 'number' ? pending : 0
     const tierLine = renderTemplate(prompts.nudge.tier, {
@@ -322,6 +326,8 @@ function renderNudgeFromTemplates(
       prevTier: nudge.tier - 1,
       tokens,
       seqs: summarySeqs.join(', '),
+      firstSeq: summarySeqs[0] ?? 'n/a',
+      lastSeq: summarySeqs[summarySeqs.length - 1] ?? 'n/a',
     })
     if (tierLine !== '') parts.push(tierLine)
     // Tier-specific rules from kernel (TIER2_DISTILL_RULES / TIER3_CONDENSE_RULES).
