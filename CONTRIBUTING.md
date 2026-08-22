@@ -15,6 +15,10 @@ npm run build       # tsup bundle
 - Every bug fix ships with a regression test (AGENTS.md §4).
 - `acp-kernel` upgrades follow the manual SOP in AGENTS.md §4b — don't bump the version yourself.
 
+## Writing for readers
+
+Assume the reader sees your PR title, description, and commit message for the first time — no internal jargon, no abbreviations. PR title = one sentence on what changed and what problem it fixes; PR description = problem → cause → fix → verification. See AGENTS.md §4 (Plain-language writing).
+
 ## Commit convention
 
 `main` only accepts **squash merges**: the commit landed on main IS the **PR title**, which must match one of the formats below. **Commits inside a PR are intentionally unconstrained** — the squash subject is what matters.
