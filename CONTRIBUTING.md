@@ -17,7 +17,7 @@ npm run build       # tsup bundle
 
 ## Writing for readers
 
-Assume the reader sees your PR title, description, and commit message for the first time — no internal jargon, no abbreviations. PR title = one sentence on what changed and what problem it fixes; PR description = problem → cause → fix → verification. See AGENTS.md §4 (Plain-language writing).
+Assume the reader sees your PR title, description, and commit message for the first time — no internal jargon, no abbreviations. PR title = one sentence on what changed and what problem it fixes; PR description = problem → cause → fix → verification. Plain, however, never means lossy: keep the precise anchors (function names, parameter names, file paths, line numbers) verbatim — they are the grep-able evidence. See AGENTS.md §4 (Plain-language writing).
 
 ## Commit convention
 

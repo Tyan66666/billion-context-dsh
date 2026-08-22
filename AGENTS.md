@@ -87,6 +87,7 @@ Every piece of human-facing text — PR titles, PR descriptions, commit messages
 - **PR description**: organized as problem → cause → fix → verification; assume the reader doesn't know internal terms or abbreviations.
 - **Code comments**: explain WHY (background, the trap, the premise) — never restate what the code does.
 - **Commit messages**: plain-language subject; add a body only when there's background worth keeping.
+- **Plain ≠ lossy**: rewriting for readability never means deleting the precise anchors — function names, variable names, parameter names, file paths, and line numbers stay verbatim. They are the grep-able evidence; the rewrite reshapes the narrative, not the substance (lesson: issue #46 v1 over-deleted `collectVisible`/dist line numbers/the options table — the user caught it and it had to be restored).
 
 ### Commit messages
 
