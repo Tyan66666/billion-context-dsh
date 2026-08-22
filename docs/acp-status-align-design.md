@@ -40,7 +40,7 @@ ACP status — session <id>
 
 | 路径 | 输出 | 是否含窗口 |
 |---|---|---|
-| 模型工具 `acp_status`（`src/status-tool.ts` → kernel `buildStatusReport`） | `CONTEXT BREAKDOWN`（tool/text/summaries 估算 + **占可见总量百分比**）+ `COMPRESSED BLOCKS` + `Nudge: idle/ACTIVE — reason` + `Compressible ranges` + `Delegate usage` | **否** |
+| 模型工具 `acp_status`（`src/status-tool.ts` → kernel `buildStatusReport`） | `CONTEXT BREAKDOWN`（tool/text/summaries 估算 + **占可见总量百分比**）+ `COMPRESSED BLOCKS` + `Nudge: idle/ACTIVE — reason` + `Checkpoint seqs`（active 块的 `bN → seq` 蒸馏入口，issue #60 P2）+ `Surface:` 行 | **否** |
 | 人类 `/acp` 命令（`src/commands.ts` → `buildStatusPanel`，billion-context-kit） | 面板：tokenCount + modelContextLimit + 进度条等 | **是**（人类排查需要） |
 
 移植版目前**两条路径共用同一份自研格式**（`src/tools.ts` 的 `handleStatus` 与 `src/commands.ts` 的 `statusText` 结构相同），导致模型工具也被迫看到窗口行。
@@ -162,6 +162,7 @@ Surface: 8 nodes, seqs 1..8
 - **主体**：调用 kernel `buildStatusReport(state, messages, countTokens, {})` 渲染 `CONTEXT BREAKDOWN` + `COMPRESSED BLOCKS`（含 Tip 行，与上游逐字一致）；
 - **Nudge 行**：拼接 `Nudge: ${nudge.shouldInject ? 'ACTIVE' : 'idle'} — ${nudge.reason}`（reason 为 kernel 生成的字符串，如 §3 示例）；
 - **Surface 行**（移植版特有，必须保留）：`Surface: ${surfaceSummary(session)}`——DSH 的 seq 是压缩工具的锚点（`compress({ startSeq, endSeq })`），模型靠它定位 seq；上游 ref（mNNNNN）语义在 DSH 不适用，故移植版补这一行；
+- **Checkpoint seqs 行**（移植版特有，issue #60 P2）：overview 模式追加 `Checkpoint seqs (active blocks — compress a checkpoint seq to distill it): b1 → seq 108, …`——只列 ACTIVE 块（`blockRegistry` → `summarySeq`，已蒸馏的 inactive 父块不可再蒸馏、不列）。原因：`buildStatusReport` 的 `messages` 已排除 checkpoint 摘要节点（P1-3），`COMPRESSED BLOCKS` 只给 `bN` 引用，模型没有任何渠道得知"哪个 seq 是该块的摘要节点"——而 T2/T3 蒸馏的唯一入口就是 compress 一个 **live checkpoint seq**。这是引擎侧 append（kernel 拥有 report 文本、引擎拥有 wiring），不重写 kernel 输出；
 - **删除**：`estimated context: X / Y (Z%)`、`context window: Y (source)`、`tokens compressed:` 行（上游无；`COMPRESSED BLOCKS` 已含 original/summary 数字）；
 - **`blocks: N` 行**：上游无此独立行（信息由 `COMPRESSED BLOCKS` 承载），删除。
 
