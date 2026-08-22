@@ -253,7 +253,10 @@ async function handleCompress(env: ToolEnvironment, args: CompressArgs, exec: To
   const coreMessages = allLogMessages(session)
   const surfaceMessages = eventsToCoreMessages(surfaceEventsOf(session))
   const tokenCount = resolveTokenCount(agent, surfaceMessages)
-  const config = kernelConfigFor(env)
+  const window = env.windowFor === undefined
+    ? { limit: env.modelContextLimit, source: 'explicit' as const }
+    : await env.windowFor(agent)
+  const config = kernelConfigFor({ ...env, modelContextLimit: window.limit })
 
   // Assign refs / advance state exactly like a turn would.
   const turn = env.kernel.processTurn({ messages: coreMessages, state, config, tokenCount })
@@ -662,7 +665,10 @@ async function handleStatus(env: ToolEnvironment, rawArgs: StatusArgs, exec: Too
   const coreMessages = allLogMessages(session)
   const surfaceMessages = eventsToCoreMessages(surface, toolNames)
   const tokenCount = resolveTokenCount(agent, surfaceMessages)
-  const config = kernelConfigFor(env)
+  const window = env.windowFor === undefined
+    ? { limit: env.modelContextLimit, source: 'explicit' as const }
+    : await env.windowFor(agent)
+  const config = kernelConfigFor({ ...env, modelContextLimit: window.limit })
   // Run the same pipeline the context transform runs, so what acp_status
   // reports matches what the model actually receives. The returned turn.state
   // carries the freshly assigned refs; it is NOT persisted — acp_status is a

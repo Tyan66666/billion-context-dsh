@@ -20,6 +20,17 @@ function makeEnv(limit = 128000): ToolEnvironment {
   }
 }
 
+function recordingCore(modelContextLimits: number[]): CompressionCore {
+  const core = createCore({})
+  return {
+    ...core,
+    processTurn(input) {
+      modelContextLimits.push(input.config.modelContextLimit)
+      return core.processTurn(input)
+    },
+  }
+}
+
 /** Minimal agent handle: the tools only read session/options. */
 function fakeExec(session: Parameters<typeof buildTextSession>[0] extends never ? never : import('@deepseek-ai/dsh-session').Session, overrides: Partial<ToolRunContext> = {}): ToolRunContext {
   const agent = {
@@ -44,8 +55,18 @@ function toolOf(env: ToolEnvironment, name: string) {
   return tool
 }
 
-test('M3: compress lands a durable block and shrinks the surface', async () => {
-  const env = makeEnv()
+test('M3: compress lands a durable block, shrinks the surface, and uses the effective context window', async () => {
+  const modelContextLimits: number[] = []
+  const env = {
+    ...makeEnv(),
+    kernel: recordingCore(modelContextLimits),
+    windowFor: async () => ({
+      limit: 1000000,
+      source: 'auto' as const,
+      provider: 'test-provider',
+      model: 'test-model',
+    }),
+  }
   const session = buildTextSession(12)
   const before = session.deriveMessages().length
 
@@ -71,6 +92,7 @@ test('M3: compress lands a durable block and shrinks the surface', async () => {
   assert.equal(ledger.length, 1)
   assert.deepEqual(ledger[0]!.shadowedSeqs, [1, 2, 3, 4, 5])
   assert.ok(ledger[0]!.shadowedTokenCount > 0, 'the ledger records real reclaimed tokens, not 0')
+  assert.deepEqual(modelContextLimits, [1000000], 'compress gives the kernel the auto-detected window, not the 128K fallback')
 })
 
 test('M3: successful compress registers its call id for post-result pair hiding', async () => {
@@ -371,9 +393,11 @@ test('M3: acp_status renders the upstream kernel breakdown without window rows',
   assert.ok(!/context window/.test(filledText), 'still no window row after compression')
 })
 
-test('M3: acp_status never shows the window even when windowFor auto-detects it', async () => {
+test('M3: acp_status uses the auto-detected window for pressure without showing window rows', async () => {
+  const modelContextLimits: number[] = []
   const env = {
     ...makeEnv(),
+    kernel: recordingCore(modelContextLimits),
     windowFor: async () => ({
       limit: 1000000,
       source: 'auto' as const,
@@ -388,6 +412,7 @@ test('M3: acp_status never shows the window even when windowFor auto-detects it'
   // The window is a human-side (/acp) concern; the model tool never sees it.
   assert.ok(!/context window/.test(text), 'window rows stay out of the model tool even with a probed window')
   assert.ok(!/estimated context/.test(text), 'window-occupancy rows stay out of the model tool')
+  assert.deepEqual(modelContextLimits, [1000000], 'acp_status gives the kernel the auto-detected window, not the 128K fallback')
 })
 
 test('M3: acp_status surfaces the ACTIVE nudge decision with a small window and compressible content', async () => {
