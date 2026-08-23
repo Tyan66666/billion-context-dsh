@@ -15,9 +15,10 @@ import { Session } from '@deepseek-ai/dsh-session'
 import { AcpStateStore } from '../src/state.ts'
 import { acpCommand } from '../src/commands.ts'
 import type { ToolEnvironment } from '../src/tools.ts'
+import { DEFAULT_CONTEXT_WINDOW, type AcpWindow } from '../src/window.ts'
 import { appendTurn, appendUser, appendAssistant, longText } from './helpers.ts'
 
-function makeEnv(limit = 128000): ToolEnvironment {
+function makeEnv(limit = 128000, windowFor?: (agent: Agent) => Promise<AcpWindow>): ToolEnvironment {
   return {
     kernel: createCore({}) as CompressionCore,
     store: new AcpStateStore(),
@@ -27,6 +28,7 @@ function makeEnv(limit = 128000): ToolEnvironment {
     nudgeMaxContextLimitPct: 0.7,
     nudgeEmergencyThresholdPct: 0.85,
     compressCallIdsToHide: new Set(),
+    ...(windowFor === undefined ? {} : { windowFor }),
   }
 }
 
@@ -182,4 +184,36 @@ test('M4: /acp decompress resolves both the compaction-id prefix and the kernel 
 
   const byKernelRef = await runAcp(env, agent, 'decompress b1')
   assert.ok(byKernelRef.includes('Block '), 'kernel bN ref resolution works')
+})
+
+test('M4: /acp status flags a failed window probe with a restart hint (issue #63)', async () => {
+  // A gateway that discloses no window (probeFailed) keeps the 128K fallback
+  // for the process lifetime — the panel must say so, or the operator can't
+  // tell why pressure looks wrong (the issue #63 false-emergency scenario).
+  const env = makeEnv(128000, async () => ({
+    limit: DEFAULT_CONTEXT_WINDOW,
+    source: 'default' as const,
+    provider: 'test-provider',
+    model: 'test-model',
+    probeFailed: true,
+  }))
+  const session = buildSession(12)
+  const text = await runAcp(env, fakeAgent(session), 'status')
+
+  assert.match(text, /context window: 128000 \(default \(auto-detection failed — restart to re-probe\)\)/, 'window line labels the failure')
+  assert.match(text, /window auto-detection failed — using the 128000 fallback \(restart to re-probe/, 'probe-failure hint line with restart guidance')
+})
+
+test('M4: /acp status shows no probe-failure hint when the probe succeeds', async () => {
+  const env = makeEnv(128000, async () => ({
+    limit: 1000000,
+    source: 'auto' as const,
+    provider: 'test-provider',
+    model: 'test-model',
+  }))
+  const session = buildSession(12)
+  const text = await runAcp(env, fakeAgent(session), 'status')
+
+  assert.match(text, /context window: 1000000 \(auto-detected from test-provider\/test-model\)/, 'successful probe shows the auto window')
+  assert.ok(!text.includes('auto-detection failed'), 'no probe-failure hint when the probe succeeds')
 })
