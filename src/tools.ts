@@ -79,6 +79,20 @@ function requireAgent(exec: ToolRunContext): Agent {
   return exec.agent
 }
 
+/**
+ * Resolve the effective context window for a tool or command run: probe the
+ * agent's real window via `windowFor` when provided, otherwise fall back to
+ * the environment's `modelContextLimit`. Shared by the compress and
+ * acp_status tool handlers and the `/acp` command so the resolution logic
+ * lives in exactly one place (issue #63 — the tools used the 128K fallback
+ * for pressure decisions even when auto-detection had found a larger window).
+ */
+export async function resolveEffectiveWindow(env: ToolEnvironment, agent: Agent): Promise<AcpWindow> {
+  return env.windowFor === undefined
+    ? { limit: env.modelContextLimit, source: 'explicit' as const }
+    : await env.windowFor(agent)
+}
+
 const compressParameters = {
   // Tolerated wrapped-arguments form: some models emit
   // `{ "arguments": "{\"content\": [...]}" }` (double-nested) or
@@ -253,7 +267,8 @@ async function handleCompress(env: ToolEnvironment, args: CompressArgs, exec: To
   const coreMessages = allLogMessages(session)
   const surfaceMessages = eventsToCoreMessages(surfaceEventsOf(session))
   const tokenCount = resolveTokenCount(agent, surfaceMessages)
-  const config = kernelConfigFor(env)
+  const window = await resolveEffectiveWindow(env, agent)
+  const config = kernelConfigFor({ ...env, modelContextLimit: window.limit })
 
   // Assign refs / advance state exactly like a turn would.
   const turn = env.kernel.processTurn({ messages: coreMessages, state, config, tokenCount })
@@ -662,7 +677,8 @@ async function handleStatus(env: ToolEnvironment, rawArgs: StatusArgs, exec: Too
   const coreMessages = allLogMessages(session)
   const surfaceMessages = eventsToCoreMessages(surface, toolNames)
   const tokenCount = resolveTokenCount(agent, surfaceMessages)
-  const config = kernelConfigFor(env)
+  const window = await resolveEffectiveWindow(env, agent)
+  const config = kernelConfigFor({ ...env, modelContextLimit: window.limit })
   // Run the same pipeline the context transform runs, so what acp_status
   // reports matches what the model actually receives. The returned turn.state
   // carries the freshly assigned refs; it is NOT persisted — acp_status is a

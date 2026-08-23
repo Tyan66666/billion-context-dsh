@@ -192,6 +192,8 @@ buildStatusReport(state: CompressionState, messages: CoreMessage[], countTokens:
 
 **tokenCount 口径（P2-2）**：`handleStatus` 调 `processTurn` 时 `tokenCount` 用 `resolveTokenCount(agent, surfaceMessages)`（surface 口径，与 `handleCompress`/`buildNudge` 一致，遵守硬性规则 2）；**不持久化 turn.state**（`env.store.set` 不调用），避免同 turn 二次推进 nudge 基线、`Nudge:` 行只用 `turn.nudge.reason`。
 
+**窗口来源（issue #63）**：`config.modelContextLimit` 不再是 `env.modelContextLimit`（128K 初始兜底），而是经 `windowFor(agent)` 探测后的有效窗口——`handleCompress` / `handleStatus` 与人类侧 `statusText` 统一走 `resolveEffectiveWindow(env, agent)`（`src/tools.ts`），再 `kernelConfigFor({ ...env, modelContextLimit: window.limit })`。模型工具只消费探测后的窗口进 nudge 决策（规则 9：窗口行不进工具输出），窗口来源的人类可见性由 `/acp` 的 `context window:` 行承担。
+
 ### 4.3 人类 `/acp` 命令
 
 `src/commands.ts:23-45` `statusText` **保留窗口行**（对齐上游 `/acp` 面板语义：人类排查需要窗口）。`/acp` 与模型工具**不强制共用渲染函数**（P2-4）：改后两条路径分叉（模型工具走 kernel 渲染、`/acp` 保留现状窗口格式），且现状两函数本就有差异（`handleStatus` 有 `surface:` 行、`statusText` 无；`statusText` 块行带 `[T${tier}]` 标签、`handleStatus` 不带）。可共享的仅"ledger→块列表行"这一小段，列为可选重构，不引入耦合。`/acp` 输出保持现状：

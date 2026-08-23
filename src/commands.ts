@@ -6,7 +6,7 @@
 
 import type { CommandDefinition } from '@deepseek-ai/dsh-commands'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import type { ToolEnvironment } from './tools.ts'
+import { resolveEffectiveWindow, type ToolEnvironment } from './tools.ts'
 import { resolveTokenCount } from './nudge.ts'
 import { kernelConfigFor } from './config.ts'
 import {
@@ -32,9 +32,7 @@ async function statusText(env: ToolEnvironment, agent: Agent): Promise<string> {
   const coreMessages = allLogMessages(session)
   const surfaceMessages = eventsToCoreMessages(surfaceEventsOf(session))
   const estimated = resolveTokenCount(agent, surfaceMessages)
-  const window = env.windowFor === undefined
-    ? { limit: env.modelContextLimit, source: 'explicit' as const }
-    : await env.windowFor(agent)
+  const window = await resolveEffectiveWindow(env, agent)
   const limit = window.limit
   const lines = [
     `ACP status — session ${session.id}`,
