@@ -427,6 +427,27 @@ test('M3: acp_status surfaces the ACTIVE nudge decision with a small window and 
   assert.match(text, /Nudge: ACTIVE — /, 'pressure + pending content → kernel injects')
 })
 
+test('M3: acp_status pressure follows the probed window, not the fallback (issue #63 false alarm)', async () => {
+  // Issue #63: the model tool fed the kernel the env FALLBACK window (500),
+  // so the same session read 25× over-limit → ACTIVE false alarm. With the
+  // probed window (1M) the pressure the model sees drops to ~1% → idle. The
+  // ACTIVE test above is the control: without windowFor the fallback path
+  // still arbitrates ACTIVE, so this probe is what defuses the alarm.
+  const env = {
+    ...makeEnv(500),
+    windowFor: async () => ({
+      limit: 1000000,
+      source: 'auto' as const,
+      provider: 'test-provider',
+      model: 'test-model',
+    }),
+  }
+  const session = buildTextSession(12)
+  const status = await toolOf(env, 'acp_status').execute({}, fakeExec(session))
+  const text = (status as { text: string }).text
+  assert.match(text, /Nudge: idle — /, 'probed window defuses the 128K-fallback false alarm')
+})
+
 test('M3: acp_status breakdown does not double-count the checkpoint summary (P1-3)', async () => {
   const env = makeEnv()
   const session = buildTextSession(12)
