@@ -24,14 +24,23 @@ export interface AcpWindow {
   /** Route the auto window was resolved for (auto source only). */
   readonly provider?: string
   readonly model?: string
+  /**
+   * True only when auto-detection was ATTEMPTED and failed (the probe threw or
+   * the model API disclosed no window), so the fallback limit is in use. Not
+   * set for explicit config, a successful probe, or disabled auto-detection —
+   * those must not look like a failure (issue #63: a misconfigured gateway
+   * silently fell back to 128K and produced false emergency nudges).
+   */
+  readonly probeFailed?: boolean
 }
 
-/** Human label for an AcpWindow's source (used by acp_status). */
+/** Human label for an AcpWindow's source (used by /acp status). */
 export function windowSourceLabel(window: AcpWindow): string {
   if (window.source === 'explicit') return 'configured'
   if (window.source === 'auto') {
     return `auto-detected from ${window.provider ?? '?'}/${window.model ?? '?'}`
   }
+  if (window.probeFailed === true) return 'default (auto-detection failed — restart to re-probe)'
   return 'default (auto-detection unavailable)'
 }
 

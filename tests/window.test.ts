@@ -98,6 +98,7 @@ test('window: auto detection falls back to the default window when the probe fai
     source: 'default',
     provider: 'test-provider',
     model: 'test-model',
+    probeFailed: true,
   })
   const undisclosed = fakeAgent(new Context())
   const window2 = await engine.windowFor(undisclosed)
@@ -106,6 +107,7 @@ test('window: auto detection falls back to the default window when the probe fai
     source: 'default',
     provider: 'test-provider',
     model: 'test-model',
+    probeFailed: true,
   })
 })
 
