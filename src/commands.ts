@@ -41,6 +41,13 @@ async function statusText(env: ToolEnvironment, agent: Agent): Promise<string> {
     `  estimated context: ${estimated} / ${limit} (${Math.round((estimated / limit) * 100)}%)`,
     `  context window: ${limit} (${windowSourceLabel(window)})`,
   ]
+  // A failed probe falls back to the 128K default AND is cached for the
+  // process lifetime — the /acp panel must say so explicitly, or the operator
+  // can't tell why pressure looks wrong (issue #63: a gateway that disclosed
+  // no window read as ~55% of 128K instead of ~18% of the real 1M window).
+  if (window.probeFailed === true) {
+    lines.push(`  ⚠ window auto-detection failed — using the ${limit} fallback (restart to re-probe, or set modelContextLimit explicitly)`)
+  }
   // Nudge arbitration on the SAME inputs the nudge path uses — a read-only
   // diagnostic, so run on a cloned state and never write it back to the store.
   const state = structuredClone(env.store.stateFor(session))

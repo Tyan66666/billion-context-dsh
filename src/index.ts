@@ -342,9 +342,21 @@ export class AcpCompactionEngine extends CompactionEngine {
       window = { limit: DEFAULT_CONTEXT_WINDOW, source: 'default', provider, model }
     } else {
       const detected = await detectContextWindow(agent, provider, model)
-      window = detected === null
-        ? { limit: DEFAULT_CONTEXT_WINDOW, source: 'default', provider, model }
-        : { limit: detected, source: 'auto', provider, model }
+      if (detected === null) {
+        // Probe failures are cached below too, so the 128K fallback sticks for
+        // the whole process lifetime — a gateway operator who fixes the model
+        // API must restart (or set modelContextLimit) before the probe retries.
+        // Warn loudly instead of failing silently: pressure numbers computed
+        // against the fallback are what issue #63's false emergency nudges
+        // came from (a gateway that disclosed no window read as ~55% of 128K
+        // when the real window was 1M).
+        this.ctx.logger.warn(
+          `billion-context-dsh: context-window auto-detection failed for ${provider}/${model} — using the ${DEFAULT_CONTEXT_WINDOW} fallback (restart to re-probe, or set modelContextLimit explicitly)`,
+        )
+        window = { limit: DEFAULT_CONTEXT_WINDOW, source: 'default', provider, model, probeFailed: true }
+      } else {
+        window = { limit: detected, source: 'auto', provider, model }
+      }
     }
     this.windowCache.set(key, window)
     return window

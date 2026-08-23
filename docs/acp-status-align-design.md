@@ -209,6 +209,15 @@ ACP status — session <id>          ← 保留（人类友好）
 
 即：`/acp` 保留现状窗口格式，模型工具走 kernel 渲染——两条路径各自对齐上游的对应路径。
 
+**探测失败提示（issue #63）**：`windowFor` 探测失败（网关未披露窗口/探测抛错）时，该窗口对象带 `probeFailed: true`，且失败结果与成功结果一样被缓存（`src/index.ts` `windowCache`——修好网关后**必须重启**才会重新探测，因此提示文案明确写 `(restart to re-probe)`）。此时 `/acp` 在 `context window:` 行之后、`nudge:` 行之前追加一行提示：
+
+```
+  context window: 128000 (default (auto-detection failed — restart to re-probe))
+  ⚠ window auto-detection failed — using the 128000 fallback (restart to re-probe, or set modelContextLimit explicitly)
+```
+
+同时 `windowFor` 在探测失败时写一条 `ctx.logger.warn`（宿主日志），文案同样带 `(restart to re-probe)`。显式配置 `modelContextLimit`、探测成功、`autoModelContextLimit: false` 三种情况均不带 `probeFailed` 标志（`windowSourceLabel` 的 default 文案借此区分 failed 与 unavailable）。模型工具 `acp_status` 不展示该提示——规则 9 约束窗口语义不进模型工具输出，探测失败的人类可见性由 `/acp` 与宿主日志承担。
+
 ### 4.4 保留/删除清单（模型工具 `acp_status`）
 
 | 行 | 处置 | 理由 |
