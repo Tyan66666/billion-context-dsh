@@ -60,6 +60,15 @@
 npm install billion-context-dsh
 ```
 
+> **与 DSH 版本的兼容性。** 包声明 peer 依赖 `@deepseek-ai/dsh-compaction` 为
+> `^0.1.0-rc.6 || ^0.1.1-rc.1`，同时覆盖 `0.1.0-rc.x` 与 `0.1.1-rc.x` 两条 rc 线
+> （含当前最新 DSH release；从 `0.1.0-rc.6` 到 `0.1.1-rc.2`，seam 的 `src/` 源码
+> 零改动，公开 API 完全一致）。范围写成两个并集子句是**有意为之**：npm
+> （node-semver）的预发布匹配规则要求 range 里存在与候选版本**相同
+> `[major, minor, patch]` 元组**的比较器，单一 `^0.1.0-rc.6` 永远匹配不了
+> `0.1.1-rc.x`（issue #68）——因此旧发布的包在 DSH 0.1.1-rc.x 上装不上，
+> 升级到含本次修复的新版本即可。
+
 > 💡 **v0.2.0 起支持 `dsh plugin` 一键安装（bundle）**。包已声明 `dsh.bundle`
 > manifest，DSH 的插件命令会把它装进 profile 并自动应用补丁（等价于下面的组合行）：
 

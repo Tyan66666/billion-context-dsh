@@ -11,7 +11,7 @@ mkdir -p ~/.dsh/profiles/web/node_modules
 ln -s /Users/yintianan/GitHub/billion-context-dsh ~/.dsh/profiles/web/node_modules/billion-context-dsh
 ```
 
-依赖说明：`dist/index.js` 内联了 acp-kernel，运行时只外链 `@deepseek-ai/dsh-compaction` 与 `@deepseek-ai/cordis`，二者由项目 `devDependencies` 提供（`billion-context-dsh/node_modules` 已在解析链上）。
+依赖说明：`dist/index.js` 内联了 acp-kernel，运行时只外链 `@deepseek-ai/dsh-compaction` 与 `@deepseek-ai/cordis`，二者由项目 `devDependencies` 提供（`billion-context-dsh/node_modules` 已在解析链上）。`@deepseek-ai/dsh-compaction` 的 **peer 范围**为 `^0.1.0-rc.6 || ^0.1.1-rc.1`，同时覆盖 `0.1.0-rc.x` 与 `0.1.1-rc.x` 两条 rc 线（DSH 0.1.1-rc.x 及以后）。范围必须写成并集：node-semver 的预发布匹配要求 range 中带与候选相同 `[major, minor, patch]` 元组的比较器，单一 `^0.1.0-rc.6` 匹配不了 `0.1.1-rc.x`（issue #68）。
 
 ### 方式 B：打包安装（发布前验证）
 

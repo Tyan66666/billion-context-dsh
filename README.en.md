@@ -57,6 +57,16 @@ This is the DeepSeek Harness port of [billion-context-pi](https://github.com/ran
 npm install billion-context-dsh
 ```
 
+> **DSH version compatibility.** The package declares the peer range
+> `^0.1.0-rc.6 || ^0.1.1-rc.1` for `@deepseek-ai/dsh-compaction`, covering both the
+> `0.1.0-rc.x` and `0.1.1-rc.x` release lines (including the current DSH release;
+> the seam's `src/` is unchanged from `0.1.0-rc.6` to `0.1.1-rc.2`, so the public
+> API is identical). The range is two `||` clauses **on purpose**: npm
+> (node-semver) only lets a prerelease version satisfy a range that carries a
+> comparator on the SAME `[major, minor, patch]` tuple as the candidate, so a lone
+> `^0.1.0-rc.6` can never match `0.1.1-rc.x` (issue #68) — older releases fail to
+> install on DSH 0.1.1-rc.x; upgrade to a release containing this fix.
+
 > 💡 **One-command install via `dsh plugin` (bundle, v0.2.0+)**. The package declares a `dsh.bundle`
 > manifest, so DSH's plugin command installs it into the profile and applies the patch
 > automatically (equivalent to the composition row below):
