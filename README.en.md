@@ -53,9 +53,20 @@ This is the DeepSeek Harness port of [billion-context-pi](https://github.com/ran
 
 > 💡 **Want DeepSeek Harness to install it for you?** This repo itself runs on DSH: hand [docs/INSTALL.md](docs/INSTALL.md) to an agent in a session and it will read the guide, inspect your profile, wire the composition, and verify the mount. Two preconditions: ① the config lives under `~/.dsh`, so you approve one file-permission prompt; ② afterwards ask it to call `acp_status` as proof.
 
+**Path A (recommended): one-command install via the DSH store / `dsh plugin` (bundle) — globally active right after install, zero configuration.**
+
+Click install in DSH's plugin store, or run:
+
 ```bash
-npm install billion-context-dsh
+dsh plugin --profile web add billion-context-dsh
 ```
+
+The command installs the package and automatically layers this package's bundle patch ([cordis.patch.yml](cordis.patch.yml)) into the profile's composition. The patch does two things:
+
+- **Disables the host `compaction-basic`** — so two backends do not both register `ctx.compaction` in the same realm (modern DSH web bundles already ship this disable; the row is an idempotent safety net that holds on every supported DSH);
+- **Mounts the ACP engine at the HOST plane** — the four model tools (`compress` / `decompress` / `search_context` / `acp_status`), the `/acp` command, the advisory nudge, and the ACP guidance section reach **EVERY mode** of the profile (standard / code / minimal / cordis / custom presets). Window auto-detection and the tools/command/nudge defaults are all on — **no manual configuration needed**.
+
+Restart `dsh` afterwards (bundle layers are composed at startup), open a new session, and verify: ask the model to call `acp_status`, or run `/acp status`. Shipped presets (standard / code / cordis) keep their realm-local `compaction-basic` fallback (automatic pressure compression still runs there; the ACP tools and nudge coexist); minimal and presets without a compaction realm use this engine directly.
 
 > **DSH version compatibility.** The package declares the peer range
 > `^0.1.0-rc.6 || ^0.1.1-rc.1` for `@deepseek-ai/dsh-compaction`, covering both the
@@ -67,21 +78,28 @@ npm install billion-context-dsh
 > `^0.1.0-rc.6` can never match `0.1.1-rc.x` (issue #68) — older releases fail to
 > install on DSH 0.1.1-rc.x; upgrade to a release containing this fix.
 
-> 💡 **One-command install via `dsh plugin` (bundle, v0.2.0+)**. The package declares a `dsh.bundle`
-> manifest, so DSH's plugin command installs it into the profile and applies the patch
-> automatically (equivalent to the composition row below):
+**Path B: plain `npm install` (package only — a composition row is required).**
 
 ```bash
-dsh plugin --profile web add billion-context-dsh
+npm install billion-context-dsh
 ```
 
-Restart `dsh` afterwards (bundle layers are composed at startup). For custom `config`
-(such as `modelContextLimit` / `prompts`), keep the hand-written composition row — the
-bundle patch ([cordis.patch.yml](cordis.patch.yml)) only inserts the default row without `config`.
+This only installs the package into your project/global store; it does **not** touch any profile — add a composition row as shown below or the engine never mounts.
 
-That's it. Then add a composition row where a compaction backend is expected — two scopes, pick by how wide you want it:
+## Scope & customization
 
-**Global — host plane, every mode** (recommended). In your profile patch (e.g. `~/.dsh/profiles/web/cordis.patch.yml`), add:
+Two audiences: ① Path B (plain npm install) users, who must write a composition row; ② Path A users who want custom `config` (the bundle already ships sane defaults — override them with a SAME-ID row).
+
+**Custom `config` (Path A bundle users).** Append a `compaction-acp` row with `config:` to your profile patch (e.g. `~/.dsh/profiles/web/cordis.patch.yml`) — the same-id row overrides the bundle's default row:
+
+```yaml
+- id: compaction-acp
+  name: 'billion-context-dsh'
+  config:
+    modelContextLimit: 128000   # optional; omit to auto-detect the model's real window (fallback 128000)
+```
+
+**Global — host plane, every mode** (recommended). This is what Path A's bundle already does; plain-npm users add all of the following (bundle users skip the first two rows):
 
 ```yaml
 # ACP as the global compaction backend: four model tools + `/acp` command +
@@ -89,6 +107,7 @@ That's it. Then add a composition row where a compaction backend is expected —
 # (standard / code / minimal / cordis / custom presets).
 # Must also disable the host compaction-basic: two backends providing
 # `ctx.compaction` in the same realm collide.
+# (The bundle install already ships these two rows.)
 - id: compaction-basic
   disabled: true
 

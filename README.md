@@ -56,9 +56,20 @@
 > 你的 profile、编辑组合配置并验证挂载。前提：① 配置写在 `~/.dsh` 下，需要
 > 你批准一次文件权限；② 装完让它调用 `acp_status` 自证。
 
+**方式一（推荐）：DSH 商店 / `dsh plugin` 一键装（bundle）——装完即全局生效，零配置。**
+
+在 DSH 的插件商店里点安装，或命令行执行：
+
 ```bash
-npm install billion-context-dsh
+dsh plugin --profile web add billion-context-dsh
 ```
+
+命令内部会装包并把本包的 bundle 补丁（[cordis.patch.yml](cordis.patch.yml)）自动挂进该 profile 的层栈。补丁做了两件事：
+
+- **禁用 host 的 `compaction-basic`**——避免同一 realm 内两个后端同时注册 `ctx.compaction` 冲突（现代 DSH 的 web bundle 已自带该禁用，此行为幂等兜底，任何受支持版本下都成立）；
+- **把 ACP 引擎挂到 host 平面**——四种模型工具（`compress` / `decompress` / `search_context` / `acp_status`）、`/acp` 命令、nudge、ACP 提示词段对该 profile 的**所有模式**（standard / code / minimal / cordis / 自定义预设）生效。窗口自动探测、工具/命令/nudge 默认全开，**无需任何手工配置**。
+
+装完**重启 `dsh`**（bundle 层在启动时组合），新开会话即可用——让模型调用 `acp_status` 或执行 `/acp status` 自证。shipped 预设（standard / code / cordis）内部的 realm 级 `compaction-basic` 自动压缩兜底仍然保留（这些模式里"自动摘要"照旧，ACP 工具与 nudge 并存）；minimal 等不带 compaction realm 的预设直接使用本引擎。
 
 > **与 DSH 版本的兼容性。** 包声明 peer 依赖 `@deepseek-ai/dsh-compaction` 为
 > `^0.1.0-rc.6 || ^0.1.1-rc.1`，同时覆盖 `0.1.0-rc.x` 与 `0.1.1-rc.x` 两条 rc 线
@@ -69,26 +80,34 @@ npm install billion-context-dsh
 > `0.1.1-rc.x`（issue #68）——因此旧发布的包在 DSH 0.1.1-rc.x 上装不上，
 > 升级到含本次修复的新版本即可。
 
-> 💡 **v0.2.0 起支持 `dsh plugin` 一键安装（bundle）**。包已声明 `dsh.bundle`
-> manifest，DSH 的插件命令会把它装进 profile 并自动应用补丁（等价于下面的组合行）：
+**方式二：纯 `npm install`（只装包，需要手写组合行）。**
 
 ```bash
-dsh plugin --profile web add billion-context-dsh
+npm install billion-context-dsh
 ```
 
-装完重启 `dsh`（bundle 层在启动时组合）。需要自定义 `config`（如
-`modelContextLimit` / `prompts`）时仍建议手写组合行——bundle 补丁
-（[cordis.patch.yml](cordis.patch.yml)）只插入无 `config` 的默认行。
+这只把包装进你的项目/全局，**不会**触碰任何 profile——请按下方「两种生效范围与自定义」手写组合行，引擎才会挂载。
 
-就这样。然后在需要压缩后端的位置加组合配置——两种范围，按需选择：
+## 两种生效范围与自定义
 
-**全局生效（host 平面，所有模式）——推荐**。在你的 profile 补丁（如 `~/.dsh/profiles/web/cordis.patch.yml`）中追加：
+本节服务于两类人：① 方式二（纯 npm 安装，必须手写组合行）；② 方式一用户想自定义 `config`（bundle 已有默认行为，只需用**同 id** 行覆盖）。
+
+**自定义 config（方式一 bundle 用户）。** 在你的 profile 补丁（如 `~/.dsh/profiles/web/cordis.patch.yml`）里追加一个 `compaction-acp` 行并附 `config:`——同 id 行覆盖 bundle 的默认行：
+
+```yaml
+- id: compaction-acp
+  name: 'billion-context-dsh'
+  config:
+    modelContextLimit: 128000   # 可选；省略时自动探测模型真实窗口（回退 128000）
+```
+
+**全局生效（host 平面，所有模式）——推荐**。这是方式一 bundle 的默认行为；纯 npm 安装的用户在 profile 补丁中追加以下全部内容（bundle 用户跳过前两行）：
 
 ```yaml
 # ACP 作为全局压缩后端：四个模型工具 + `/acp` 命令 + nudge + ACP 提示词段，
 # 对所有模式（standard / code / minimal / cordis / 自定义预设）生效。
 # 必须同时禁用 host 的 compaction-basic：同一 realm 内两个后端同时
-# provide `ctx.compaction` 会冲突。
+# provide `ctx.compaction` 会冲突。（bundle 安装已自动带上这两行。）
 - id: compaction-basic
   disabled: true
 

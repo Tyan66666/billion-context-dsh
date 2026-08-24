@@ -22,24 +22,34 @@ mkdir -p ~/.dsh/profiles/web/node_modules
 npm install --prefix ~/.dsh/profiles/web ./billion-context-dsh-0.2.1.tgz
 ```
 
-### 方式 C：bundle 安装（v0.2.0+，`dsh plugin` 一键装）
+### 方式 C：bundle 安装（v0.2.0+，`dsh plugin` / 商店一键装）——装完即全局生效
 
 包已声明 `dsh.bundle` manifest（`package.json` 的 `dsh.bundle.patch` → 仓库根的
-[../cordis.patch.yml](../cordis.patch.yml)），可用 DSH 的插件机制安装，patch 自动把
-ACP 组合行插入当前 profile 的层栈：
+[../cordis.patch.yml](../cordis.patch.yml)）。DSH 的插件机制（`dsh plugin` 命令与
+插件商店走同一条路径）安装后会把该补丁**自动挂进 profile 的层栈**，补丁包含两行：
+
+```yaml
+- id: compaction-basic   # 禁用 host 自动压缩后端，避免同一 realm 双 provider 冲突
+  disabled: true
+- insert:                # 把 ACP 引擎挂到 host 平面 = 该 profile 全局生效
+    - id: compaction-acp
+      name: 'billion-context-dsh'
+```
 
 ```bash
 dsh plugin --profile web add billion-context-dsh
 ```
 
-装完重启 `dsh`（bundle 层在启动时组合）。该方式等效于下面 2a 的手写组合行
-（id `compaction-acp`、name `billion-context-dsh`）；bundle 的默认 patch 不带
-`config`（`modelContextLimit` 省略 = 自动探测、提示词用内置文案），需要自定义
-`config` 时仍建议手写组合行。
+装完重启 `dsh`（bundle 层在启动时组合）即生效：四个模型工具、`/acp` 命令、nudge、
+窗口自动探测默认全开，**无需手写任何组合行**。需要自定义 `config`（`modelContextLimit`
+/ `prompts` / nudge 阈值）时，在 profile 的 `cordis.patch.yml` 里写一个**同 id**
+（`compaction-acp`）的行并附 `config:` 即可覆盖 bundle 默认行（见 §2 的例子）。
 
 ## 2. 组合行
 
-两种挂法，按你想要生效的范围选。
+手动挂载的两种范围，按你想要生效的范围选。**方式 C（bundle/商店安装）用户已默认
+全局生效，本节是「纯 npm 安装路径」与「自定义 config」的完整参考**——自定义时只需
+同 id 行 + `config:`，bundle 已带的行可省略。
 
 ### 2a. 全局生效（host 平面，所有模式）——推荐
 
