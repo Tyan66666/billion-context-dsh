@@ -78,12 +78,7 @@ dsh plugin --profile web add billion-context-dsh
 > （node-semver）的预发布匹配规则要求 range 里存在与候选版本**相同
 > `[major, minor, patch]` 元组**的比较器，单一 `^0.1.0-rc.6` 永远匹配不了
 > `0.1.1-rc.x`（issue #68）——因此旧发布的包在 DSH 0.1.1-rc.x 上装不上，
-> 升级到含本次修复的新版本即可。这条范围也**不会因为 DSH 再发布新的
-> `0.1.1-rc.x` 而过期**：`^0.1.1-rc.1` 展开为 `>=0.1.1-rc.1 <0.2.0`，其中
-> `>=0.1.1-rc.1` 携带元组 0.1.1，与整条 0.1.1 线（任意后续 rc 与正式版
-> `0.1.1`）同元组——已用真实 node-semver 逐版验证（回归护栏：[tests/peer-range.test.ts](tests/peer-range.test.ts)）。
-> 下一次不兼容只会在 seam 升到新 minor 线（`0.1.2-rc.x` 起）时出现，届时按
-> 仓库规范给 peer range 追加该线的新子句。
+> 升级到含本次修复的新版本即可。
 
 **方式二：纯 `npm install`（只装包，需要手写组合行）。**
 
