@@ -76,7 +76,14 @@ Restart `dsh` afterwards (bundle layers are composed at startup), open a new ses
 > (node-semver) only lets a prerelease version satisfy a range that carries a
 > comparator on the SAME `[major, minor, patch]` tuple as the candidate, so a lone
 > `^0.1.0-rc.6` can never match `0.1.1-rc.x` (issue #68) — older releases fail to
-> install on DSH 0.1.1-rc.x; upgrade to a release containing this fix.
+> install on DSH 0.1.1-rc.x; upgrade to a release containing this fix. The range
+> also does **not** expire when DSH publishes newer `0.1.1-rc.x` versions:
+> `^0.1.1-rc.1` desugars to `>=0.1.1-rc.1 <0.2.0`, whose `>=0.1.1-rc.1` comparator
+> carries the 0.1.1 tuple — the same tuple as the entire 0.1.1 line (any later rc
+> and the final `0.1.1`) — verified version-by-version with real node-semver
+> (regression guard: [tests/peer-range.test.ts](tests/peer-range.test.ts)). The next
+> incompatibility can only appear when the seam moves to a new minor line
+> (`0.1.2-rc.x` onward); add that line's tuple clause to the peer range when it does.
 
 **Path B: plain `npm install` (package only — a composition row is required).**
 

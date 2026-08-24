@@ -36,6 +36,12 @@ test('peer range accepts every published dsh-compaction rc line the seam shares'
 	}
 	// A future final 0.1.1 (no prerelease) is a normal version and stays in range.
 	assert.equal(semver.satisfies('0.1.1', peerRange), true)
+	// The `^0.1.1-rc.1` clause covers the WHOLE 0.1.1 line: its `>=0.1.1-rc.1`
+	// comparator carries tuple 0.1.1, matching the tuple of every future
+	// 0.1.1-rc.x — publishing newer rcs on the same line never breaks installs.
+	for (const v of ['0.1.1-rc.3', '0.1.1-rc.9', '0.1.1-rc.99']) {
+		assert.equal(semver.satisfies(v, peerRange), true, `${v} must satisfy ${peerRange} (same-line rc)`)
+	}
 })
 
 test('peer range keeps rejecting older and next-minor versions', () => {
@@ -43,8 +49,10 @@ test('peer range keeps rejecting older and next-minor versions', () => {
 	for (const v of ['0.0.1-rc.5', '0.1.0-rc.2', '0.1.0-rc.5']) {
 		assert.equal(semver.satisfies(v, peerRange), false, `${v} must NOT satisfy ${peerRange}`)
 	}
-	// Next minor: 0.2.x is a deliberate, later decision — never silently allowed.
-	for (const v of ['0.2.0-rc.1', '0.2.0', '0.2.1']) {
+	// Next lines: 0.1.2-rc.x (the soonest future seam bump), a jump to 0.1.3,
+	// and 0.2.x are all deliberate, later decisions — never silently allowed.
+	// They each need their own tuple clause when the seam gets there.
+	for (const v of ['0.1.2-rc.1', '0.1.3-rc.1', '0.2.0-rc.1', '0.2.0', '0.2.1']) {
 		assert.equal(semver.satisfies(v, peerRange), false, `${v} must NOT satisfy ${peerRange}`)
 	}
 })
