@@ -40,7 +40,7 @@ export function windowSourceLabel(window: AcpWindow): string {
   if (window.source === 'auto') {
     return `auto-detected from ${window.provider ?? '?'}/${window.model ?? '?'}`
   }
-  if (window.probeFailed === true) return 'default (auto-detection failed — restart to re-probe)'
+  if (window.probeFailed === true) return 'default (auto-detection failed — see /acp config)'
   return 'default (auto-detection unavailable)'
 }
 

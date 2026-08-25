@@ -37,6 +37,7 @@ import {
 } from '@deepseek-ai/dsh-compaction'
 import { createCore, type CompressionCore } from 'acp-kernel'
 import type { Agent } from '@deepseek-ai/dsh-agent'
+import { installSettingsSection, type SettingsProvider } from '@deepseek-ai/dsh-settings'
 import { AcpStateStore } from './state.ts'
 import { makeTools, type ToolEnvironment } from './tools.ts'
 import { acpCommand } from './commands.ts'
@@ -45,6 +46,16 @@ import { ACP_SYSTEM_PROMPT_ORDER } from './system-prompt.ts'
 import { renderSystemPrompt, resolvePrompts, type AcpPrompts, type ResolvedPrompts } from './prompts.ts'
 import { DEFAULT_CONTEXT_WINDOW, detectContextWindow, type AcpWindow } from './window.ts'
 import { deferCompressPairHide, stripOrphanedSurfaceToolMessages } from './region.ts'
+import {
+  ACP_SETTINGS_NAMESPACE,
+  AcpSettingsSchema,
+  describeSettingsChange,
+  filterSettingsEntry,
+  makeSettingsCommandSurface,
+  resolveAcpSettings,
+  type AcpSettings,
+  type SettingsCommandSurface,
+} from './settings.ts'
 
 export { AcpStateStore } from './state.ts'
 export { kernelConfigFor, type KernelConfigInput } from './config.ts'
@@ -92,6 +103,22 @@ export {
   type ResolvedSurfaceRange,
 } from './region.ts'
 export { eventsToCoreMessages, projectEvent, surfaceEventsOf, extractEventText } from './messages.ts'
+export {
+  ACP_SETTINGS_NAMESPACE,
+  AcpSettingsSchema,
+  describeSettingsChange,
+  filterSettingsEntry,
+  makeSettingsCommandSurface,
+  parseSettingValue,
+  resolveAcpSettings,
+  SETTINGS_KEYS,
+  SETTING_DEFAULTS,
+  type AcpSettings,
+  type AcpSettingsInput,
+  type SettingsChangeEffect,
+  type SettingsCommandSurface,
+  type SettingsKey,
+} from './settings.ts'
 
 export interface AcpConfig {
   /**
@@ -145,6 +172,13 @@ export interface AcpConfig {
   readonly autoCommand: boolean
   /** Inject the nudge into `agent/pre-step` when the kernel recommends it. Default true. */
   readonly autoNudge: boolean
+  /**
+   * Escape hatch: disable the runtime-settings integration entirely
+   * (composition-layer ONLY — deliberately not exposed through the settings
+   * layer itself: a switch that turns off its own plumbing could not be
+   * reached if the plumbing broke). Default: enabled.
+   */
+  readonly settingsEnabled?: boolean
   /** Per-stage prompt template overrides (nudge / range table / system prompt / tool descriptions). See docs/configurable-prompts-design.md. */
   readonly prompts?: AcpPrompts
 }
@@ -197,6 +231,12 @@ export class AcpCompactionEngine extends CompactionEngine {
   private readonly compressCallIdsToHide = new Set<string>()
   /** Per provider/model route the resolved window (probe failures cached too). */
   private readonly windowCache = new Map<string, AcpWindow>()
+  /** Live settings snapshot thunk (composition → user settings layer); swapped by installSettingsSection. */
+  private readSettingsSource: () => AcpSettings = () => resolveAcpSettings({})
+  /** The settings service, captured lazily for /acp config (undefined in provider-less processes). */
+  private settingsService: SettingsProvider | undefined
+  /** /acp config read/write surface. */
+  readonly settingsCommand: SettingsCommandSurface
 
   constructor(ctx: Context, config: Partial<AcpConfig> = {}) {
     super(ctx)
@@ -208,18 +248,67 @@ export class AcpCompactionEngine extends CompactionEngine {
     this.kernel = createCore(ports)
     this.store = new AcpStateStore()
 
+    // ── Runtime settings seam (M6) ──────────────────────────────────────
+    // The six settings-exposed knobs resolve as: schema default → composition
+    // row subset (FILTERED — a raw row also carries prompts/coreOverrides/
+    // countTokens, values that must never enter the settings layer) → the
+    // user's settings.yaml section. `current` is the live snapshot every
+    // consumer reads; `applySettings` lands an incoming change (initial call
+    // included) and runs the diff handler. The integration is an
+    // OPTIONAL-service consumer: with no settings provider (plain npm-install
+    // compositions) nothing registers and the engine behaves exactly as
+    // composed — the same values, read through the same thunk.
+    let current: AcpSettings = resolveAcpSettings(filterSettingsEntry(this.config))
+    this.readSettingsSource = () => current
+    const engine = this
+    const applySettings = (): void => {
+      const next = this.readSettingsSource()
+      const prev = current
+      current = next
+      try {
+        engine.onSettingsChanged(prev, next)
+      } catch (error) {
+        // The watcher callback runs inside the settings commit loop; a sync
+        // throw must not escape into it (the loop logs and continues, but our
+        // diff handler owns its failures — warn and keep the last good).
+        this.ctx.logger.warn(`billion-context-dsh: applying settings change failed: ${String(error)}`)
+      }
+    }
+    this.settingsCommand = makeSettingsCommandSurface(() => this.settingsService, () => current)
+    if (this.config.settingsEnabled !== false) {
+      installSettingsSection(ctx, ACP_SETTINGS_NAMESPACE, AcpSettingsSchema, current, {
+        // The helper swaps the source thunk when the provider mounts and
+        // restores the composition entry when it detaches.
+        setSource: (source) => {
+          this.readSettingsSource = source
+        },
+        onChange: applySettings,
+      })
+      // The helper registers and watches but hands out no service handle;
+      // /acp config needs describe/update/replace, so capture the service
+      // through a parallel optional inject (fires only when a provider
+      // exists — harmless no-op otherwise).
+      ctx.inject(['settings'], (sctx) => {
+        this.settingsService = sctx.settings
+      })
+    }
+
     const env: ToolEnvironment = {
       kernel: this.kernel,
       store: this.store,
-      // Initial value before any probe; windowFor() replaces it per pre-step.
-      modelContextLimit: this.config.modelContextLimit ?? DEFAULT_CONTEXT_WINDOW,
-      nudgeMinContextLimitPct: this.config.nudgeMinContextLimitPct,
-      nudgeMaxContextLimitPct: this.config.nudgeMaxContextLimitPct,
-      nudgeEmergencyThresholdPct: this.config.nudgeEmergencyThresholdPct,
+      // The settings-exposed knobs read LIVE from the settings source, so a
+      // settings.yaml edit (or /acp config set) hot-applies to every
+      // subsequent call — consumers never see stale numbers. (ToolEnvironment
+      // fields are readonly properties; getters satisfy them.)
+      get modelContextLimit() { return engine.readSettingsSource().modelContextLimit ?? DEFAULT_CONTEXT_WINDOW },
+      get nudgeMinContextLimitPct() { return engine.readSettingsSource().nudgeMinContextLimitPct },
+      get nudgeMaxContextLimitPct() { return engine.readSettingsSource().nudgeMaxContextLimitPct },
+      get nudgeEmergencyThresholdPct() { return engine.readSettingsSource().nudgeEmergencyThresholdPct },
       coreOverrides: this.config.coreOverrides,
       windowFor: (agent) => this.windowFor(agent),
       prompts: this.prompts,
       compressCallIdsToHide: this.compressCallIdsToHide,
+      settingsCommand: this.settingsCommand,
     }
     this.env = env
 
@@ -296,7 +385,7 @@ export class AcpCompactionEngine extends CompactionEngine {
       // in flight at pre-step (the previous step's tools all landed), so the
       // default empty in-flight set is safe.
       stripOrphanedSurfaceToolMessages(payload.agent.session)
-      if (!this.config.autoNudge) return next()
+      if (!engine.readSettingsSource().autoNudge) return next()
       const decision = await next()
       if (decision.kind === 'reject') return decision
       const window = await this.windowFor(payload.agent)
@@ -345,8 +434,9 @@ export class AcpCompactionEngine extends CompactionEngine {
    * DEFAULT_CONTEXT_WINDOW when auto-detection is disabled or unavailable.
    */
   async windowFor(agent: Agent): Promise<AcpWindow> {
-    if (this.config.modelContextLimit !== undefined) {
-      return { limit: this.config.modelContextLimit, source: 'explicit' }
+    const live = this.readSettingsSource()
+    if (live.modelContextLimit !== undefined) {
+      return { limit: live.modelContextLimit, source: 'explicit' }
     }
     const provider = agent.options.provider ?? ''
     const model = agent.options.model ?? ''
@@ -354,7 +444,7 @@ export class AcpCompactionEngine extends CompactionEngine {
     const cached = this.windowCache.get(key)
     if (cached !== undefined) return cached
     let window: AcpWindow
-    if (!this.config.autoModelContextLimit) {
+    if (!live.autoModelContextLimit) {
       window = { limit: DEFAULT_CONTEXT_WINDOW, source: 'default', provider, model }
     } else {
       const detected = await detectContextWindow(agent, provider, model)
@@ -367,7 +457,7 @@ export class AcpCompactionEngine extends CompactionEngine {
         // came from (a gateway that disclosed no window read as ~55% of 128K
         // when the real window was 1M).
         this.ctx.logger.warn(
-          `billion-context-dsh: context-window auto-detection failed for ${provider}/${model} — using the ${DEFAULT_CONTEXT_WINDOW} fallback (restart to re-probe, or set modelContextLimit explicitly)`,
+          `billion-context-dsh: context-window auto-detection failed for ${provider}/${model} — using the ${DEFAULT_CONTEXT_WINDOW} fallback (change modelContextLimit or autoModelContextLimit via /acp config — or restart — to re-probe)`,
         )
         window = { limit: DEFAULT_CONTEXT_WINDOW, source: 'default', provider, model, probeFailed: true }
       } else {
@@ -376,6 +466,24 @@ export class AcpCompactionEngine extends CompactionEngine {
     }
     this.windowCache.set(key, window)
     return window
+  }
+
+  /**
+   * Diff handler for runtime settings changes: drop the window cache when a
+   * window-related key changed (probe FAILURES are cached too — clearing is
+   * what lets the next pre-step re-probe after a fix), clear the per-turn
+   * nudge dedup when nudges come back on, and warn on order anomalies
+   * (accepted, never rejected — rejecting a write cannot fix an externally
+   * edited settings.yaml, and an invalid stored section would fail the next
+   * boot loud anyway).
+   */
+  private onSettingsChanged(prev: AcpSettings, next: AcpSettings): void {
+    const effect = describeSettingsChange(prev, next)
+    for (const warning of effect.warnings) {
+      this.ctx.logger.warn(`billion-context-dsh: ${warning}`)
+    }
+    if (effect.clearWindowCache) this.windowCache.clear()
+    if (effect.clearNudgeDedup) this.lastNudgeTurn.clear()
   }
 
   /** ACP is model-driven: automatic pressure policy never summarizes by itself. */

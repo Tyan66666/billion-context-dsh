@@ -56,3 +56,37 @@ test('peer range keeps rejecting older and next-minor versions', () => {
 		assert.equal(semver.satisfies(v, peerRange), false, `${v} must NOT satisfy ${peerRange}`)
 	}
 })
+
+// The runtime-settings seam added in issue #75 (`@deepseek-ai/dsh-settings`)
+// publishes the SAME 0.1.0 → 0.1.1 rc lines as dsh-compaction (verified via
+// `npm view @deepseek-ai/dsh-settings versions`), so the two-clause rule
+// applies identically: a lone `^0.1.0-rc.6` can never match `0.1.1-rc.x`.
+
+const settingsPkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as {
+	peerDependencies: { '@deepseek-ai/dsh-settings': string }
+}
+
+const settingsPeerRange = settingsPkg.peerDependencies['@deepseek-ai/dsh-settings']
+
+test('dsh-settings peer range accepts every published rc line on the seam', () => {
+	for (const v of ['0.1.0-rc.6', '0.1.0-rc.7', '0.1.0-rc.8', '0.1.1-rc.1', '0.1.1-rc.2']) {
+		assert.equal(semver.satisfies(v, settingsPeerRange), true, `${v} must satisfy ${settingsPeerRange}`)
+	}
+	// A future final 0.1.1 (no prerelease) is a normal version and stays in range.
+	assert.equal(semver.satisfies('0.1.1', settingsPeerRange), true)
+	// The `^0.1.1-rc.1` clause covers the WHOLE 0.1.1 line (same-tuple rule).
+	for (const v of ['0.1.1-rc.3', '0.1.1-rc.9', '0.1.1-rc.99']) {
+		assert.equal(semver.satisfies(v, settingsPeerRange), true, `${v} must satisfy ${settingsPeerRange} (same-line rc)`)
+	}
+})
+
+test('dsh-settings peer range keeps rejecting older and next-minor versions', () => {
+	// Below the floor: nothing before 0.1.0-rc.6.
+	for (const v of ['0.0.1-rc.1', '0.0.1-rc.5', '0.1.0-rc.2', '0.1.0-rc.5']) {
+		assert.equal(semver.satisfies(v, settingsPeerRange), false, `${v} must NOT satisfy ${settingsPeerRange}`)
+	}
+	// Next lines need their own tuple clause when the seam gets there.
+	for (const v of ['0.1.2-rc.1', '0.1.3-rc.1', '0.2.0-rc.1', '0.2.0', '0.2.1']) {
+		assert.equal(semver.satisfies(v, settingsPeerRange), false, `${v} must NOT satisfy ${settingsPeerRange}`)
+	}
+})

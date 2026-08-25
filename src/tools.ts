@@ -37,6 +37,7 @@ import {
 import { allLogMessages, buildToolCallIndex, eventsToCoreMessages, extractEventText, surfaceEventsOf } from './messages.ts'
 import { shadowedTokensViaMeter } from './host-tokens.ts'
 import { DEFAULT_RESOLVED, type ResolvedPrompts } from './prompts.ts'
+import type { SettingsCommandSurface } from './settings.ts'
 
 export interface ToolEnvironment extends KernelConfigInput {
   readonly kernel: CompressionCore
@@ -52,6 +53,12 @@ export interface ToolEnvironment extends KernelConfigInput {
    * (strict providers reject that sequence with HTTP 400).
    */
   readonly compressCallIdsToHide?: Set<string>
+  /**
+   * Read/write access to the runtime settings layer for `/acp config`.
+   * Absent surfaces (never expected — the engine always builds one) would
+   * degrade the command to advice text.
+   */
+  readonly settingsCommand?: SettingsCommandSurface
 }
 
 interface TextOutput {
