@@ -110,7 +110,8 @@ export interface AcpConfig {
    * kernel injects a nudge regardless of growth or cadence. Engine default
    * 0.70 (deliberately BELOW the kernel/billion-context-pi default 0.75 and
    * the host compaction-basic auto-compaction line 0.80, so the forced nudge
-   * always fires first); an explicit value wins.
+   * always fires first); an explicit value wins over this default — a
+   * same-name key in `coreOverrides.nudge` wins over both (it merges last).
    */
   readonly nudgeMaxContextLimitPct?: number
   /**
@@ -120,7 +121,11 @@ export interface AcpConfig {
    * compaction-basic line shadows it in standard/code/cordis modes).
    */
   readonly nudgeEmergencyThresholdPct?: number
-  /** Any other acp-kernel Config override (billion-context-pi's `coreOverrides` escape hatch). */
+  /**
+   * Any other acp-kernel Config override (billion-context-pi's `coreOverrides`
+   * escape hatch). Merge order per section: kernel defaults → the engine pct
+   * knobs above → these keys land LAST, so a same-name key here wins.
+   */
   readonly coreOverrides?: Partial<import('acp-kernel').Config>
   /**
    * Custom token-count function for the kernel's internal estimation.
@@ -153,7 +158,9 @@ const DEFAULT_CONFIG: AcpConfig = {
   // kernel/billion-context-pi 0.75/0.95. 0.95 leaves no room to act before
   // the API rejects, and the host's compaction-basic line (thresholdRatio
   // 0.80) shadows it in standard/code/cordis modes; 0.70 keeps the forced
-  // over-limit nudge ahead of that 80% line. Explicit values always win.
+  // over-limit nudge ahead of that 80% line. Explicit values always win
+  // against these defaults — `coreOverrides` merges last and beats them on
+  // same-name keys.
   nudgeMaxContextLimitPct: 0.7,
   nudgeEmergencyThresholdPct: 0.85,
 }
@@ -176,6 +183,14 @@ export class AcpCompactionEngine extends CompactionEngine {
   readonly config: AcpConfig
   /** Resolved prompt templates (validated at construction — fail-fast on template typos). */
   readonly prompts: ResolvedPrompts
+  /**
+   * The environment wired into tools / command / nudge. Exposed so tests (and
+   * introspection) can assert the forwarding actually happened: the config
+   * chain user config → this.config → env → kernelConfigFor is all OPTIONAL
+   * fields, so a dropped forwarding line fails typecheck silently and would
+   * revive lost-config bugs with every unit test green.
+   */
+  readonly env: ToolEnvironment
 
   private readonly lastNudgeTurn = new Map<string, number>()
   /** Successful compress call ids awaiting their tool/result so the pair can be hidden. */
@@ -206,6 +221,7 @@ export class AcpCompactionEngine extends CompactionEngine {
       prompts: this.prompts,
       compressCallIdsToHide: this.compressCallIdsToHide,
     }
+    this.env = env
 
     // Tools and commands may not be registered yet on cold start: cordis
     // starts unrelated composition rows concurrently, so the first

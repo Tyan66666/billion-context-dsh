@@ -21,6 +21,20 @@ test('M0: AcpCompactionEngine mounts on a bare Cordis context', async () => {
   assert.equal(result, null, 'skeleton never auto-compacts (pure model-driven)')
 })
 
+test('M0: engine forwards coreOverrides into the wired environment (wiring guard)', () => {
+  const engine = new Named(new Context(), {
+    coreOverrides: { nudge: { growthFloor: 300000 } },
+  })
+  // Guard for the assembly layer. The merge fix lives in src/config.ts and is
+  // covered by tests/config-overrides.test.ts — but those call kernelConfigFor
+  // directly, bypassing this constructor. The config chain user config →
+  // this.config → env → kernelConfigFor is all optional fields, so dropping a
+  // forwarding line (e.g. `coreOverrides: this.config.coreOverrides`) from the
+  // env literal fails typecheck silently and revives the lost-config bug with
+  // every unit test green. This assertion makes that failure loud.
+  assert.equal(engine.env.coreOverrides?.nudge?.growthFloor, 300000)
+})
+
 test('M1: DSH surface events project to acp-kernel CoreMessage', () => {
   const events = [
     {
