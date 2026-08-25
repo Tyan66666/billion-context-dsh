@@ -41,8 +41,18 @@ export function kernelConfigFor(input: KernelConfigInput): Config {
   if (input.nudgeEmergencyThresholdPct !== undefined) nudgePatch.emergencyThresholdPct = input.nudgeEmergencyThresholdPct
 
   const overrides: Partial<Config> = { ...input.coreOverrides }
-  if (Object.keys(nudgePatch).length > 0) {
-    overrides.nudge = { ...defaultConfig(input.modelContextLimit).nudge, ...nudgePatch }
+  if (Object.keys(nudgePatch).length > 0 || input.coreOverrides?.nudge) {
+    // The engine always ships explicit pct defaults (0.70/0.85, see
+    // DEFAULT_CONFIG), so nudgePatch is never empty and the plain replace
+    // below used to discard coreOverrides.nudge entirely — the documented
+    // escape hatch was unreachable whenever the pct knobs were set. User
+    // overrides must land LAST so they win over both kernel defaults and
+    // the engine pct values.
+    overrides.nudge = {
+      ...defaultConfig(input.modelContextLimit).nudge,
+      ...nudgePatch,
+      ...input.coreOverrides?.nudge,
+    }
   }
   return defaultConfig(input.modelContextLimit, overrides)
 }
