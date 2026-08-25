@@ -16,6 +16,7 @@ Model-driven context management (Active Context Pruning / ACP) for the DeepSeek 
 | [Porting verification report](dsh-porting-verification.md) | The verified evidence behind every claim, plus the **v0.1.1 long-session battle report** (6 bugs found and fixed in real use) |
 | [Configurable prompts design](configurable-prompts-design.md) | Design review draft: per-stage prompt overrides (nudge / range table / system prompt / tool descriptions) via `config.prompts`, template + named placeholders, build-time validation |
 | [Shadow-price host-vocabulary design](shadow-price-host-vocabulary-design.md) | Why `shadowedTokenCount` claims must speak the host token-meter's flat-4 vocabulary (issue #54: CJK sessions bricked when priced with the CJK-aware `defaultCountTokens`); meter-first pricing with an exact mirror fallback; L2 upstream direction |
+| [Runtime settings integration design](settings-integration-design.md) | Phase-1 settings seam (issue #75): the six scalar knobs hot-editable via `~/.dsh/settings.yaml` / `/acp config`, layering (schema default → composition row → user section), base-filtering rationale, window-cache invalidation, kill switch, /acp config parse rules |
 
 ## 🗂 Source layout
 
