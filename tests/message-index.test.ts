@@ -19,6 +19,7 @@ import {
   buildIndexMessage,
   collectIndexEntries,
   indexWatermarkOf,
+  pendingTokenTotal,
   resolveMessageIndexConfig,
   truncateToTokenBudget,
 } from '../src/message-index.ts'
@@ -155,11 +156,71 @@ test('M6: checkpoint summaries and prior index lines are skipped, disabled confi
 
   assert.equal(buildIndexMessage(session, { enabled: false, previewTokens: 24 }), null)
   assert.equal(resolveMessageIndexConfig({}).enabled, false, 'the index is opt-in in early releases (default disabled)')
-  assert.deepEqual(resolveMessageIndexConfig({ enabled: false }), { enabled: false, previewTokens: 16, backlogLimit: 100 }, 'partial config keeps defaults')
+  assert.deepEqual(resolveMessageIndexConfig({ enabled: false }), { enabled: false, previewTokens: 16, backlogLimit: 100, maxDelayTokens: 8192 }, 'partial config keeps defaults')
   assert.equal(resolveMessageIndexConfig({ previewTokens: -3 }).previewTokens, 0, 'a negative budget clamps to 0 (bare entries) instead of misbehaving')
   assert.equal(resolveMessageIndexConfig({ previewTokens: 7.9 }).previewTokens, 7, 'fractional budgets floor')
   assert.equal(resolveMessageIndexConfig({ backlogLimit: 5 }).backlogLimit, 5)
   assert.equal(resolveMessageIndexConfig({ backlogLimit: -1 }).backlogLimit, 100, 'an invalid backlog limit keeps the default')
+  assert.equal(resolveMessageIndexConfig({ maxDelayTokens: 4096 }).maxDelayTokens, 4096)
+  assert.equal(resolveMessageIndexConfig({ maxDelayTokens: 0 }).maxDelayTokens, 0, '0 disables the token-delay guard (per-turn cadence only)')
+  assert.equal(resolveMessageIndexConfig({ maxDelayTokens: -1 }).maxDelayTokens, 8192, 'a negative delay keeps the default')
+  assert.equal(resolveMessageIndexConfig({ maxDelayTokens: Number.NaN }).maxDelayTokens, 8192, 'a non-finite delay keeps the default')
+})
+
+test('M6: pendingTokenTotal sums only unindexed surface content, skipping checkpoints and prior markers', () => {
+  const session = Session.create('m6-pending')
+  appendTurn(session, 1)
+  appendUser(session, longText('a', 0))
+  appendMarker(session, '[acp-index] batch')
+  appendUser(session, longText('b', 1))
+  // A compaction checkpoint node mirrors the durable shape region.ts reads.
+  session.append('user/message', createUserMessage({
+    content: [{ type: 'text', text: 'summary of compressed work' }],
+    source: { kind: 'plugin', plugin: 'compact' },
+  }), { surfaceOp: 'append' })
+
+  // Only nodes ABOVE the newest marker count: message b, never a, never the
+  // checkpoint, never the marker itself — the same skip set as
+  // collectIndexEntries (the pre-step guard must agree with what the
+  // directory would actually index).
+  const markerSeq = indexWatermarkOf(session)
+  const total = pendingTokenTotal(session, markerSeq)
+  assert.equal(total, defaultCountTokens(longText('b', 1)), 'only content above the watermark is pending')
+
+  // A watermark BELOW the marker must still exclude it: the skip set is
+  // position-independent (the isIndexMarkerEvent branch, not a seq range).
+  assert.equal(
+    pendingTokenTotal(session, 0),
+    defaultCountTokens(longText('a', 0)) + defaultCountTokens(longText('b', 1)),
+    'a marker is skipped even when the watermark lies below it',
+  )
+
+  // With no marker at all, every surfaced node is pending.
+  const fresh = Session.create('m6-pending-fresh')
+  appendTurn(fresh, 1)
+  appendUser(fresh, longText('x', 0))
+  appendUser(fresh, longText('y', 1))
+  assert.equal(
+    pendingTokenTotal(fresh, 0),
+    defaultCountTokens(longText('x', 0)) + defaultCountTokens(longText('y', 1)),
+    'a fresh session counts everything',
+  )
+  // A finite cap short-circuits the sum: the guard only needs to know whether
+  // the pending total CROSSED the threshold, never the exact number — without
+  // this a single multi-megabyte CJK tool dump would cost a full tokenization
+  // pass (~700ms measured) on every pre-step (MAJOR-2).
+  const fullTotal = defaultCountTokens(longText('x', 0)) + defaultCountTokens(longText('y', 1))
+  const capped = pendingTokenTotal(fresh, 0, 1)
+  assert.ok(capped >= 1 && capped <= fullTotal, 'a tiny cap stops the sum at the first crossing')
+  assert.equal(
+    pendingTokenTotal(fresh, 0, fullTotal),
+    fullTotal,
+    'a cap at or above the total returns the exact sum (no early exit needed)',
+  )
+  // The watermark itself gates the sum: re-measuring after a marker advances
+  // the pending set to zero for content already indexed.
+  appendMarker(fresh, '[acp-index] indexed x and y')
+  assert.equal(pendingTokenTotal(fresh, indexWatermarkOf(fresh)), 0, 'indexed content is no longer pending')
 })
 
 test('M6: after a real compression the watermark survives in the log and numbering continues', async () => {

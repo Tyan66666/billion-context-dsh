@@ -418,6 +418,131 @@ test('M4/prompts 14: engine-level — config.prompts reaches system prompt secti
   assert.ok(text.startsWith('引擎级自定义 '), 'the custom nudge frame reached the injected message')
 })
 
+test('M4/prompts 14b: engine-level — the token-delay guard re-injects the directory on long tool runs', async () => {
+  const ctx = new Context()
+  ctx.provide('systemPrompt' as never, { section: () => {} } as never)
+  ctx.provide('tools' as never, { register: () => {} } as never)
+  ctx.plugin(AcpCompactionEngine as never, {
+    modelContextLimit: 16000,
+    // Isolate the guard: no nudge noise, index on, explicit threshold (the
+    // default is 8192 — pin it here so this test does not ride config drift).
+    autoNudge: false,
+    messageIndex: { enabled: true, maxDelayTokens: 8192 },
+  } as never)
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  const engine = ctx.compaction as Named
+  assert.ok(engine instanceof Named)
+
+  // A tool continuation step: `messages` is EMPTY (the loop claimed no inbox
+  // input), so the per-turn gate would not fire — only the token-delay guard
+  // can re-inject here.
+  const runPreStep = async (session: import('@deepseek-ai/dsh-session').Session) => (await (ctx.waterfall(
+    'agent/pre-step' as never,
+    {
+      agent: fakeAgent(session),
+      messages: [],
+      turn: 1,
+      step: 1,
+      signal: new AbortController().signal,
+    } as never,
+    async () => ({ kind: 'enter', messages: [] }) as never,
+  ) as never)) as { kind: string; messages: Array<{ content: Array<{ type?: string; text?: string }> }> }
+
+  // buildTextSession(12) measures 12,391 tokens — past the 8192 threshold,
+  // the guard fires even though nothing was claimed (each node ≈ 1.1K).
+  const big = await runPreStep(buildTextSession(12))
+  assert.equal(big.kind, 'enter')
+  assert.equal(big.messages.length, 1, 'the guard injected the directory on a tool continuation step')
+  const bigText = big.messages[0]!.content.map((block) => block.text ?? '').join('')
+  assert.ok(bigText.startsWith('[acp-index] '), 'the injected line is an acp-index directory')
+
+  // buildTextSession(2) measures 2,065 tokens: below the threshold → the
+  // decision passes through untouched (no synthetic content on cheap steps).
+  const small = await runPreStep(buildTextSession(2))
+  assert.equal(small.kind, 'enter')
+  assert.equal(small.messages.length, 0, 'below maxDelayTokens the guard stays silent')
+})
+
+test('M4/prompts 14c: engine-level — off-switches, the disabled default, and wake-up rounds never inject', async () => {
+  // (a) maxDelayTokens: 0 disables the DELAY guard (the per-turn gate is a
+  // separate switch): a long tool run never re-injects on a continuation step.
+  const ctxA = new Context()
+  ctxA.provide('systemPrompt' as never, { section: () => {} } as never)
+  ctxA.provide('tools' as never, { register: () => {} } as never)
+  ctxA.plugin(AcpCompactionEngine as never, {
+    modelContextLimit: 16000,
+    autoNudge: false,
+    messageIndex: { enabled: true, maxDelayTokens: 0 },
+  } as never)
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  const engineA = ctxA.compaction as Named
+  const runA = async (session: import('@deepseek-ai/dsh-session').Session, messages: unknown[], step: number) =>
+    (await (ctxA.waterfall(
+      'agent/pre-step' as never,
+      { agent: fakeAgent(session), messages, turn: 1, step, signal: new AbortController().signal } as never,
+      async () => ({ kind: 'enter', messages: [] }) as never,
+    ) as never)) as { kind: string; messages: Array<{ content: Array<{ type?: string; text?: string }> }> }
+  const off = await runA(buildTextSession(12), [], 1)
+  assert.equal(off.kind, 'enter')
+  assert.equal(off.messages.length, 0, 'maxDelayTokens: 0 disables the delay guard on tool steps')
+
+  // (b) Enabled with the default threshold: a wake-up round (step 0, empty
+  // claim) must stay synthetic-free even with a huge pending total — the
+  // guard requires a real step, so a stale watermark cannot turn a host
+  // zero-cost wake round into a model step (MINOR-3).
+  const ctxB = new Context()
+  ctxB.provide('systemPrompt' as never, { section: () => {} } as never)
+  ctxB.provide('tools' as never, { register: () => {} } as never)
+  ctxB.plugin(AcpCompactionEngine as never, {
+    modelContextLimit: 16000,
+    autoNudge: false,
+    messageIndex: { enabled: true },
+  } as never)
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  const engineB = ctxB.compaction as Named
+  const runB = async (session: import('@deepseek-ai/dsh-session').Session, messages: unknown[], step: number) =>
+    (await (ctxB.waterfall(
+      'agent/pre-step' as never,
+      { agent: fakeAgent(session), messages, turn: 1, step, signal: new AbortController().signal } as never,
+      async () => ({ kind: 'enter', messages: [] }) as never,
+    ) as never)) as { kind: string; messages: Array<{ content: Array<{ type?: string; text?: string }> }> }
+  const wake = await runB(buildTextSession(12), [], 0)
+  assert.equal(wake.kind, 'enter')
+  assert.equal(wake.messages.length, 0, 'step 0 wake-up rounds never trip the delay guard')
+
+  // (c) Both gates true in the same pre-step (claimed input AND crossed
+  // threshold) → exactly ONE directory line, never two.
+  const both = await runB(buildTextSession(12), [createUserMessage({ content: [{ type: 'text', text: 'hello' }] })], 1)
+  assert.equal(both.kind, 'enter')
+  assert.equal(both.messages.length, 1, 'dueByTurn and dueByDelay together inject exactly once')
+  assert.ok(
+    both.messages[0]!.content.map((block) => block.text ?? '').join('').startsWith('[acp-index] '),
+    'the single injected line is the directory',
+  )
+
+  // (d) The DEFAULT config (index disabled) never scans: a big session stays
+  // silent — the hot path keeps its pre-acp-index cost (MAJOR-1: the guard
+  // must not run at all when the index is off).
+  const ctxC = new Context()
+  ctxC.provide('systemPrompt' as never, { section: () => {} } as never)
+  ctxC.provide('tools' as never, { register: () => {} } as never)
+  ctxC.plugin(AcpCompactionEngine as never, {
+    modelContextLimit: 16000,
+    autoNudge: false,
+  } as never)
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  const engineC = ctxC.compaction as Named
+  const runC = async (session: import('@deepseek-ai/dsh-session').Session, messages: unknown[], step: number) =>
+    (await (ctxC.waterfall(
+      'agent/pre-step' as never,
+      { agent: fakeAgent(session), messages, turn: 1, step, signal: new AbortController().signal } as never,
+      async () => ({ kind: 'enter', messages: [] }) as never,
+    ) as never)) as { kind: string; messages: Array<{ content: Array<{ type?: string; text?: string }> }> }
+  const disabled = await runC(buildTextSession(12), [], 1)
+  assert.equal(disabled.kind, 'enter')
+  assert.equal(disabled.messages.length, 0, 'the disabled default never re-injects on tool steps')
+})
+
 test('M4/prompts 15: engine construction fails fast on a template typo', () => {
   assert.throws(
     () => new Named(new Context(), { prompts: { nudge: { normal: '{bad}' } } }),

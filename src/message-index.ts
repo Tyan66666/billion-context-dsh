@@ -10,7 +10,11 @@
  * verified host constraints). So the numbering lives IN the log: at the FIRST
  * pre-step of each turn — the step that claimed inbox input, never the model's
  * internal tool continuation steps — we append ONE compact plugin user message
- * that numbers every surface node appended since the previous index message:
+ * that numbers every surface node appended since the previous index message.
+ * A token-delay guard (`maxDelayTokens`) re-injects mid-turn when a long tool
+ * run lets unindexed content pile past the threshold, so a turn that never
+ * claims inbox input again still gets numbered before the model loses
+ * seq↔content alignment:
  *
  *   [acp-index] 12·user「帮我跑下测试」 13·asst「先看配置…」 14·tool bash「ls」 15·result bash「file-a file-b」
  *
@@ -58,6 +62,18 @@ export interface MessageIndexConfig {
    * single placeholder line that becomes the new watermark. Default 100.
    */
   readonly backlogLimit?: number
+  /**
+   * Re-inject the directory mid-turn once unindexed surface content has
+   * accumulated at least this many tokens. Per-turn cadence alone can leave a
+   * very long turn (one user message, dozens of internal tool rounds)
+   * unnumbered for tens of thousands of tokens — the model loses seq↔content
+   * alignment exactly when it needs it most. The delay guard fires on tool
+   * continuation steps too (they claim no inbox input, so the per-turn gate
+   * skips them); short turns never cross it, so behavior is identical to
+   * per-turn-only. The watermark advances with every injection, so a
+   * re-injection never renumbers anything. 0 disables the guard. Default 8192.
+   */
+  readonly maxDelayTokens?: number
 }
 
 /** Fully resolved acp-index options. */
@@ -65,12 +81,13 @@ export interface ResolvedMessageIndexConfig {
   readonly enabled: boolean
   readonly previewTokens: number
   readonly backlogLimit: number
+  readonly maxDelayTokens: number
 }
 
 // Early releases ship the index DISABLED by default: it is a new model-facing
 // injection, and out-of-the-box behavior must not change until it has proven
 // itself in the field. Hosts opt in with `messageIndex: { enabled: true }`.
-export const MESSAGE_INDEX_DEFAULTS: ResolvedMessageIndexConfig = { enabled: false, previewTokens: 16, backlogLimit: 100 }
+export const MESSAGE_INDEX_DEFAULTS: ResolvedMessageIndexConfig = { enabled: false, previewTokens: 16, backlogLimit: 100, maxDelayTokens: 8192 }
 
 /**
  * Nested config is resolved key-by-key (NOT object-spread): a host writing
@@ -102,10 +119,20 @@ export function resolveMessageIndexConfig(config?: MessageIndexConfig): Resolved
       console.warn(`[billion-context-dsh] messageIndex.backlogLimit must be a finite number >= 1, got ${String(rawBacklog)} — keeping default ${MESSAGE_INDEX_DEFAULTS.backlogLimit}`)
     }
   }
+  let maxDelayTokens = MESSAGE_INDEX_DEFAULTS.maxDelayTokens
+  const rawDelay = config?.maxDelayTokens
+  if (rawDelay !== undefined) {
+    if (typeof rawDelay === 'number' && Number.isFinite(rawDelay) && rawDelay >= 0) {
+      maxDelayTokens = Math.floor(rawDelay)
+    } else {
+      console.warn(`[billion-context-dsh] messageIndex.maxDelayTokens must be a finite number >= 0, got ${String(rawDelay)} — keeping default ${MESSAGE_INDEX_DEFAULTS.maxDelayTokens}`)
+    }
+  }
   return {
     enabled: config?.enabled ?? MESSAGE_INDEX_DEFAULTS.enabled,
     previewTokens,
     backlogLimit,
+    maxDelayTokens,
   }
 }
 
@@ -256,6 +283,32 @@ export function collectIndexEntries(session: Session, watermark: number, preview
 }
 
 /**
+ * Estimated `defaultCountTokens` total of every surfaced node ABOVE the
+ * watermark that the directory would index next (same skip set as
+ * `collectIndexEntries`: checkpoints and prior index lines). The pre-step
+ * listener compares this against `maxDelayTokens` to decide whether a long
+ * tool run has accumulated enough unindexed content to deserve a mid-turn
+ * re-injection — a cheap O(surface) sum, no message built.
+ *
+ * The guard only cares about crossing `cap` (it never needs the exact sum):
+ * when `cap` is finite, the loop bails as soon as the running total reaches
+ * it. Without the early exit a single multi-megabyte CJK tool dump would
+ * cost ~700ms of synchronous pre-step time to tokenize in full, and the
+ * threshold bounds exactly the amount of text the guard must ever read.
+ */
+export function pendingTokenTotal(session: Session, watermark: number, cap = Number.POSITIVE_INFINITY): number {
+  let total = 0
+  for (const seq of session.surface.nodes) {
+    if (seq <= watermark) continue
+    const event = session.events[seq]
+    if (event === undefined || isCheckpointNode(event) || isIndexMarkerEvent(event)) continue
+    total += defaultCountTokens(extractEventText(event))
+    if (total >= cap) return total
+  }
+  return total
+}
+
+/**
  * Entries at or above this estimated token size get an explicit `[N tok]`
  * marker; smaller entries carry none. The preview is budget-capped, so a huge
  * tool dump and a one-line note render identically — the marker restores the
@@ -295,9 +348,9 @@ const indexSource = { kind: 'plugin', plugin: INDEX_PLUGIN, form: 'catalog' } as
  * own seq becomes the watermark and normal numbering resumes next turn;
  * the skipped seqs stay locatable via acp_status / compress summaries.
  */
-export function buildIndexMessage(session: Session, config: ResolvedMessageIndexConfig = MESSAGE_INDEX_DEFAULTS): UserMessage | null {
+export function buildIndexMessage(session: Session, config: ResolvedMessageIndexConfig = MESSAGE_INDEX_DEFAULTS, watermark?: number): UserMessage | null {
   if (!config.enabled) return null
-  const entries = collectIndexEntries(session, indexWatermarkOf(session), config.previewTokens)
+  const entries = collectIndexEntries(session, watermark ?? indexWatermarkOf(session), config.previewTokens)
   if (entries.length === 0) return null
   if (entries.length > config.backlogLimit) {
     const first = entries[0]!.seq

@@ -138,7 +138,7 @@ See [docs/configurable-prompts-design.md](docs/configurable-prompts-design.md) f
 [acp-index] 12·user「run the tests please」 13·asst「checking config…」 14·tool bash「ls」 15·result bash「file-a file-b」
 ```
 
-numbering every surface node appended since the previous index message with its seq, kind, and a preview (truncated to a token budget, default 16 tokens; CJK counts 1 char/token). **Nodes above 512 tokens carry a `[N tok]` marker** (thousands render as `[1.5K tok]`) so the model can spot "prime compress targets" at a glance — absence only means "below threshold", never "empty", and the exact size stays one `acp_status` drilldown away. The directory is injected **once per turn** — the model's internal tool-continuation steps do not repeat it; the user message that triggered the turn is numbered on the next turn (inherent order of an append-only log). The model can thereby map any seq back to the exact content it saw — the compressible-range table, `acp_status` drilldown rows, and `compress` boundaries all gain text anchors. After a compression the old index lines vanish together with the shadowed originals (locating becomes the block summary's job, and they are excluded from the `search_context` doc set), and later lines keep numbering from the newest live seq, so the id space stays continuous. On a cold start over an existing session, a backlog beyond `backlogLimit` collapses into one placeholder directory line (seq range only) instead of one message swallowing the whole backlog:
+numbering every surface node appended since the previous index message with its seq, kind, and a preview (truncated to a token budget, default 16 tokens; CJK counts 1 char/token). **Nodes above 512 tokens carry a `[N tok]` marker** (thousands render as `[1.5K tok]`) so the model can spot "prime compress targets" at a glance — absence only means "below threshold", never "empty", and the exact size stays one `acp_status` drilldown away. The directory is injected **once per turn** — the model's internal tool-continuation steps do not repeat it; **if an unusually long turn (one user message followed by dozens of tool rounds) lets unindexed content pile past `maxDelayTokens` (default 8192 tokens), one directory line is re-injected mid-turn** so the model never loses seq↔content alignment inside the turn (short turns never cross it — behavior is identical to once-per-turn); the user message that triggered the turn is numbered on the next turn (inherent order of an append-only log). The model can thereby map any seq back to the exact content it saw — the compressible-range table, `acp_status` drilldown rows, and `compress` boundaries all gain text anchors. After a compression the old index lines vanish together with the shadowed originals (locating becomes the block summary's job, and they are excluded from the `search_context` doc set), and later lines keep numbering from the newest live seq, so the id space stays continuous. On a cold start over an existing session, a backlog beyond `backlogLimit` collapses into one placeholder directory line (seq range only) instead of one message swallowing the whole backlog:
 
 ```yaml
       config:
@@ -146,6 +146,7 @@ numbering every surface node appended since the previous index message with its 
           enabled: false       # default false (opt-in in early releases); true enables
           previewTokens: 16    # per-entry preview token budget (ellipsis included)
           backlogLimit: 100    # max entries per directory line; overflow emits a placeholder
+          maxDelayTokens: 8192 # re-inject when unindexed content piles past this many tokens; 0 disables
 ```
 
 Watermark advance, post-compression continuity, and the one-turn lag are covered in [docs/message-index-design.md](docs/message-index-design.md).
@@ -174,7 +175,7 @@ DSH derives every model request from its append-only session log (the *surface*)
 |---|---|
 | `compress` tool shadows a range | durable `surfaceOp: { op: 'replace' }` — the model-written summary becomes a checkpoint node; the originals stay in the log |
 | refs (`m00001` tags) | surface seqs, carried by the nudge's compressible-range table |
-| per-message numbering (pi's inline `<acp>` tags) | durable `[acp-index]` plugin messages: one directory line appended once per turn, numbering each new surface node with seq + kind + preview |
+| per-message numbering (pi's inline `<acp>` tags) | durable `[acp-index]` plugin messages: one directory line appended once per turn (re-injected mid-turn when unindexed content crosses `maxDelayTokens`), numbering each new surface node with seq + kind + preview |
 | nudge ("efficiency note — compress early and keep context lean") | injected at `agent/pre-step` by the kernel's pressure decision — efficiency note + context breakdown + compression rules, tone aligned with kernel/pi; never an order |
 | `decompress` | read-only recovery of shadowed originals from the log |
 | `search_context` | scores a unified doc set (block summaries + shadowed originals) rebuilt from the log via acp-kernel `searchBlocks` (hybrid: stemming + CJK bigrams + char n-gram fuzzy); hits link back to the owning block |
@@ -228,7 +229,7 @@ This project reuses `acp-kernel`'s compression core and `billion-context-pi`'s d
 | `autoCommand` | `true` | Register the `/acp` command on `ctx.commands` |
 | `autoNudge` | `true` | Inject the nudge into `agent/pre-step` |
 | `prompts` | — | (optional) Custom prompt copy: per-slot overrides for nudge / range table / system prompt / tool descriptions (template + named placeholders, validated at construction; see “Custom prompt copy” above and [docs/configurable-prompts-design.md](docs/configurable-prompts-design.md)) |
-| `messageIndex` | `{ enabled: false, previewTokens: 16, backlogLimit: 100 }` | Per-message numbering index (opt-in, disabled by default in early releases): a one-line `[acp-index]` directory message injected once per turn at pre-step, numbering new surface nodes with seq + kind + token-budgeted preview, so the model can map any seq back to what it saw; a backlog beyond `backlogLimit` emits one placeholder line instead. `enabled: true` turns it on. See [docs/message-index-design.md](docs/message-index-design.md) |
+| `messageIndex` | `{ enabled: false, previewTokens: 16, backlogLimit: 100, maxDelayTokens: 8192 }` | Per-message numbering index (opt-in, disabled by default in early releases): a one-line `[acp-index]` directory message injected once per turn at pre-step, numbering new surface nodes with seq + kind + token-budgeted preview, so the model can map any seq back to what it saw; when unindexed content piles past `maxDelayTokens` inside a long turn the directory is re-injected mid-turn (`0` disables); a backlog beyond `backlogLimit` emits one placeholder line instead. `enabled: true` turns it on. See [docs/message-index-design.md](docs/message-index-design.md) |
 
 ## Development
 
@@ -252,7 +253,7 @@ src/
 ├── tools.ts        # M3: compress / decompress / search_context / acp_status
 ├── nudge.ts        # M4: kernel pressure decision → injected advisory nudge
 ├── system-prompt.ts# M4: one-time ACP guidance section (keeps nudges short)
-├── message-index.ts# M6: acp-index per-message numbering directory (log watermark + token-budgeted previews)
+├── message-index.ts# M6: acp-index per-message numbering directory (log watermark + token-budgeted previews + mid-turn token-delay re-injection)
 ├── config.ts       # kernel config assembly (thresholds + coreOverrides)
 ├── window.ts       # auto context-window detection (LLM runtime probe, fallback 128000)
 └── commands.ts     # M4: /acp slash command

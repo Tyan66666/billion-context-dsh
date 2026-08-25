@@ -87,11 +87,13 @@ dsh plugin --profile web add billion-context-dsh
         # [acp-index] 目录消息，为新出现的会话节点标注 seq + 类型 + 内容预览，
         # 模型由此把任意 seq 对回看过的内容。enabled: false 关闭；previewTokens
         # 是单条预览的 token 预算；backlogLimit 是单条目录的最大条目数，积压超过
-        # 时改发一行占位目录（只列 seq 范围）。见 docs/message-index-design.md。
+        # 时改发一行占位目录（只列 seq 范围）；maxDelayTokens 是长轮补发阈值——
+        # 未编号内容累计达到即提前补发目录行（0 关闭）。见 docs/message-index-design.md。
         # messageIndex:
         #   enabled: false       # 设为 true 开启
         #   previewTokens: 16
         #   backlogLimit: 100
+        #   maxDelayTokens: 8192
 ```
 
 作用：host 平面注册 `ctx.compaction` + 四个模型工具 + `/acp` 命令 + `agent/pre-step` nudge 监听，所有模式共享一份。

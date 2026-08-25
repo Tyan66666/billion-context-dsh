@@ -16,7 +16,7 @@ Model-driven context management (Active Context Pruning / ACP) for the DeepSeek 
 | [Porting verification report](dsh-porting-verification.md) | The verified evidence behind every claim, plus the **v0.1.1 long-session battle report** (6 bugs found and fixed in real use) |
 | [Configurable prompts design](configurable-prompts-design.md) | Design review draft: per-stage prompt overrides (nudge / range table / system prompt / tool descriptions) via `config.prompts`, template + named placeholders, build-time validation |
 | [Shadow-price host-vocabulary design](shadow-price-host-vocabulary-design.md) | Why `shadowedTokenCount` claims must speak the host token-meter's flat-4 vocabulary (issue #54: CJK sessions bricked when priced with the CJK-aware `defaultCountTokens`); meter-first pricing with an exact mirror fallback; L2 upstream direction |
-| [Per-message numbering index design](message-index-design.md) | The `acp-index` directory (issue #71): why pi's inline `<acp>` tags are impossible on DSH (three verified walls), the durable local-ledger route, watermark/backlog semantics, and per-turn injection cadence |
+| [Per-message numbering index design](message-index-design.md) | The `acp-index` directory (issue #71): why pi's inline `<acp>` tags are impossible on DSH (three verified walls), the durable local-ledger route, watermark/backlog semantics, and per-turn cadence + mid-turn token-delay re-injection |
 
 ## 🗂 Source layout
 
@@ -29,7 +29,7 @@ src/
 ├── tools.ts        # M3: compress / decompress / search_context / acp_status (status rendered via kernel buildStatusReport)
 ├── nudge.ts        # M4: advisory nudge (surface-computed range table)
 ├── system-prompt.ts# M4: one-time ACP guidance section
-├── message-index.ts# M6: acp-index per-message numbering directory (durable plugin user message; log watermark + token-budgeted previews) — docs/message-index-design.md
+├── message-index.ts# M6: acp-index per-message numbering directory (durable plugin user message; log watermark + token-budgeted previews + mid-turn token-delay re-injection) — docs/message-index-design.md
 ├── config.ts       # kernel config assembly (thresholds + coreOverrides)
 ├── host-tokens.ts  # shadow-price pricing: host-vocabulary mirror + shadowedTokensViaMeter (meter preferred, mirror fallback) — rule 12
 ├── window.ts       # auto context-window detection (LLM runtime probe, fallback 128000)
