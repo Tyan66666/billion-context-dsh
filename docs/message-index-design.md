@@ -102,7 +102,7 @@ stripOrphans → await next() → reject 直通
 
 | 键 | 默认 | 含义 |
 |---|---|---|
-| `config.messageIndex.enabled` | `true` | 是否在 pre-step 注入编号目录（每回合一次） |
+| `config.messageIndex.enabled` | `false` | 是否在 pre-step 注入编号目录（每回合一次）；早期版本默认关闭（opt-in），手工开启 |
 | `config.messageIndex.previewTokens` | `24` | 单条预览的 `defaultCountTokens` 预算（含省略号）；非有限数→默认并 warn，有限则 floor 且 ≥0 |
 | `config.messageIndex.backlogLimit` | `100` | 单条目录消息的最大条目数；超过改发占位 marker（§4.5）；非有限或 <1 → 默认并 warn |
 

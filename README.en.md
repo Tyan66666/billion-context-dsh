@@ -143,7 +143,7 @@ numbering every surface node appended since the previous index message with its 
 ```yaml
       config:
         messageIndex:
-          enabled: true        # default true; false disables the index
+          enabled: false       # default false (opt-in in early releases); true enables
           previewTokens: 24    # per-entry preview token budget (ellipsis included)
           backlogLimit: 100    # max entries per directory line; overflow emits a placeholder
 ```
@@ -228,7 +228,7 @@ This project reuses `acp-kernel`'s compression core and `billion-context-pi`'s d
 | `autoCommand` | `true` | Register the `/acp` command on `ctx.commands` |
 | `autoNudge` | `true` | Inject the nudge into `agent/pre-step` |
 | `prompts` | — | (optional) Custom prompt copy: per-slot overrides for nudge / range table / system prompt / tool descriptions (template + named placeholders, validated at construction; see “Custom prompt copy” above and [docs/configurable-prompts-design.md](docs/configurable-prompts-design.md)) |
-| `messageIndex` | `{ enabled: true, previewTokens: 24, backlogLimit: 100 }` | Per-message numbering index: a one-line `[acp-index]` directory message injected once per turn at pre-step, numbering new surface nodes with seq + kind + token-budgeted preview, so the model can map any seq back to what it saw; a backlog beyond `backlogLimit` emits one placeholder line instead. `enabled: false` turns it off. See [docs/message-index-design.md](docs/message-index-design.md) |
+| `messageIndex` | `{ enabled: false, previewTokens: 24, backlogLimit: 100 }` | Per-message numbering index (opt-in, disabled by default in early releases): a one-line `[acp-index]` directory message injected once per turn at pre-step, numbering new surface nodes with seq + kind + token-budgeted preview, so the model can map any seq back to what it saw; a backlog beyond `backlogLimit` emits one placeholder line instead. `enabled: true` turns it on. See [docs/message-index-design.md](docs/message-index-design.md) |
 
 ## Development
 

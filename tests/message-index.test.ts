@@ -50,6 +50,10 @@ function makeEnv(): ToolEnvironment {
   }
 }
 
+// The shipped default is OFF (opt-in in early releases) — these unit tests
+// exercise the ENABLED path, so they resolve an explicitly-on config.
+const INDEX_ON = resolveMessageIndexConfig({ enabled: true })
+
 function toolOf(env: ToolEnvironment, name: string) {
   const tool = makeTools(env).find((definition) => definition.name === name)
   assert.ok(tool, `tool ${name} registered`)
@@ -113,7 +117,7 @@ test('M6: the watermark advances with each durable index message; nothing is re-
   appendAssistant(session, longText('reply', 1), 1, 1)
 
   assert.equal(indexWatermarkOf(session), 0, 'no marker yet')
-  const first = buildIndexMessage(session)
+  const first = buildIndexMessage(session, INDEX_ON)
   assert.ok(first !== null, 'first batch indexes both nodes')
   assert.match(textOf(first!), /\[acp-index\] \d+·user「/)
   assert.match(textOf(first!), /\d+·asst「/)
@@ -121,10 +125,10 @@ test('M6: the watermark advances with each durable index message; nothing is re-
   // Persist exactly what the pre-step listener would append.
   session.append('user/message', first!, { surfaceOp: 'append' })
   assert.equal(indexWatermarkOf(session), session.events.length - 1, 'the newest marker seq IS the watermark')
-  assert.equal(buildIndexMessage(session), null, 'nothing new → no message')
+  assert.equal(buildIndexMessage(session, INDEX_ON), null, 'nothing new → no message')
 
   appendUser(session, 'fresh follow-up question')
-  const second = buildIndexMessage(session)
+  const second = buildIndexMessage(session, INDEX_ON)
   assert.ok(second !== null)
   const secondText = textOf(second!)
   assert.match(secondText, /fresh follow-up question/)
@@ -150,6 +154,7 @@ test('M6: checkpoint summaries and prior index lines are skipped, disabled confi
   assert.equal(entries.some((entry) => entry.seq === checkpointSeq), false, 'the checkpoint node is never listed')
 
   assert.equal(buildIndexMessage(session, { enabled: false, previewTokens: 24 }), null)
+  assert.equal(resolveMessageIndexConfig({}).enabled, false, 'the index is opt-in in early releases (default disabled)')
   assert.deepEqual(resolveMessageIndexConfig({ enabled: false }), { enabled: false, previewTokens: 24, backlogLimit: 100 }, 'partial config keeps defaults')
   assert.equal(resolveMessageIndexConfig({ previewTokens: -3 }).previewTokens, 0, 'a negative budget clamps to 0 (bare entries) instead of misbehaving')
   assert.equal(resolveMessageIndexConfig({ previewTokens: 7.9 }).previewTokens, 7, 'fractional budgets floor')
@@ -162,7 +167,7 @@ test('M6: after a real compression the watermark survives in the log and numberi
   const session = buildTextSession(6)
   const firstNodeSeq = session.surface.nodes[0]!
 
-  const first = buildIndexMessage(session)
+  const first = buildIndexMessage(session, INDEX_ON)
   assert.ok(first !== null)
   session.append('user/message', first!, { surfaceOp: 'append' })
   const markerSeq = session.events.length - 1
@@ -173,7 +178,7 @@ test('M6: after a real compression the watermark survives in the log and numberi
   await compress.execute({ content: [{ startSeq: firstNodeSeq, endSeq: markerSeq, summary: '早期工作摘要 [msg 0]..[reply 5] 已归档' }] } as never, fakeExec(session))
 
   appendUser(session, 'fresh question after compression')
-  const next = buildIndexMessage(session)
+  const next = buildIndexMessage(session, INDEX_ON)
   assert.ok(next !== null, 'new content still gets numbered after compression')
   const nextText = textOf(next!)
   assert.match(nextText, /fresh question after compression/)
@@ -219,7 +224,7 @@ test('M6: with several durable markers the watermark is the NEWEST one (backward
 
   assert.equal(indexWatermarkOf(session), session.events.length - 1, 'watermark = newest marker seq, never the oldest')
   appendUser(session, 'only content after the last marker')
-  const next = buildIndexMessage(session)
+  const next = buildIndexMessage(session, INDEX_ON)
   assert.ok(next !== null)
   const text = textOf(next!)
   assert.match(text, /only content after the last marker/)
@@ -230,7 +235,7 @@ test('M6: with several durable markers the watermark is the NEWEST one (backward
 test('M6: a steady-state batch under backlogLimit numbers EVERY node in one message', () => {
   const session = buildTextSession(60)
   const seqs = [...session.surface.nodes]
-  const message = buildIndexMessage(session)
+  const message = buildIndexMessage(session, INDEX_ON)
   assert.ok(message !== null)
   const text = textOf(message!)
   assert.equal(text.split('[acp-index]').length - 1, 1, 'exactly one header')
@@ -244,7 +249,7 @@ test('M6: a backlog over backlogLimit collapses into ONE placeholder marker that
   appendTurn(session, 1)
   for (let index = 0; index < 120; index += 1) appendUser(session, longText('bulk', index))
 
-  const placeholder = buildIndexMessage(session)
+  const placeholder = buildIndexMessage(session, INDEX_ON)
   assert.ok(placeholder !== null)
   const text = textOf(placeholder!)
   assert.match(text, /^\[acp-index\] \d+\.\.\d+ — 120 earlier messages/, 'placeholder names the skipped span and count')
@@ -252,10 +257,10 @@ test('M6: a backlog over backlogLimit collapses into ONE placeholder marker that
 
   session.append('user/message', placeholder!, { surfaceOp: 'append' })
   assert.equal(indexWatermarkOf(session), session.events.length - 1, 'the placeholder IS an acp-index marker — its own seq is the watermark')
-  assert.equal(buildIndexMessage(session), null, 'steady state resumes: nothing new → nothing emitted')
+  assert.equal(buildIndexMessage(session, INDEX_ON), null, 'steady state resumes: nothing new → nothing emitted')
 
   appendUser(session, 'post-collapse question')
-  const next = buildIndexMessage(session)
+  const next = buildIndexMessage(session, INDEX_ON)
   assert.ok(next !== null)
   const nextText = textOf(next!)
   assert.match(nextText, /post-collapse question/)
@@ -296,7 +301,7 @@ test('M6: degraded labels stay neutral and the marker declares form catalog', ()
   assert.deepEqual(entries.map((entry) => entry.label), ['tool bash', 'tool', 'result'])
   assert.equal(entries[2]!.preview, 'orphan output')
 
-  const message = buildIndexMessage(session)
+  const message = buildIndexMessage(session, INDEX_ON)
   assert.ok(message !== null)
   const source = message as unknown as { source?: { kind?: string; plugin?: string; form?: string } }
   assert.equal(source.source?.kind, 'plugin')

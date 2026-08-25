@@ -143,7 +143,7 @@ npm install billion-context-dsh
 ```yaml
       config:
         messageIndex:
-          enabled: true        # 默认 true；false 整体关闭
+          enabled: false       # 默认 false（早期版本 opt-in）；true 开启
           previewTokens: 24    # 单条预览的 token 预算（含省略号）
           backlogLimit: 100    # 单条目录最大条目数；超过改发占位行
 ```
@@ -228,7 +228,7 @@ DSH 的每个模型请求都派生自其 append-only 会话日志（*surface*）
 | `autoCommand` | `true` | 在 `ctx.commands` 注册 `/acp` 命令 |
 | `autoNudge` | `true` | 当内核建议时向 `agent/pre-step` 注入 nudge |
 | `prompts` | — | （可选）自定义提示词文案：nudge / 范围表 / system prompt / 工具描述按槽位覆盖（模板 + 命名占位符，构造期校验；见上文「自定义提示词文案」与 [docs/configurable-prompts-design.md](docs/configurable-prompts-design.md)） |
-| `messageIndex` | `{ enabled: true, previewTokens: 24, backlogLimit: 100 }` | 每消息编号索引：每回合一次在 pre-step 注入单行 `[acp-index]` 目录消息，为新 surface 节点标注 seq + 类型 + token 预算预览，让模型把任意 seq 对回看过的内容；积压超过 `backlogLimit` 时改发占位行。`enabled: false` 关闭。见 [docs/message-index-design.md](docs/message-index-design.md) |
+| `messageIndex` | `{ enabled: false, previewTokens: 24, backlogLimit: 100 }` | 每消息编号索引（早期版本默认关闭，手工开启）：每回合一次在 pre-step 注入单行 `[acp-index]` 目录消息，为新 surface 节点标注 seq + 类型 + token 预算预览，让模型把任意 seq 对回看过的内容；积压超过 `backlogLimit` 时改发占位行。`enabled: true` 开启。见 [docs/message-index-design.md](docs/message-index-design.md) |
 
 ## 开发
 

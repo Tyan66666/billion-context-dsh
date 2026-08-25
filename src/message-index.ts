@@ -49,7 +49,7 @@ import {
 
 /** User-tunable acp-index options (all optional; see resolveMessageIndexConfig). */
 export interface MessageIndexConfig {
-  /** Emit directory messages at the first pre-step of each turn. Default true. */
+  /** Emit directory messages at the first pre-step of each turn. Default false — opt-in in early releases; set true to enable. */
   readonly enabled?: boolean
   /** Per-entry preview budget in `defaultCountTokens` tokens (ellipsis included). Default 24. */
   readonly previewTokens?: number
@@ -67,7 +67,10 @@ export interface ResolvedMessageIndexConfig {
   readonly backlogLimit: number
 }
 
-export const MESSAGE_INDEX_DEFAULTS: ResolvedMessageIndexConfig = { enabled: true, previewTokens: 24, backlogLimit: 100 }
+// Early releases ship the index DISABLED by default: it is a new model-facing
+// injection, and out-of-the-box behavior must not change until it has proven
+// itself in the field. Hosts opt in with `messageIndex: { enabled: true }`.
+export const MESSAGE_INDEX_DEFAULTS: ResolvedMessageIndexConfig = { enabled: false, previewTokens: 24, backlogLimit: 100 }
 
 /**
  * Nested config is resolved key-by-key (NOT object-spread): a host writing

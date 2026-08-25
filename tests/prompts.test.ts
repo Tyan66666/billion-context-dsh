@@ -373,6 +373,9 @@ test('M4/prompts 14: engine-level — config.prompts reaches system prompt secti
       systemPrompt: '引擎级系统提示\n{philosophy}',
       tools: { compress: '引擎级压缩工具描述' },
     },
+    // The index is opt-in (disabled by default in early releases); this test
+    // pins the ORDER contract of the enabled path, so it turns the index on.
+    messageIndex: { enabled: true },
   } as never)
   await new Promise((resolve) => setTimeout(resolve, 20))
   const engine = ctx.compaction as Named
@@ -405,8 +408,9 @@ test('M4/prompts 14: engine-level — config.prompts reaches system prompt secti
   ) as never)
   const decisionObj = decision as { kind: string; messages: Array<{ content: Array<{ type: string; text?: string }> }> }
   assert.equal(decisionObj.kind, 'enter')
-  // Since the per-message index (M6) the pre-step injects TWO extras into one
-  // enter decision: the acp-index line FIRST, the nudge LAST.
+  // With the per-message index (M6) ENABLED (this test opts in — the default
+  // in early releases is off), the pre-step injects TWO extras into one enter
+  // decision: the acp-index line FIRST, the nudge LAST.
   assert.equal(decisionObj.messages.length, 2, 'the index message and the nudge were appended to the decision')
   const indexText = decisionObj.messages[0]!.content.map((block) => block.text ?? '').join('')
   assert.ok(indexText.startsWith('[acp-index] '), 'the acp-index message precedes the nudge')
