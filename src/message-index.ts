@@ -11,10 +11,11 @@
  * pre-step of each turn — the step that claimed inbox input, never the model's
  * internal tool continuation steps — we append ONE compact plugin user message
  * that numbers every surface node appended since the previous index message.
- * A token-delay guard (`maxDelayTokens`) re-injects mid-turn when a long tool
- * run lets unindexed content pile past the threshold, so a turn that never
- * claims inbox input again still gets numbered before the model loses
- * seq↔content alignment:
+ * A token-delay guard re-injects mid-turn when a long tool run lets unindexed
+ * content pile past its threshold. Tool output (`maxDelayToolTokens`) and
+ * conversation messages (`maxDelayTextTokens`, 0 = off) are counted
+ * separately, so a turn that never claims inbox input again still gets
+ * numbered before the model loses seq↔content alignment:
  *
  *   [acp-index] 12·user「帮我跑下测试」 13·asst「先看配置…」 14·tool bash「ls」 15·result bash「file-a file-b」
  *
@@ -48,6 +49,7 @@ import {
   INDEX_PLUGIN,
   isCheckpointNode,
   isIndexMarkerEvent,
+  isToolEvent,
   toolCallIdOfResultEvent,
 } from './messages.ts'
 
@@ -63,17 +65,27 @@ export interface MessageIndexConfig {
    */
   readonly backlogLimit?: number
   /**
-   * Re-inject the directory mid-turn once unindexed surface content has
-   * accumulated at least this many tokens. Per-turn cadence alone can leave a
-   * very long turn (one user message, dozens of internal tool rounds)
-   * unnumbered for tens of thousands of tokens — the model loses seq↔content
-   * alignment exactly when it needs it most. The delay guard fires on tool
-   * continuation steps too (they claim no inbox input, so the per-turn gate
-   * skips them); short turns never cross it, so behavior is identical to
-   * per-turn-only. The watermark advances with every injection, so a
-   * re-injection never renumbers anything. 0 disables the guard. Default 8192.
+   * Re-inject the directory mid-turn once unindexed TOOL output (tool-call
+   * and tool-result) has accumulated at least this many tokens. Per-turn
+   * cadence alone can leave a very long turn (one user message, dozens of
+   * internal tool rounds) unnumbered for tens of thousands of tokens — the
+   * model loses seq↔content alignment exactly when it needs it most. The
+   * delay guard fires on tool continuation steps too (they claim no inbox
+   * input, so the per-turn gate skips them); short turns never cross it, so
+   * behavior is identical to per-turn-only. The watermark advances with every
+   * injection, so a re-injection never renumbers anything. 0 disables this
+   * counter. Default 8192.
    */
-  readonly maxDelayTokens?: number
+  readonly maxDelayToolTokens?: number
+  /**
+   * Like `maxDelayToolTokens`, but counts CONVERSATION messages (user, asst,
+   * note) instead of tool output. Default 0 — conversation alone never
+   * triggers a re-injection: the model just wrote or read those messages, so
+   * it never loses alignment with them; the counter exists for hosts that
+   * want a long conversational turn to re-inject too. Any counter crossing
+   * its threshold triggers a re-injection (tool OR text).
+   */
+  readonly maxDelayTextTokens?: number
 }
 
 /** Fully resolved acp-index options. */
@@ -81,13 +93,14 @@ export interface ResolvedMessageIndexConfig {
   readonly enabled: boolean
   readonly previewTokens: number
   readonly backlogLimit: number
-  readonly maxDelayTokens: number
+  readonly maxDelayToolTokens: number
+  readonly maxDelayTextTokens: number
 }
 
 // Early releases ship the index DISABLED by default: it is a new model-facing
 // injection, and out-of-the-box behavior must not change until it has proven
 // itself in the field. Hosts opt in with `messageIndex: { enabled: true }`.
-export const MESSAGE_INDEX_DEFAULTS: ResolvedMessageIndexConfig = { enabled: false, previewTokens: 16, backlogLimit: 100, maxDelayTokens: 8192 }
+export const MESSAGE_INDEX_DEFAULTS: ResolvedMessageIndexConfig = { enabled: false, previewTokens: 16, backlogLimit: 100, maxDelayToolTokens: 8192, maxDelayTextTokens: 0 }
 
 /**
  * Nested config is resolved key-by-key (NOT object-spread): a host writing
@@ -119,20 +132,23 @@ export function resolveMessageIndexConfig(config?: MessageIndexConfig): Resolved
       console.warn(`[billion-context-dsh] messageIndex.backlogLimit must be a finite number >= 1, got ${String(rawBacklog)} — keeping default ${MESSAGE_INDEX_DEFAULTS.backlogLimit}`)
     }
   }
-  let maxDelayTokens = MESSAGE_INDEX_DEFAULTS.maxDelayTokens
-  const rawDelay = config?.maxDelayTokens
-  if (rawDelay !== undefined) {
-    if (typeof rawDelay === 'number' && Number.isFinite(rawDelay) && rawDelay >= 0) {
-      maxDelayTokens = Math.floor(rawDelay)
-    } else {
-      console.warn(`[billion-context-dsh] messageIndex.maxDelayTokens must be a finite number >= 0, got ${String(rawDelay)} — keeping default ${MESSAGE_INDEX_DEFAULTS.maxDelayTokens}`)
-    }
+  // Delay thresholds are independent counters over DIFFERENT message kinds:
+  // tool output (`maxDelayToolTokens`) and conversation messages
+  // (`maxDelayTextTokens`, default 0 = conversation never triggers). Each is
+  // clamped like backlogLimit (>= 0, floor; invalid → default + warn).
+  const clampDelay = (raw: unknown, key: 'maxDelayToolTokens' | 'maxDelayTextTokens', fallback: number): number => {
+    if (typeof raw === 'number' && Number.isFinite(raw) && raw >= 0) return Math.floor(raw)
+    console.warn(`[billion-context-dsh] messageIndex.${key} must be a finite number >= 0, got ${String(raw)} — keeping default ${fallback}`)
+    return fallback
   }
+  const maxDelayToolTokens = clampDelay(config?.maxDelayToolTokens, 'maxDelayToolTokens', MESSAGE_INDEX_DEFAULTS.maxDelayToolTokens)
+  const maxDelayTextTokens = clampDelay(config?.maxDelayTextTokens, 'maxDelayTextTokens', MESSAGE_INDEX_DEFAULTS.maxDelayTextTokens)
   return {
     enabled: config?.enabled ?? MESSAGE_INDEX_DEFAULTS.enabled,
     previewTokens,
     backlogLimit,
-    maxDelayTokens,
+    maxDelayToolTokens,
+    maxDelayTextTokens,
   }
 }
 
@@ -283,12 +299,15 @@ export function collectIndexEntries(session: Session, watermark: number, preview
 }
 
 /**
- * Estimated `defaultCountTokens` total of every surfaced node ABOVE the
- * watermark that the directory would index next (same skip set as
- * `collectIndexEntries`: checkpoints and prior index lines). The pre-step
- * listener compares this against `maxDelayTokens` to decide whether a long
- * tool run has accumulated enough unindexed content to deserve a mid-turn
- * re-injection — a cheap O(surface) sum, no message built.
+ * Estimated `defaultCountTokens` total of surfaced TOOL nodes (tool-call and
+ * tool-result) ABOVE the watermark, mirroring the skip set of
+ * `collectIndexEntries` (checkpoints and prior index lines). The pre-step
+ * listener compares this against `maxDelayToolTokens` to decide whether a
+ * long tool run has accumulated enough unindexed output to deserve a mid-turn
+ * re-injection — a cheap O(surface) sum, no message built. Conversation
+ * messages never count toward this counter (that is `pendingTextTokenTotal`
+ * / `maxDelayTextTokens`): the model just wrote or read them, so it does not
+ * lose alignment with them the way it does with bare tool dumps.
  *
  * The guard only cares about crossing `cap` (it never needs the exact sum):
  * when `cap` is finite, the loop bails as soon as the running total reaches
@@ -296,12 +315,31 @@ export function collectIndexEntries(session: Session, watermark: number, preview
  * cost ~700ms of synchronous pre-step time to tokenize in full, and the
  * threshold bounds exactly the amount of text the guard must ever read.
  */
-export function pendingTokenTotal(session: Session, watermark: number, cap = Number.POSITIVE_INFINITY): number {
+export function pendingToolTokenTotal(session: Session, watermark: number, cap = Number.POSITIVE_INFINITY): number {
+  return pendingTokensOf(session, watermark, cap, (event) => isToolEvent(event))
+}
+
+/**
+ * Same shape as `pendingToolTokenTotal` but over CONVERSATION nodes (user,
+ * asst, note) — the counter behind `maxDelayTextTokens`. Default 0 means the
+ * pre-step gate never consults it (conversation alone never triggers).
+ */
+export function pendingTextTokenTotal(session: Session, watermark: number, cap = Number.POSITIVE_INFINITY): number {
+  return pendingTokensOf(session, watermark, cap, (event) => !isToolEvent(event))
+}
+
+/** Shared O(surface) scan: skip set + per-kind filter + capped early exit. */
+function pendingTokensOf(
+  session: Session,
+  watermark: number,
+  cap: number,
+  isCounted: (event: SessionEvent) => boolean,
+): number {
   let total = 0
   for (const seq of session.surface.nodes) {
     if (seq <= watermark) continue
     const event = session.events[seq]
-    if (event === undefined || isCheckpointNode(event) || isIndexMarkerEvent(event)) continue
+    if (event === undefined || isCheckpointNode(event) || isIndexMarkerEvent(event) || !isCounted(event)) continue
     total += defaultCountTokens(extractEventText(event))
     if (total >= cap) return total
   }

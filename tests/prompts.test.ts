@@ -21,7 +21,7 @@ import {
   renderTemplate,
   resolvePrompts,
 } from '../src/prompts.ts'
-import { buildTextSession } from './helpers.ts'
+import { buildTextSession, buildToolSession } from './helpers.ts'
 import AcpCompactionEngine, { AcpCompactionEngine as Named } from '../src/index.ts'
 
 function fakeAgent(session: import('@deepseek-ai/dsh-session').Session): Agent {
@@ -424,10 +424,12 @@ test('M4/prompts 14b: engine-level — the token-delay guard re-injects the dire
   ctx.provide('tools' as never, { register: () => {} } as never)
   ctx.plugin(AcpCompactionEngine as never, {
     modelContextLimit: 16000,
-    // Isolate the guard: no nudge noise, index on, explicit threshold (the
-    // default is 8192 — pin it here so this test does not ride config drift).
+    // Isolate the guard: no nudge noise, index on, explicit tool threshold
+    // (the default is 8192 — pin it here so this test does not ride config
+    // drift). The text counter stays at its default 0: conversation must not
+    // push this gate.
     autoNudge: false,
-    messageIndex: { enabled: true, maxDelayTokens: 8192 },
+    messageIndex: { enabled: true, maxDelayToolTokens: 8192 },
   } as never)
   await new Promise((resolve) => setTimeout(resolve, 20))
   const engine = ctx.compaction as Named
@@ -448,31 +450,42 @@ test('M4/prompts 14b: engine-level — the token-delay guard re-injects the dire
     async () => ({ kind: 'enter', messages: [] }) as never,
   ) as never)) as { kind: string; messages: Array<{ content: Array<{ type?: string; text?: string }> }> }
 
-  // buildTextSession(12) measures 12,391 tokens — past the 8192 threshold,
-  // the guard fires even though nothing was claimed (each node ≈ 1.1K).
-  const big = await runPreStep(buildTextSession(12))
+  // buildToolSession(6) ≈ 10.7K tokens of TOOL output (each call/result pair
+  // ≈ 1.8K, no conversation nodes at all) — past the 8192 threshold, so the
+  // guard fires even though nothing was claimed. A pure-text session can
+  // NEVER trip this counter: conversation feeds `maxDelayTextTokens` instead.
+  const big = await runPreStep(buildToolSession(6))
   assert.equal(big.kind, 'enter')
   assert.equal(big.messages.length, 1, 'the guard injected the directory on a tool continuation step')
   const bigText = big.messages[0]!.content.map((block) => block.text ?? '').join('')
   assert.ok(bigText.startsWith('[acp-index] '), 'the injected line is an acp-index directory')
 
-  // buildTextSession(2) measures 2,065 tokens: below the threshold → the
-  // decision passes through untouched (no synthetic content on cheap steps).
-  const small = await runPreStep(buildTextSession(2))
+  // buildToolSession(2) ≈ 3.6K tokens of tool output: below the threshold →
+  // the decision passes through untouched (no synthetic content on cheap
+  // steps).
+  const small = await runPreStep(buildToolSession(2))
   assert.equal(small.kind, 'enter')
-  assert.equal(small.messages.length, 0, 'below maxDelayTokens the guard stays silent')
+  assert.equal(small.messages.length, 0, 'below maxDelayToolTokens the guard stays silent')
+
+  // A conversation-heavy session never trips the TOOL counter — even at 12,391
+  // text tokens, `pendingToolTokenTotal` sees zero tool nodes, and the text
+  // counter is off by default (maxDelayTextTokens: 0).
+  const texty = await runPreStep(buildTextSession(12))
+  assert.equal(texty.kind, 'enter')
+  assert.equal(texty.messages.length, 0, 'conversation tokens never push maxDelayToolTokens')
 })
 
 test('M4/prompts 14c: engine-level — off-switches, the disabled default, and wake-up rounds never inject', async () => {
-  // (a) maxDelayTokens: 0 disables the DELAY guard (the per-turn gate is a
-  // separate switch): a long tool run never re-injects on a continuation step.
+  // (a) maxDelayToolTokens: 0 + maxDelayTextTokens: 0 disables the DELAY
+  // guard entirely (the per-turn gate is a separate switch): a long tool run
+  // never re-injects on a continuation step.
   const ctxA = new Context()
   ctxA.provide('systemPrompt' as never, { section: () => {} } as never)
   ctxA.provide('tools' as never, { register: () => {} } as never)
   ctxA.plugin(AcpCompactionEngine as never, {
     modelContextLimit: 16000,
     autoNudge: false,
-    messageIndex: { enabled: true, maxDelayTokens: 0 },
+    messageIndex: { enabled: true, maxDelayToolTokens: 0, maxDelayTextTokens: 0 },
   } as never)
   await new Promise((resolve) => setTimeout(resolve, 20))
   const engineA = ctxA.compaction as Named
@@ -482,9 +495,9 @@ test('M4/prompts 14c: engine-level — off-switches, the disabled default, and w
       { agent: fakeAgent(session), messages, turn: 1, step, signal: new AbortController().signal } as never,
       async () => ({ kind: 'enter', messages: [] }) as never,
     ) as never)) as { kind: string; messages: Array<{ content: Array<{ type?: string; text?: string }> }> }
-  const off = await runA(buildTextSession(12), [], 1)
+  const off = await runA(buildToolSession(6), [], 1)
   assert.equal(off.kind, 'enter')
-  assert.equal(off.messages.length, 0, 'maxDelayTokens: 0 disables the delay guard on tool steps')
+  assert.equal(off.messages.length, 0, 'zero delay thresholds disable the delay guard on tool steps')
 
   // (b) Enabled with the default threshold: a wake-up round (step 0, empty
   // claim) must stay synthetic-free even with a huge pending total — the

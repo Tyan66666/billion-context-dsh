@@ -94,3 +94,19 @@ export function buildTextSession(count: number): Session {
   }
   return session
 }
+
+/**
+ * A session with `pairs` tool call/result pairs inside one open turn — a
+ * tool-heavy session for the delay-guard tests (conversation nodes never
+ * count toward `maxDelayToolTokens`, so a pure-text session like
+ * `buildTextSession` can never trip it).
+ */
+export function buildToolSession(pairs: number): Session {
+  const session = Session.create('test-tool-session')
+  appendTurn(session, 1)
+  for (let index = 0; index < pairs; index += 1) {
+    appendToolCall(session, longText('call', index), `call-${index}`)
+    appendToolResult(session, longText('res', index), `call-${index}`)
+  }
+  return session
+}

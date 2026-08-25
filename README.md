@@ -138,7 +138,7 @@ npm install billion-context-dsh
 [acp-index] 12·user「帮我跑下测试」 13·asst「先看配置…」 14·tool bash「ls」 15·result bash「file-a file-b」
 ```
 
-为上一条索引之后新出现的每个 surface 节点标注 seq、类型与内容预览（token 预算截断，默认 16 tokens，CJK 按 1 字/token 计）。**超过 512 tokens 的大节点会附 `[N tok]` 标记**（千位以上显示为 `[1.5K tok]`），让模型一眼认出「谁是回收重点」——未标注只表示低于阈值，不表示空内容，精确大小可随时经 `acp_status` 钻取。目录**每回合注入一次**（模型内部工具续步不重复注入）；**若一次超长回合（单次发言后连续几十个工具步）让未编号内容累积超过 `maxDelayTokens`（默认 8192 tokens），会在工具续步中自动补发一次目录行**，保证轮内对位不失真（短回合不触发，行为与纯每回合一致）。触发回合的用户消息要等下一回合才编号（追加式日志的固有顺序）。模型由此随时把任意 seq 对回它看过的内容——压缩范围表、`acp_status` 钻取行、`compress` 边界从此都有文本锚点。压缩后旧索引行随被遮蔽的原文一起消失（定位交给块摘要，且不再进入 `search_context` 文档集），新行从最新 live seq 继续编号，id 空间保持连续。冷启动接入存量会话时，待编号消息超过 `backlogLimit` 会改发一行占位目录（只列 seq 范围），避免单条消息吞下全部积压：
+为上一条索引之后新出现的每个 surface 节点标注 seq、类型与内容预览（token 预算截断，默认 16 tokens，CJK 按 1 字/token 计）。**超过 512 tokens 的大节点会附 `[N tok]` 标记**（千位以上显示为 `[1.5K tok]`），让模型一眼认出「谁是回收重点」——未标注只表示低于阈值，不表示空内容，精确大小可随时经 `acp_status` 钻取。目录**每回合注入一次**（模型内部工具续步不重复注入）；**若一次超长回合（单次发言后连续几十个工具步）让未编号的*工具输出*累积超过 `maxDelayToolTokens`（默认 8192 tokens），会在工具续步中自动补发一次目录行**，保证轮内对位不失真（对话消息默认不参与推动——`maxDelayTextTokens` 默认 `0`，需要时单独设阈值；短回合不触发，行为与纯每回合一致）。触发回合的用户消息要等下一回合才编号（追加式日志的固有顺序）。模型由此随时把任意 seq 对回它看过的内容——压缩范围表、`acp_status` 钻取行、`compress` 边界从此都有文本锚点。压缩后旧索引行随被遮蔽的原文一起消失（定位交给块摘要，且不再进入 `search_context` 文档集），新行从最新 live seq 继续编号，id 空间保持连续。冷启动接入存量会话时，待编号消息超过 `backlogLimit` 会改发一行占位目录（只列 seq 范围），避免单条消息吞下全部积压：
 
 ```yaml
       config:
@@ -146,7 +146,8 @@ npm install billion-context-dsh
           enabled: false       # 默认 false（早期版本 opt-in）；true 开启
           previewTokens: 16    # 单条预览的 token 预算（含省略号）
           backlogLimit: 100    # 单条目录最大条目数；超过改发占位行
-          maxDelayTokens: 8192 # 长轮补发阈值：未编号内容累计达到即补发目录行；0 关闭
+          maxDelayToolTokens: 8192 # 长轮补发阈值：未编号工具输出累计达到即补发目录行；0 关闭
+          maxDelayTextTokens: 0    # 对话消息累计阈值：0 = 对话不参与推动（需要时单独设）
 ```
 
 水位推进、压缩后连续性与滞后一轮语义见 [docs/message-index-design.md](docs/message-index-design.md)。
@@ -175,7 +176,7 @@ DSH 的每个模型请求都派生自其 append-only 会话日志（*surface*）
 |---|---|
 | `compress` 工具遮蔽一段范围 | 持久化 `surfaceOp: { op: 'replace' }`——模型书写的摘要成为 checkpoint 节点；原文保留在日志中 |
 | refs（`m00001` 标签） | surface seq，由 nudge 的可压缩范围表携带 |
-| 每消息编号（pi 的内联 `<acp>` 标签） | 持久化 `[acp-index]` 插件消息：每回合一次追加单行目录（长轮中未编号内容越过 `maxDelayTokens` 会提前补发），为新 surface 节点标注 seq + 类型 + 预览 |
+| 每消息编号（pi 的内联 `<acp>` 标签） | 持久化 `[acp-index]` 插件消息：每回合一次追加单行目录（长轮中未编号工具输出越过 `maxDelayToolTokens` 会提前补发），为新 surface 节点标注 seq + 类型 + 预览 |
 | nudge（"效率提示——尽早压缩保持精简"） | 由内核的压力决策在 `agent/pre-step` 注入——效率通知 + 上下文分解 + 压缩规则，语气对齐 kernel/pi；绝非命令 |
 | `decompress` | 从日志只读恢复被遮蔽的原文 |
 | `search_context` | 从日志重建块摘要 + 被遮蔽原文的统一文档集，交 acp-kernel `searchBlocks`（hybrid：词干化 + CJK bigram + 字符 n-gram 模糊）打分；命中回链所属块 |
@@ -229,7 +230,7 @@ DSH 的每个模型请求都派生自其 append-only 会话日志（*surface*）
 | `autoCommand` | `true` | 在 `ctx.commands` 注册 `/acp` 命令 |
 | `autoNudge` | `true` | 当内核建议时向 `agent/pre-step` 注入 nudge |
 | `prompts` | — | （可选）自定义提示词文案：nudge / 范围表 / system prompt / 工具描述按槽位覆盖（模板 + 命名占位符，构造期校验；见上文「自定义提示词文案」与 [docs/configurable-prompts-design.md](docs/configurable-prompts-design.md)） |
-| `messageIndex` | `{ enabled: false, previewTokens: 16, backlogLimit: 100, maxDelayTokens: 8192 }` | 每消息编号索引（早期版本默认关闭，手工开启）：每回合一次在 pre-step 注入单行 `[acp-index]` 目录消息，为新 surface 节点标注 seq + 类型 + token 预算预览，让模型把任意 seq 对回看过的内容；长轮中未编号内容累计超过 `maxDelayTokens` 会提前补发目录行（`0` 关闭）；积压超过 `backlogLimit` 时改发占位行。`enabled: true` 开启。见 [docs/message-index-design.md](docs/message-index-design.md) |
+| `messageIndex` | `{ enabled: false, previewTokens: 16, backlogLimit: 100, maxDelayToolTokens: 8192, maxDelayTextTokens: 0 }` | 每消息编号索引（早期版本默认关闭，手工开启）：每回合一次在 pre-step 注入单行 `[acp-index]` 目录消息，为新 surface 节点标注 seq + 类型 + token 预算预览，让模型把任意 seq 对回看过的内容；长轮中未编号**工具输出**累计超过 `maxDelayToolTokens` 会提前补发目录行（`0` 关闭），**对话消息**累计超过 `maxDelayTextTokens` 同样触发（默认 `0` = 对话不参与推动）；积压超过 `backlogLimit` 时改发占位行。`enabled: true` 开启。见 [docs/message-index-design.md](docs/message-index-design.md) |
 
 ## 开发
 

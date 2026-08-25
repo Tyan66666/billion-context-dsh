@@ -42,7 +42,7 @@ import { AcpStateStore } from './state.ts'
 import { makeTools, type ToolEnvironment } from './tools.ts'
 import { acpCommand } from './commands.ts'
 import { buildNudge } from './nudge.ts'
-import { buildIndexMessage, indexWatermarkOf, pendingTokenTotal, resolveMessageIndexConfig, type MessageIndexConfig, type ResolvedMessageIndexConfig } from './message-index.ts'
+import { buildIndexMessage, indexWatermarkOf, pendingToolTokenTotal, pendingTextTokenTotal, resolveMessageIndexConfig, type MessageIndexConfig, type ResolvedMessageIndexConfig } from './message-index.ts'
 import { ACP_SYSTEM_PROMPT_ORDER } from './system-prompt.ts'
 import { renderSystemPrompt, resolvePrompts, type AcpPrompts, type ResolvedPrompts } from './prompts.ts'
 import { DEFAULT_CONTEXT_WINDOW, detectContextWindow, type AcpWindow } from './window.ts'
@@ -161,9 +161,10 @@ export interface AcpConfig {
   /**
    * Per-message numbering directory (acp-index): at the first pre-step of
    * each turn, one compact plugin message numbers every new surface node, so
-   * the model can map seqs to content without a rewrite hook; `maxDelayTokens`
-   * additionally re-injects mid-turn when a long tool run accumulates enough
-   * unindexed content. See docs/message-index-design.md.
+   * the model can map seqs to content without a rewrite hook; token-delay
+   * counters (`maxDelayToolTokens`, `maxDelayTextTokens`) additionally
+   * re-inject mid-turn when a long tool run accumulates enough unindexed
+   * content. See docs/message-index-design.md.
    */
   readonly messageIndex?: MessageIndexConfig
   /** Per-stage prompt template overrides (nudge / range table / system prompt / tool descriptions). See docs/configurable-prompts-design.md. */
@@ -330,27 +331,39 @@ export class AcpCompactionEngine extends CompactionEngine {
       const extras: UserMessage[] = []
       // Cadence: the directory is emitted when the step claimed inbox input
       // (`payload.messages` — what the loop removed from the inbox for THIS
-      // step: the first step of a turn, or a mid-turn follow-up), OR when the
+      // step: the first step of a turn, or a mid-turn follow-up), OR when a
       // token-delay guard trips. Per-turn alone leaves a very long turn (one
       // user message, dozens of internal tool rounds) unnumbered for tens of
       // thousands of tokens — the model loses seq↔content alignment mid-turn;
-      // `maxDelayTokens` re-injects on content volume even though tool
-      // continuation steps claim nothing and would otherwise never emit a
-      // directory line. Short turns never cross the threshold, so per-turn-only
+      // the guards re-inject on content volume even though tool continuation
+      // steps claim nothing and would otherwise never emit a directory line.
+      // Tool output (`maxDelayToolTokens`) and conversation messages
+      // (`maxDelayTextTokens`, default 0 = conversation never trips) are
+      // counted separately, and any counter crossing its threshold fires the
+      // re-injection. Short turns never cross the thresholds, so per-turn-only
       // behavior is unchanged, and empty-claim wake-up rounds stay
       // synthetic-free (step 0 never trips the guard, so a host zero-cost wake
       // round with a stale watermark cannot be turned into a real model step).
       // The guard is lazy on purpose: when the step already claimed input the
-      // directory WILL be built, so scanning the pending total would be pure
+      // directory WILL be built, so scanning the pending totals would be pure
       // waste; and when the index is disabled (the default) the whole block is
       // skipped, keeping the hot path at zero cost.
       const dueByTurn = payload.messages.length > 0
       let dueByDelay = false
       let watermark = 0
-      if (!dueByTurn && this.messageIndex.enabled && this.messageIndex.maxDelayTokens > 0 && payload.step > 0) {
-        watermark = indexWatermarkOf(payload.agent.session)
-        dueByDelay = pendingTokenTotal(payload.agent.session, watermark, this.messageIndex.maxDelayTokens)
-          >= this.messageIndex.maxDelayTokens
+      if (!dueByTurn && this.messageIndex.enabled && payload.step > 0) {
+        const { maxDelayToolTokens, maxDelayTextTokens } = this.messageIndex
+        if (maxDelayToolTokens > 0 || maxDelayTextTokens > 0) {
+          watermark = indexWatermarkOf(payload.agent.session)
+          if (maxDelayToolTokens > 0) {
+            dueByDelay = pendingToolTokenTotal(payload.agent.session, watermark, maxDelayToolTokens)
+              >= maxDelayToolTokens
+          }
+          if (!dueByDelay && maxDelayTextTokens > 0) {
+            dueByDelay = pendingTextTokenTotal(payload.agent.session, watermark, maxDelayTextTokens)
+              >= maxDelayTextTokens
+          }
+        }
       }
       if (dueByTurn || dueByDelay) {
         const indexMessage = buildIndexMessage(payload.agent.session, this.messageIndex, watermark)
