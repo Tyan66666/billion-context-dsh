@@ -44,6 +44,10 @@ dsh plugin --profile web add billion-context-dsh
 窗口自动探测默认全开，**无需手写任何组合行**。需要自定义 `config`（`modelContextLimit`
 / `prompts` / nudge 阈值）时，在 profile 的 `cordis.patch.yml` 里写一个**同 id**
 （`compaction-acp`）的行并附 `config:` 即可覆盖 bundle 默认行（见 §2 的例子）。
+六个标量键（`modelContextLimit` / `autoModelContextLimit` / nudge 三阈值 / `autoNudge`）
+还可以**运行时热调**：编辑 `~/.dsh/settings.yaml` 的 `compaction-acp` 段或用 `/acp config`
+子命令，改动立即生效、无需重启（`settingsEnabled: false` 可整体关闭该集成——见 README
+「运行时设置」）。
 
 ## 2. 组合行
 

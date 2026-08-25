@@ -33,7 +33,8 @@ src/
 ├── config.ts       # kernel config assembly (thresholds + coreOverrides)
 ├── host-tokens.ts  # shadow-price pricing: host-vocabulary mirror (estimateHostContent/estimateHostMessage/hostPriceEvent) + shadowedTokensViaMeter (ctx.tokenMeter.measure preferred, mirror fallback) — rule 12
 ├── window.ts       # auto context-window detection (LLM runtime probe, fallback 128000)
-└── commands.ts     # M4: /acp slash command
+├── settings.ts     # M6: runtime settings integration — six scalar knobs hot-editable via ~/.dsh/settings.yaml / /acp config (installSettingsSection seam; the composition base MUST be filtered to schema-known keys — raw rows carry prompts/coreOverrides/countTokens that must never enter the settings layer); see docs/settings-integration-design.md
+└── commands.ts     # M4: /acp slash command (status / compress / decompress / config)
 ```
 
 Design decisions (see docs/dsh-porting-verification.md for the full evidence):
