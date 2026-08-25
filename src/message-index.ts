@@ -109,11 +109,12 @@ export function resolveMessageIndexConfig(config?: MessageIndexConfig): Resolved
   }
 }
 
-/** One numbered surface node: its seq, a compact kind label, and a budgeted content preview ('' when the node has no text). */
+/** One numbered surface node: its seq, a compact kind label, a budgeted content preview ('' when the node has no text), and the estimated token size of its text. */
 export interface IndexEntry {
   readonly seq: number
   readonly label: string
   readonly preview: string
+  readonly tokens: number
 }
 
 /**
@@ -243,14 +244,36 @@ export function collectIndexEntries(session: Session, watermark: number, preview
     if (seq <= watermark) continue
     const event = session.events[seq]
     if (event === undefined || isCheckpointNode(event) || isIndexMarkerEvent(event)) continue
-    entries.push({ seq, label: labelOf(event, toolNames), preview: truncateToTokenBudget(extractEventText(event), previewTokens) })
+    const text = extractEventText(event)
+    entries.push({
+      seq,
+      label: labelOf(event, toolNames),
+      preview: truncateToTokenBudget(text, previewTokens),
+      tokens: defaultCountTokens(text),
+    })
   }
   return entries
 }
 
-/** One catalog line per entry — bare `seq·label` when the node has no text. */
+/**
+ * Entries at or above this estimated token size get an explicit `[N tok]`
+ * marker; smaller entries carry none. The preview is budget-capped, so a huge
+ * tool dump and a one-line note render identically — the marker restores the
+ * "this node is big, prime compress target" signal. Absence means "below
+ * threshold", never "empty": an unmarked entry still shows its preview text,
+ * and the exact number stays one acp_status drilldown away.
+ */
+const LARGE_ENTRY_MIN_TOKENS = 512
+
+/** `550` → `[550 tok]`, `1500` → `[1.5K tok]`, `8000` → `[8K tok]`. */
+function tokenMarker(tokens: number): string {
+  return tokens >= 1000 ? `[${(tokens / 1000).toFixed(1).replace(/\.0$/, '')}K tok]` : `[${tokens} tok]`
+}
+
+/** One catalog line per entry — bare `seq·label` when the node has no text; a `[N tok]` suffix marks entries at or above `LARGE_ENTRY_MIN_TOKENS`. */
 function renderEntry(entry: IndexEntry): string {
-  return entry.preview === '' ? `${entry.seq}·${entry.label}` : `${entry.seq}·${entry.label}「${entry.preview}」`
+  const body = entry.preview === '' ? `${entry.seq}·${entry.label}` : `${entry.seq}·${entry.label}「${entry.preview}」`
+  return entry.tokens >= LARGE_ENTRY_MIN_TOKENS ? `${body}${tokenMarker(entry.tokens)}` : body
 }
 
 const indexSource = { kind: 'plugin', plugin: INDEX_PLUGIN, form: 'catalog' } as const

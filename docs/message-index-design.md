@@ -59,6 +59,7 @@ DSH 无法走 pi 的内联标签路线，因为模型可见内容只有一个合
 - `flattenPreview`：控制字符 → 空格、引号族（`「」"'‘’`）→ `'`、全角间隔号 `·` → `,`——弯引号会破坏引号对位、`·` 会伪造条目定界符，两者都必须映射走；再折叠空白串。
 - `truncateToTokenBudget(text, maxTokens)`：先按 ~`maxTokens*4` 字符粗剪短路（`defaultCountTokens` 下 L 字符 ≥ L/4 token，粗剪不可能丢掉预算内的内容，避免对超大单节点做全文二分），再二分找「预算 −1 token 内最长前缀」补 `…`；二分切点落在代理对高半区时回退一位，不产生 U+FFFD。**按 token 不按字符**——CJK 是 1 字/token，按字符截断会让中文预览实际花费 4× 预算。非有限或 <1 的预算返回空串。
 - 默认 `previewTokens: 24`（含省略号）；配置值钳制 ≥0（floor），修正时 `console.warn`。
+- **大头标记**：预览是 token 预算截断的——一条 8000 token 的工具转储和一句短注记渲染后一样长，模型看不出「谁是回收重点」。条目按 `defaultCountTokens` 估算文本 token 数，≥512 时附 `[N tok]` 后缀（≥1000 显示为 `[X.XK tok]`），把大小信号补回来。**未标注的唯一含义是「低于阈值」**：条目仍带预览文本（有预览 ≠ 空内容，也不会被读成零 token），精确大小随时可经 `acp_status` 钻取（`mN, tokens`）。阈值是常量（`LARGE_ENTRY_MIN_TOKENS = 512`），不重复 drilldown 的全量精确表。
 
 ### 4.5 稳态无上限，积压占位降级
 
@@ -108,7 +109,7 @@ stripOrphans → await next() → reject 直通
 
 ## 7. 测试
 
-`tests/message-index.test.ts`（12 用例全绿）：标签与预览/裸条目形状；CJK+ASCII token 预算、引号压平映射与预算边界（0 关闭 / 恰好 / 截断 / 代理对）；水位推进不重索引与多 marker 稳态（尾扫取最新）；checkpoint/自身标记跳过 + disabled + 部分配置默认保留与钳制；真实压缩吞掉 marker 后仅索引新节点；60 节点单消息不变量；backlog 占位降级与恢复；退化标签（裸 tool/result/note）与 form:'catalog' 声明；preserveRecent:0 下保护尾跳过插件行判别；search_context 排除被遮蔽 marker 行且真命中照常上榜。另更新 `tests/prompts.test.ts` 用例 14（engine-level）：payload 补齐真实 PreStepPayload 形状（含认领的 `messages`），断言 enter 决策含 2 条 extras 且**索引先于 nudge**（顺序契约的引擎级守护）。
+`tests/message-index.test.ts`（13 用例全绿）：标签与预览/裸条目形状；CJK+ASCII token 预算、引号压平映射与预算边界（0 关闭 / 恰好 / 截断 / 代理对）；水位推进不重索引与多 marker 稳态（尾扫取最新）；checkpoint/自身标记跳过 + disabled + 部分配置默认保留与钳制；真实压缩吞掉 marker 后仅索引新节点；60 节点单消息不变量；backlog 占位降级与恢复；退化标签（裸 tool/result/note）与 form:'catalog' 声明；preserveRecent:0 下保护尾跳过插件行判别；search_context 排除被遮蔽 marker 行且真命中照常上榜；**大头 `[N tok]` 标记**（K 缩写、阈值恰好、CJK 计 token、子阈值与空文本不标）。另更新 `tests/prompts.test.ts` 用例 14（engine-level）：payload 补齐真实 PreStepPayload 形状（含认领的 `messages`），断言 enter 决策含 2 条 extras 且**索引先于 nudge**（顺序契约的引擎级守护）。
 
 ## 8. 重评门（upstream re-evaluation gates）
 

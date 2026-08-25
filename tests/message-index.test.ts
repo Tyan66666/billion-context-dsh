@@ -337,3 +337,32 @@ test('M6: search_context never ranks shadowed acp-index rows over real hits', as
   assert.match(out.text, /deploy ERROR traceback/, 'the real hit surfaces')
   assert.equal(out.text.includes('[acp-index]'), false, 'synthetic directory rows are excluded from the search doc set')
 })
+
+test('M6: entries at or above the large-entry threshold carry a [N tok] marker; smaller ones stay bare', () => {
+  const session = Session.create('m6-large-tokens')
+  appendTurn(session, 1)
+  // 6000 ASCII chars = ceil(6000/4) = 1500 tokens → [1.5K tok]
+  appendUser(session, 'a'.repeat(6000))
+  // 900 chars = 225 tokens → NO marker
+  appendUser(session, 'b'.repeat(900))
+  // exactly the 512-token threshold (2048 ASCII chars) → [512 tok]
+  appendUser(session, 'c'.repeat(2048))
+  // CJK counts 1 char/token: 512 chars = 512 tokens → [512 tok]
+  appendUser(session, '压'.repeat(512))
+  // a bare tool-call has no text → 0 tokens, no marker
+  appendToolCall(session, '', 'call-big', 1, 1)
+
+  const entries = collectIndexEntries(session, 0, 24)
+  assert.deepEqual(entries.map((entry) => entry.tokens), [1500, 225, 512, 512, 0], 'token sizes are defaultCountTokens of the node text')
+
+  const message = buildIndexMessage(session, INDEX_ON)
+  assert.ok(message !== null)
+  const text = textOf(message)
+  assert.match(text, /\[1\.5K tok\]/, 'the 1500-token dump shows the K shorthand')
+  assert.match(text, /\[512 tok\]/, 'threshold-exact entries show the plain count')
+  assert.equal(text.match(/\[\d+(\.\d+)?K? tok\]/g)?.length ?? 0, 3, 'only the three large entries are marked')
+  assert.equal(text.includes('[225 tok]'), false, 'sub-threshold entries carry no marker')
+  // The bare tool-call entry renders without a preview AND without a marker.
+  assert.match(text, /·tool bash(?!「)/, 'bare entry stays bare')
+  assert.equal(text.includes('K tok'), true, 'marker suffix present')
+})
