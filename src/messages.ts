@@ -28,6 +28,12 @@ export function extractText(content: unknown): string {
   if (!Array.isArray(content)) return ''
   const parts: string[] = []
   for (const block of content) {
+    if (typeof block === 'string') {
+      // A real host variant (rule 12): `tool-result` content as a bare string
+      // array, `['raw output']` — must count toward tool totals like any text.
+      parts.push(block)
+      continue
+    }
     if (block === null || typeof block !== 'object') continue
     const b = block as { type?: unknown; text?: unknown; content?: unknown }
     if (b.type === 'text' && typeof b.text === 'string') {
@@ -219,6 +225,23 @@ export function extractEventText(event: SessionEvent): string {
     default:
       return ''
   }
+}
+
+/**
+ * The tool-side text of an assistant message: the concatenated `arguments`
+ * JSON of every tool-call block. Its prose `text` block is EXCLUDED on
+ * purpose — the model just wrote it (conversation, not tool output), so the
+ * delay-guard's tool counter must not let it push `maxDelayToolTokens`. A
+ * pure `text` assistant message returns ''. Non-assistant events return ''.
+ */
+export function extractToolCallText(event: SessionEvent): string {
+  if (event.type !== 'assistant/message') return ''
+  const content = (event.data as { message?: { content?: unknown } }).message?.content
+  if (!Array.isArray(content)) return ''
+  return toolCallsOf(content)
+    .map((call) => stringifyArgs(call.arguments))
+    .filter((text) => text.length > 0)
+    .join('\n')
 }
 
 /**

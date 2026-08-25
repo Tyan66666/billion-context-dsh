@@ -12,6 +12,7 @@ import { Context } from '@deepseek-ai/cordis'
 import { createCore, type CompressionCore, type NudgeDecision } from 'acp-kernel'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
+import { Session } from '@deepseek-ai/dsh-session'
 import { AcpStateStore } from '../src/state.ts'
 import { buildNudge, buildNudgeText, rangeTable, type NudgeEnvironment } from '../src/nudge.ts'
 import { makeTools, type ToolEnvironment } from '../src/tools.ts'
@@ -21,7 +22,7 @@ import {
   renderTemplate,
   resolvePrompts,
 } from '../src/prompts.ts'
-import { buildTextSession, buildToolSession } from './helpers.ts'
+import { appendTurn, appendUser, appendAssistant, buildTextSession, buildToolSession } from './helpers.ts'
 import AcpCompactionEngine, { AcpCompactionEngine as Named } from '../src/index.ts'
 
 function fakeAgent(session: import('@deepseek-ai/dsh-session').Session): Agent {
@@ -450,20 +451,21 @@ test('M4/prompts 14b: engine-level — the token-delay guard re-injects the dire
     async () => ({ kind: 'enter', messages: [] }) as never,
   ) as never)) as { kind: string; messages: Array<{ content: Array<{ type?: string; text?: string }> }> }
 
-  // buildToolSession(6) ≈ 10.7K tokens of TOOL output (each call/result pair
-  // ≈ 1.8K, no conversation nodes at all) — past the 8192 threshold, so the
+  // buildToolSession(8) ≈ 8.3K tokens of TOOL text (each pair ≈ 1.0K: the
+  // result content ≈ 1,033 + the call arguments ≈ 4 — the call node's prose
+  // block is conversation and never counts) — past the 8192 threshold, so the
   // guard fires even though nothing was claimed. A pure-text session can
   // NEVER trip this counter: conversation feeds `maxDelayTextTokens` instead.
-  const big = await runPreStep(buildToolSession(6))
+  const big = await runPreStep(buildToolSession(8))
   assert.equal(big.kind, 'enter')
   assert.equal(big.messages.length, 1, 'the guard injected the directory on a tool continuation step')
   const bigText = big.messages[0]!.content.map((block) => block.text ?? '').join('')
   assert.ok(bigText.startsWith('[acp-index] '), 'the injected line is an acp-index directory')
 
-  // buildToolSession(2) ≈ 3.6K tokens of tool output: below the threshold →
+  // buildToolSession(3) ≈ 3.1K tokens of tool output: below the threshold →
   // the decision passes through untouched (no synthetic content on cheap
   // steps).
-  const small = await runPreStep(buildToolSession(2))
+  const small = await runPreStep(buildToolSession(3))
   assert.equal(small.kind, 'enter')
   assert.equal(small.messages.length, 0, 'below maxDelayToolTokens the guard stays silent')
 
@@ -500,9 +502,10 @@ test('M4/prompts 14c: engine-level — off-switches, the disabled default, and w
   assert.equal(off.messages.length, 0, 'zero delay thresholds disable the delay guard on tool steps')
 
   // (b) Enabled with the default threshold: a wake-up round (step 0, empty
-  // claim) must stay synthetic-free even with a huge pending total — the
-  // guard requires a real step, so a stale watermark cannot turn a host
-  // zero-cost wake round into a model step (MINOR-3).
+  // claim) must stay synthetic-free even when a tool-heavy session has
+  // accumulated ~8.3K tool tokens (past the 8192 threshold) — the guard
+  // requires a real step, so a stale watermark cannot turn a host zero-cost
+  // wake round into a model step (MINOR-3).
   const ctxB = new Context()
   ctxB.provide('systemPrompt' as never, { section: () => {} } as never)
   ctxB.provide('tools' as never, { register: () => {} } as never)
@@ -519,13 +522,13 @@ test('M4/prompts 14c: engine-level — off-switches, the disabled default, and w
       { agent: fakeAgent(session), messages, turn: 1, step, signal: new AbortController().signal } as never,
       async () => ({ kind: 'enter', messages: [] }) as never,
     ) as never)) as { kind: string; messages: Array<{ content: Array<{ type?: string; text?: string }> }> }
-  const wake = await runB(buildTextSession(12), [], 0)
+  const wake = await runB(buildToolSession(8), [], 0)
   assert.equal(wake.kind, 'enter')
   assert.equal(wake.messages.length, 0, 'step 0 wake-up rounds never trip the delay guard')
 
-  // (c) Both gates true in the same pre-step (claimed input AND crossed
-  // threshold) → exactly ONE directory line, never two.
-  const both = await runB(buildTextSession(12), [createUserMessage({ content: [{ type: 'text', text: 'hello' }] })], 1)
+  // (c) Both gates true in the same pre-step (claimed input AND ~8.3K tool
+  // tokens past the 8192 threshold) → exactly ONE directory line, never two.
+  const both = await runB(buildToolSession(8), [createUserMessage({ content: [{ type: 'text', text: 'hello' }] })], 1)
   assert.equal(both.kind, 'enter')
   assert.equal(both.messages.length, 1, 'dueByTurn and dueByDelay together inject exactly once')
   assert.ok(
@@ -554,6 +557,73 @@ test('M4/prompts 14c: engine-level — off-switches, the disabled default, and w
   const disabled = await runC(buildTextSession(12), [], 1)
   assert.equal(disabled.kind, 'enter')
   assert.equal(disabled.messages.length, 0, 'the disabled default never re-injects on tool steps')
+})
+
+test('M4/prompts 14d: engine-level — per-turn directories increment from the watermark (BLOCKER regression) and the text counter trips independently', async () => {
+  // BLOCKER regression (red-team): the per-turn path used to pass `watermark =
+  // 0` into buildIndexMessage, and `0 ?? indexWatermarkOf(session)` is 0 — so
+  // every turn re-listed the WHOLE session and the directory never recovered
+  // from backlog placeholder lines. The fix passes `undefined` on the
+  // per-turn path, letting the fallback read the newest marker.
+  const ctx = new Context()
+  ctx.provide('systemPrompt' as never, { section: () => {} } as never)
+  ctx.provide('tools' as never, { register: () => {} } as never)
+  ctx.plugin(AcpCompactionEngine as never, {
+    modelContextLimit: 16000,
+    autoNudge: false,
+    messageIndex: { enabled: true, maxDelayToolTokens: 8192, maxDelayTextTokens: 8192 },
+  } as never)
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  const engine = ctx.compaction as Named
+  assert.ok(engine instanceof Named)
+  const runPreStep = async (session: import('@deepseek-ai/dsh-session').Session, messages: unknown[], step: number) =>
+    (await (ctx.waterfall(
+      'agent/pre-step' as never,
+      { agent: fakeAgent(session), messages, turn: 1, step, signal: new AbortController().signal } as never,
+      async () => ({ kind: 'enter', messages: [] }) as never,
+    ) as never)) as { kind: string; messages: Array<{ content: Array<{ type?: string; text?: string }> }> }
+
+  const session = Session.create('m6-engine-increment')
+  appendTurn(session, 1)
+  appendUser(session, 'turn1 hello')
+  appendAssistant(session, 'turn1 reply', 1, 1)
+  const first = await runPreStep(session, [createUserMessage({ content: [{ type: 'text', text: 'turn1 hello' }] })], 1)
+  assert.equal(first.messages.length, 1, 'turn 1 emits one directory line')
+  assert.match(first.messages[0]!.content.map((block) => block.text ?? '').join(''), /turn1 hello/)
+  // The host driver persists an enter-decision message exactly as-is.
+  session.append('user/message', first.messages[0]!, { surfaceOp: 'append' })
+
+  appendUser(session, 'turn2 fresh question')
+  const second = await runPreStep(session, [createUserMessage({ content: [{ type: 'text', text: 'turn2 fresh question' }] })], 1)
+  assert.equal(second.messages.length, 1, 'turn 2 emits one directory line')
+  const secondText = second.messages[0]!.content.map((block) => block.text ?? '').join('')
+  assert.doesNotMatch(secondText, /turn1 hello/, 'BLOCKER: already-indexed turn-1 content is never re-listed')
+  assert.match(secondText, /turn2 fresh question/, 'only the new node is numbered')
+
+  // Text counter in isolation: tool threshold 0 (never consulted), text
+  // threshold 8192 — a text-heavy session trips on a tool-continuation step,
+  // and tool output never pushes the text counter (test-quality M2).
+  const ctxT = new Context()
+  ctxT.provide('systemPrompt' as never, { section: () => {} } as never)
+  ctxT.provide('tools' as never, { register: () => {} } as never)
+  ctxT.plugin(AcpCompactionEngine as never, {
+    modelContextLimit: 16000,
+    autoNudge: false,
+    messageIndex: { enabled: true, maxDelayToolTokens: 0, maxDelayTextTokens: 8192 },
+  } as never)
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  const runT = async (session: import('@deepseek-ai/dsh-session').Session, step: number) =>
+    (await ((ctxT.waterfall(
+      'agent/pre-step' as never,
+      { agent: fakeAgent(session), messages: [], turn: 1, step, signal: new AbortController().signal } as never,
+      async () => ({ kind: 'enter', messages: [] }) as never,
+    ) as never))) as { kind: string; messages: Array<{ content: Array<{ type?: string; text?: string }> }> }
+  const texty = await runT(buildTextSession(12), 1)
+  assert.equal(texty.kind, 'enter')
+  assert.equal(texty.messages.length, 1, 'the text counter re-injects on 12.4K conversation tokens')
+  const tooly = await runT(buildToolSession(8), 1)
+  assert.equal(tooly.kind, 'enter')
+  assert.equal(tooly.messages.length, 0, 'tool output never pushes maxDelayTextTokens')
 })
 
 test('M4/prompts 15: engine construction fails fast on a template typo', () => {

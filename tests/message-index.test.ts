@@ -23,6 +23,7 @@ import {
   pendingToolTokenTotal,
   resolveMessageIndexConfig,
   truncateToTokenBudget,
+  type ResolvedMessageIndexConfig,
 } from '../src/message-index.ts'
 import { INDEX_PLUGIN, isCheckpointNode, isIndexMarkerEvent } from '../src/messages.ts'
 import { appendTurn, appendUser, appendAssistant, appendToolCall, appendToolResult, buildTextSession, longText } from './helpers.ts'
@@ -190,25 +191,31 @@ test('M6: pending token totals split by kind — tool nodes feed maxDelayToolTok
   // Each counter sees only its own kind ABOVE the newest marker: never a,
   // never the checkpoint, never the marker itself — the same skip set as
   // collectIndexEntries (the pre-step guard must agree with what the
-  // directory would actually index).
+  // directory would actually index). Tool text is BLOCK-LEVEL: a tool-call
+  // node counts only its `arguments` (its prose block is conversation, not
+  // tool output), a tool-result counts its full nested content.
+  const callArgsTokens = defaultCountTokens('{"command":"ls"}')
   const markerSeq = indexWatermarkOf(session)
   assert.equal(
     pendingToolTokenTotal(session, markerSeq),
-    defaultCountTokens(longText('call', 2)) + defaultCountTokens(longText('res', 3)),
-    'tool counter sees only tool-call/result above the watermark',
+    callArgsTokens + defaultCountTokens(longText('res', 3)),
+    'tool counter sees the call arguments + the result content above the watermark',
   )
   assert.equal(
     pendingTextTokenTotal(session, markerSeq),
     defaultCountTokens(longText('b', 1)),
     'text counter sees only conversation nodes above the watermark',
   )
+  // The mixed text+tool-call node's prose is conversation, not tool output —
+  // the tool total above already excludes it (it counts `{"command":"ls"}`
+  // arguments, not the 1K-token prose longText('call', 2)).
 
   // A watermark BELOW the marker must still exclude it from BOTH counters:
   // the skip set is position-independent (the isIndexMarkerEvent branch, not
   // a seq range).
   assert.equal(
     pendingToolTokenTotal(session, 0),
-    defaultCountTokens(longText('call', 2)) + defaultCountTokens(longText('res', 3)),
+    callArgsTokens + defaultCountTokens(longText('res', 3)),
     'tool counter skips the marker even when the watermark lies below it',
   )
   assert.equal(
@@ -225,8 +232,8 @@ test('M6: pending token totals split by kind — tool nodes feed maxDelayToolTok
   appendToolResult(fresh, longText('z', 2), 'call-2')
   assert.equal(
     pendingToolTokenTotal(fresh, 0),
-    defaultCountTokens(longText('y', 1)) + defaultCountTokens(longText('z', 2)),
-    'a fresh session counts every tool node',
+    callArgsTokens + defaultCountTokens(longText('z', 2)),
+    'a fresh session counts every tool node (call arguments + result content)',
   )
   assert.equal(
     pendingTextTokenTotal(fresh, 0),
@@ -236,8 +243,8 @@ test('M6: pending token totals split by kind — tool nodes feed maxDelayToolTok
   // A finite cap short-circuits the sum: the guard only needs to know whether
   // the pending total CROSSED the threshold, never the exact number — without
   // this a single multi-megabyte CJK tool dump would cost a full tokenization
-  // pass (~700ms measured) on every pre-step (MAJOR-2).
-  const fullToolTotal = defaultCountTokens(longText('y', 1)) + defaultCountTokens(longText('z', 2))
+  // pass (~1.3s measured) on every pre-step (red-team MAJOR-2).
+  const fullToolTotal = callArgsTokens + defaultCountTokens(longText('z', 2))
   const capped = pendingToolTokenTotal(fresh, 0, 1)
   assert.ok(capped >= 1 && capped <= fullToolTotal, 'a tiny cap stops the tool sum at the first crossing')
   assert.equal(
@@ -245,6 +252,15 @@ test('M6: pending token totals split by kind — tool nodes feed maxDelayToolTok
     fullToolTotal,
     'a cap at or above the total returns the exact sum (no early exit needed)',
   )
+  // A single node longer than 4× the remaining budget is tokenized only
+  // through the shortest prefix that proves the crossing — the return is
+  // capped at/above `cap`, never the full multi-megabyte text.
+  const giant = Session.create('m6-pending-giant')
+  appendTurn(giant, 1)
+  appendToolResult(giant, '压'.repeat(500000), 'call-giant')
+  const giantCount = pendingToolTokenTotal(giant, 0, 8192)
+  assert.ok(giantCount >= 8192, 'a giant CJK dump still crosses the cap')
+  assert.ok(giantCount <= 8192 + 4096, 'the count is bounded near the cap, never O(text)')
   // The watermark itself gates the sum: re-measuring after a marker advances
   // the pending set to zero for content already indexed.
   appendMarker(fresh, '[acp-index] indexed x y z')
@@ -455,4 +471,67 @@ test('M6: entries at or above the large-entry threshold carry a [N tok] marker; 
   // The bare tool-call entry renders without a preview AND without a marker.
   assert.match(text, /·tool bash(?!「)/, 'bare entry stays bare')
   assert.equal(text.includes('K tok'), true, 'marker suffix present')
+})
+
+test('M6: delay thresholds are silent for missing keys and warn before flooring fractions', () => {
+  const captureWarns = (run: () => unknown): { value: unknown; warns: string[] } => {
+    const warns: string[] = []
+    const original = console.warn
+    console.warn = (message: unknown) => { warns.push(String(message)) }
+    try {
+      return { value: run(), warns }
+    } finally {
+      console.warn = original
+    }
+  }
+  // The common `{ enabled: true }` opt-in must not spam warnings: missing
+  // delay keys keep their defaults silently (test-quality M1 regression).
+  const silent = captureWarns(() => resolveMessageIndexConfig({ enabled: true }))
+  assert.equal((silent.value as ResolvedMessageIndexConfig).maxDelayToolTokens, 8192)
+  assert.equal((silent.value as ResolvedMessageIndexConfig).maxDelayTextTokens, 0)
+  assert.deepEqual(silent.warns, [], 'missing delay keys never warn')
+  const silentAll = captureWarns(() => resolveMessageIndexConfig({}))
+  assert.deepEqual(silentAll.warns, [], 'fully-default config never warns')
+  // Fractions floor, and floor(0.5) → 0 must not silently disable a counter.
+  const floored = captureWarns(() => resolveMessageIndexConfig({ maxDelayToolTokens: 8192.9, maxDelayTextTokens: 0.5 }))
+  assert.equal((floored.value as ResolvedMessageIndexConfig).maxDelayToolTokens, 8192)
+  assert.equal((floored.value as ResolvedMessageIndexConfig).maxDelayTextTokens, 0)
+  assert.equal(floored.warns.length, 2, 'fractional thresholds warn before flooring')
+})
+
+test('M6: a bare-string tool-result content array and pure tool-call arguments both count toward tool tokens', () => {
+  // A real host variant (rule 12): tool-result content as a bare string array.
+  const stringy = Session.create('m6-string-result')
+  appendTurn(stringy, 1)
+  const rawText = 'raw string output '.repeat(200)
+  stringy.append('tool/result', {
+    turn: 1,
+    step: 1,
+    message: {
+      id: 'res-str',
+      role: 'user',
+      content: [rawText],
+      source: { kind: 'tool', callId: 'call-str' },
+    },
+  }, { surfaceOp: 'append' })
+  assert.equal(pendingToolTokenTotal(stringy, 0), defaultCountTokens(rawText), 'bare string blocks count toward tool tokens')
+
+  // A pure tool-call node (no prose block) counts its arguments, never zero.
+  const callOnly = Session.create('m6-call-args')
+  appendTurn(callOnly, 1)
+  const argsText = '{"command":"ls -la"}\n{"pattern":"error"}'
+  callOnly.append('assistant/message', {
+    turn: 1,
+    step: 1,
+    message: createAssistantMessage({
+      content: [
+        { type: 'tool-call', id: 'c1', name: 'bash', arguments: '{"command":"ls -la"}' },
+        { type: 'tool-call', id: 'c2', name: 'grep', arguments: '{"pattern":"error"}' },
+      ],
+      provider: 'test-provider',
+      model: 'test-model',
+    }),
+  }, { surfaceOp: 'append' })
+  assert.equal(pendingToolTokenTotal(callOnly, 0), defaultCountTokens(argsText), 'every call block arguments count')
+  assert.equal(pendingTextTokenTotal(callOnly, 0), 0, 'a tool-call node is never conversation')
 })

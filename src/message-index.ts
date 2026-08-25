@@ -46,6 +46,7 @@ import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
 import {
   addToToolCallIndex,
   extractEventText,
+  extractToolCallText,
   INDEX_PLUGIN,
   isCheckpointNode,
   isIndexMarkerEvent,
@@ -57,7 +58,7 @@ import {
 export interface MessageIndexConfig {
   /** Emit directory messages at the first pre-step of each turn. Default false — opt-in in early releases; set true to enable. */
   readonly enabled?: boolean
-  /** Per-entry preview budget in `defaultCountTokens` tokens (ellipsis included). Default 24. */
+  /** Per-entry preview budget in `defaultCountTokens` tokens (ellipsis included). Default 16. */
   readonly previewTokens?: number
   /**
    * Max entries catalogued in one message; a bigger backlog collapses into a
@@ -65,25 +66,28 @@ export interface MessageIndexConfig {
    */
   readonly backlogLimit?: number
   /**
-   * Re-inject the directory mid-turn once unindexed TOOL output (tool-call
-   * and tool-result) has accumulated at least this many tokens. Per-turn
-   * cadence alone can leave a very long turn (one user message, dozens of
-   * internal tool rounds) unnumbered for tens of thousands of tokens — the
-   * model loses seq↔content alignment exactly when it needs it most. The
-   * delay guard fires on tool continuation steps too (they claim no inbox
-   * input, so the per-turn gate skips them); short turns never cross it, so
-   * behavior is identical to per-turn-only. The watermark advances with every
-   * injection, so a re-injection never renumbers anything. 0 disables this
-   * counter. Default 8192.
+   * Re-inject the directory mid-turn once unindexed TOOL text (tool-result
+   * content and tool-call `arguments`; an assistant's own prose block is NOT
+   * tool output and never counts) has accumulated at least this many tokens.
+   * Per-turn cadence alone can leave a very long turn (one user message,
+   * dozens of internal tool rounds) unnumbered for tens of thousands of
+   * tokens — the model loses seq↔content alignment exactly when it needs it
+   * most. The delay guard fires on tool continuation steps too (they claim no
+   * inbox input, so the per-turn gate skips them); short turns never cross it,
+   * so behavior is identical to per-turn-only. The watermark advances with
+   * every injection, so a re-injection never renumbers anything. 0 disables
+   * this counter. Default 8192.
    */
   readonly maxDelayToolTokens?: number
   /**
-   * Like `maxDelayToolTokens`, but counts CONVERSATION messages (user, asst,
-   * note) instead of tool output. Default 0 — conversation alone never
-   * triggers a re-injection: the model just wrote or read those messages, so
-   * it never loses alignment with them; the counter exists for hosts that
-   * want a long conversational turn to re-inject too. Any counter crossing
-   * its threshold triggers a re-injection (tool OR text).
+   * Like `maxDelayToolTokens`, but counts CONVERSATION text (user and pure
+   * assistant messages and notes; an assistant node carrying a tool-call is
+   * classified as tool and its prose counts toward neither counter). Default
+   * 0 — conversation alone never triggers a re-injection: the model just
+   * wrote or read those messages, so it never loses alignment with them; the
+   * counter exists for hosts that want a long conversational turn to
+   * re-inject too. Any counter crossing its threshold triggers a re-injection
+   * (tool OR text).
    */
   readonly maxDelayTextTokens?: number
 }
@@ -133,11 +137,19 @@ export function resolveMessageIndexConfig(config?: MessageIndexConfig): Resolved
     }
   }
   // Delay thresholds are independent counters over DIFFERENT message kinds:
-  // tool output (`maxDelayToolTokens`) and conversation messages
-  // (`maxDelayTextTokens`, default 0 = conversation never triggers). Each is
-  // clamped like backlogLimit (>= 0, floor; invalid → default + warn).
+  // tool text (`maxDelayToolTokens`) and conversation text (`maxDelayTextTokens`,
+  // default 0 = conversation never triggers). Each is clamped like backlogLimit
+  // (>= 0, floor; invalid → default + warn). Missing keys fall back silently —
+  // the common `{ enabled: true }` opt-in must not spam warnings.
   const clampDelay = (raw: unknown, key: 'maxDelayToolTokens' | 'maxDelayTextTokens', fallback: number): number => {
-    if (typeof raw === 'number' && Number.isFinite(raw) && raw >= 0) return Math.floor(raw)
+    if (raw === undefined) return fallback
+    if (typeof raw === 'number' && Number.isFinite(raw) && raw >= 0) {
+      const floored = Math.floor(raw)
+      if (floored !== raw) {
+        console.warn(`[billion-context-dsh] messageIndex.${key} ${raw} is not an integer — floored to ${floored}`)
+      }
+      return floored
+    }
     console.warn(`[billion-context-dsh] messageIndex.${key} must be a finite number >= 0, got ${String(raw)} — keeping default ${fallback}`)
     return fallback
   }
@@ -299,48 +311,74 @@ export function collectIndexEntries(session: Session, watermark: number, preview
 }
 
 /**
- * Estimated `defaultCountTokens` total of surfaced TOOL nodes (tool-call and
- * tool-result) ABOVE the watermark, mirroring the skip set of
- * `collectIndexEntries` (checkpoints and prior index lines). The pre-step
- * listener compares this against `maxDelayToolTokens` to decide whether a
- * long tool run has accumulated enough unindexed output to deserve a mid-turn
- * re-injection — a cheap O(surface) sum, no message built. Conversation
- * messages never count toward this counter (that is `pendingTextTokenTotal`
- * / `maxDelayTextTokens`): the model just wrote or read them, so it does not
- * lose alignment with them the way it does with bare tool dumps.
+ * Estimated `defaultCountTokens` total of surfaced TOOL text (tool-result
+ * content + tool-call `arguments`) ABOVE the watermark, mirroring the skip
+ * set of `collectIndexEntries` (checkpoints and prior index lines). The
+ * pre-step listener compares this against `maxDelayToolTokens` to decide
+ * whether a long tool run has accumulated enough unindexed output to deserve
+ * a mid-turn re-injection — a cheap O(surface) sum, no message built. An
+ * assistant message's own prose block is excluded (it is conversation, not
+ * tool output); pure conversation never counts toward this counter (that is
+ * `pendingTextTokenTotal` / `maxDelayTextTokens`).
  *
  * The guard only cares about crossing `cap` (it never needs the exact sum):
  * when `cap` is finite, the loop bails as soon as the running total reaches
- * it. Without the early exit a single multi-megabyte CJK tool dump would
- * cost ~700ms of synchronous pre-step time to tokenize in full, and the
- * threshold bounds exactly the amount of text the guard must ever read.
+ * it. A single multi-megabyte CJK tool dump must never cost a full
+ * tokenization pass (~1.3s measured) on every pre-step, so a node whose text
+ * is long enough to possibly cross the cap is only tokenized through the
+ * shortest prefix that proves the crossing — the per-node cost is O(cap),
+ * not O(text).
  */
 export function pendingToolTokenTotal(session: Session, watermark: number, cap = Number.POSITIVE_INFINITY): number {
-  return pendingTokensOf(session, watermark, cap, (event) => isToolEvent(event))
+  return pendingTokensOf(session, watermark, cap, (event) => {
+    if (event.type === 'tool/result') return extractEventText(event)
+    if (event.type === 'assistant/message') return extractToolCallText(event)
+    return ''
+  })
 }
 
 /**
- * Same shape as `pendingToolTokenTotal` but over CONVERSATION nodes (user,
- * asst, note) — the counter behind `maxDelayTextTokens`. Default 0 means the
- * pre-step gate never consults it (conversation alone never triggers).
+ * Same shape as `pendingToolTokenTotal` but over CONVERSATION text (user and
+ * pure assistant messages and notes — an assistant node carrying a tool-call
+ * is classified as tool) — the counter behind `maxDelayTextTokens`. Default 0
+ * means the pre-step gate never consults it (conversation alone never
+ * triggers).
  */
 export function pendingTextTokenTotal(session: Session, watermark: number, cap = Number.POSITIVE_INFINITY): number {
-  return pendingTokensOf(session, watermark, cap, (event) => !isToolEvent(event))
+  return pendingTokensOf(session, watermark, cap, (event) => (isToolEvent(event) ? '' : extractEventText(event)))
 }
 
-/** Shared O(surface) scan: skip set + per-kind filter + capped early exit. */
+/**
+ * Shared O(surface) scan: skip set + per-kind text extraction + capped early
+ * exit with a per-node length pre-filter. `extract` returns the text this
+ * counter counts for one event ('' = not this counter's kind).
+ */
 function pendingTokensOf(
   session: Session,
   watermark: number,
   cap: number,
-  isCounted: (event: SessionEvent) => boolean,
+  extract: (event: SessionEvent) => string,
 ): number {
   let total = 0
   for (const seq of session.surface.nodes) {
     if (seq <= watermark) continue
     const event = session.events[seq]
-    if (event === undefined || isCheckpointNode(event) || isIndexMarkerEvent(event) || !isCounted(event)) continue
-    total += defaultCountTokens(extractEventText(event))
+    if (event === undefined || isCheckpointNode(event) || isIndexMarkerEvent(event)) continue
+    const text = extract(event)
+    if (text.length === 0) continue
+    // `defaultCountTokens` prices every char at >= 1/4 token (ASCII floor), so
+    // a text shorter than 4× the remaining budget can NEVER cross the cap on
+    // its own — tokenize it in full. A longer one is tokenized only through
+    // the shortest prefix that proves the crossing and the result is CAPPED at
+    // `cap` (the prefix can price up to 4× the budget for CJK, 1 char/token),
+    // bounding a single multi-megabyte CJK dump to O(cap) instead of O(text)
+    // (~1.3s → ~1ms class).
+    const charsNeededToCross = 4 * (cap - total) + 64
+    if (charsNeededToCross < text.length) {
+      total = Math.min(cap, total + defaultCountTokens(text.slice(0, charsNeededToCross)))
+    } else {
+      total += defaultCountTokens(text)
+    }
     if (total >= cap) return total
   }
   return total

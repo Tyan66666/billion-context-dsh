@@ -350,7 +350,11 @@ export class AcpCompactionEngine extends CompactionEngine {
       // skipped, keeping the hot path at zero cost.
       const dueByTurn = payload.messages.length > 0
       let dueByDelay = false
-      let watermark = 0
+      // `undefined` on the per-turn path on purpose: buildIndexMessage falls
+      // back to indexWatermarkOf(session) for undefined (NOT for 0 — `0 ?? x`
+      // is 0, which would re-index the whole session every turn and keep the
+      // directory stuck on backlog placeholder lines forever).
+      let watermark: number | undefined
       if (!dueByTurn && this.messageIndex.enabled && payload.step > 0) {
         const { maxDelayToolTokens, maxDelayTextTokens } = this.messageIndex
         if (maxDelayToolTokens > 0 || maxDelayTextTokens > 0) {
