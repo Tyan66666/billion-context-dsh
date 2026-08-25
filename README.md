@@ -138,13 +138,13 @@ npm install billion-context-dsh
 [acp-index] 12·user「帮我跑下测试」 13·asst「先看配置…」 14·tool bash「ls」 15·result bash「file-a file-b」
 ```
 
-为上一条索引之后新出现的每个 surface 节点标注 seq、类型与内容预览（token 预算截断，默认 24 tokens，CJK 按 1 字/token 计）。**超过 512 tokens 的大节点会附 `[N tok]` 标记**（千位以上显示为 `[1.5K tok]`），让模型一眼认出「谁是回收重点」——未标注只表示低于阈值，不表示空内容，精确大小可随时经 `acp_status` 钻取。目录**每回合注入一次**（模型内部工具续步不重复注入）；触发回合的用户消息要等下一回合才编号（追加式日志的固有顺序）。模型由此随时把任意 seq 对回它看过的内容——压缩范围表、`acp_status` 钻取行、`compress` 边界从此都有文本锚点。压缩后旧索引行随被遮蔽的原文一起消失（定位交给块摘要，且不再进入 `search_context` 文档集），新行从最新 live seq 继续编号，id 空间保持连续。冷启动接入存量会话时，待编号消息超过 `backlogLimit` 会改发一行占位目录（只列 seq 范围），避免单条消息吞下全部积压：
+为上一条索引之后新出现的每个 surface 节点标注 seq、类型与内容预览（token 预算截断，默认 16 tokens，CJK 按 1 字/token 计）。**超过 512 tokens 的大节点会附 `[N tok]` 标记**（千位以上显示为 `[1.5K tok]`），让模型一眼认出「谁是回收重点」——未标注只表示低于阈值，不表示空内容，精确大小可随时经 `acp_status` 钻取。目录**每回合注入一次**（模型内部工具续步不重复注入）；触发回合的用户消息要等下一回合才编号（追加式日志的固有顺序）。模型由此随时把任意 seq 对回它看过的内容——压缩范围表、`acp_status` 钻取行、`compress` 边界从此都有文本锚点。压缩后旧索引行随被遮蔽的原文一起消失（定位交给块摘要，且不再进入 `search_context` 文档集），新行从最新 live seq 继续编号，id 空间保持连续。冷启动接入存量会话时，待编号消息超过 `backlogLimit` 会改发一行占位目录（只列 seq 范围），避免单条消息吞下全部积压：
 
 ```yaml
       config:
         messageIndex:
           enabled: false       # 默认 false（早期版本 opt-in）；true 开启
-          previewTokens: 24    # 单条预览的 token 预算（含省略号）
+          previewTokens: 16    # 单条预览的 token 预算（含省略号）
           backlogLimit: 100    # 单条目录最大条目数；超过改发占位行
 ```
 
@@ -228,7 +228,7 @@ DSH 的每个模型请求都派生自其 append-only 会话日志（*surface*）
 | `autoCommand` | `true` | 在 `ctx.commands` 注册 `/acp` 命令 |
 | `autoNudge` | `true` | 当内核建议时向 `agent/pre-step` 注入 nudge |
 | `prompts` | — | （可选）自定义提示词文案：nudge / 范围表 / system prompt / 工具描述按槽位覆盖（模板 + 命名占位符，构造期校验；见上文「自定义提示词文案」与 [docs/configurable-prompts-design.md](docs/configurable-prompts-design.md)） |
-| `messageIndex` | `{ enabled: false, previewTokens: 24, backlogLimit: 100 }` | 每消息编号索引（早期版本默认关闭，手工开启）：每回合一次在 pre-step 注入单行 `[acp-index]` 目录消息，为新 surface 节点标注 seq + 类型 + token 预算预览，让模型把任意 seq 对回看过的内容；积压超过 `backlogLimit` 时改发占位行。`enabled: true` 开启。见 [docs/message-index-design.md](docs/message-index-design.md) |
+| `messageIndex` | `{ enabled: false, previewTokens: 16, backlogLimit: 100 }` | 每消息编号索引（早期版本默认关闭，手工开启）：每回合一次在 pre-step 注入单行 `[acp-index]` 目录消息，为新 surface 节点标注 seq + 类型 + token 预算预览，让模型把任意 seq 对回看过的内容；积压超过 `backlogLimit` 时改发占位行。`enabled: true` 开启。见 [docs/message-index-design.md](docs/message-index-design.md) |
 
 ## 开发
 

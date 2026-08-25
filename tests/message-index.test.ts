@@ -155,7 +155,7 @@ test('M6: checkpoint summaries and prior index lines are skipped, disabled confi
 
   assert.equal(buildIndexMessage(session, { enabled: false, previewTokens: 24 }), null)
   assert.equal(resolveMessageIndexConfig({}).enabled, false, 'the index is opt-in in early releases (default disabled)')
-  assert.deepEqual(resolveMessageIndexConfig({ enabled: false }), { enabled: false, previewTokens: 24, backlogLimit: 100 }, 'partial config keeps defaults')
+  assert.deepEqual(resolveMessageIndexConfig({ enabled: false }), { enabled: false, previewTokens: 16, backlogLimit: 100 }, 'partial config keeps defaults')
   assert.equal(resolveMessageIndexConfig({ previewTokens: -3 }).previewTokens, 0, 'a negative budget clamps to 0 (bare entries) instead of misbehaving')
   assert.equal(resolveMessageIndexConfig({ previewTokens: 7.9 }).previewTokens, 7, 'fractional budgets floor')
   assert.equal(resolveMessageIndexConfig({ backlogLimit: 5 }).backlogLimit, 5)

@@ -90,7 +90,7 @@ dsh plugin --profile web add billion-context-dsh
         # 时改发一行占位目录（只列 seq 范围）。见 docs/message-index-design.md。
         # messageIndex:
         #   enabled: false       # 设为 true 开启
-        #   previewTokens: 24
+        #   previewTokens: 16
         #   backlogLimit: 100
 ```
 

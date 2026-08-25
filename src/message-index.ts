@@ -70,7 +70,7 @@ export interface ResolvedMessageIndexConfig {
 // Early releases ship the index DISABLED by default: it is a new model-facing
 // injection, and out-of-the-box behavior must not change until it has proven
 // itself in the field. Hosts opt in with `messageIndex: { enabled: true }`.
-export const MESSAGE_INDEX_DEFAULTS: ResolvedMessageIndexConfig = { enabled: false, previewTokens: 24, backlogLimit: 100 }
+export const MESSAGE_INDEX_DEFAULTS: ResolvedMessageIndexConfig = { enabled: false, previewTokens: 16, backlogLimit: 100 }
 
 /**
  * Nested config is resolved key-by-key (NOT object-spread): a host writing
