@@ -11,6 +11,7 @@ import assert from 'node:assert/strict'
 import { Context } from '@deepseek-ai/cordis'
 import { createCore, type CompressionCore, type NudgeDecision } from 'acp-kernel'
 import type { Agent } from '@deepseek-ai/dsh-agent'
+import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { AcpStateStore } from '../src/state.ts'
 import { buildNudge, buildNudgeText, rangeTable, type NudgeEnvironment } from '../src/nudge.ts'
 import { makeTools, type ToolEnvironment } from '../src/tools.ts'
@@ -388,15 +389,28 @@ test('M4/prompts 14: engine-level — config.prompts reaches system prompt secti
   assert.equal(compressTool!.description, '引擎级压缩工具描述')
 
   // pre-step: the custom normal frame reaches the injected nudge message.
+  // The payload mirrors the real PreStepPayload contract — `messages` holds
+  // what the loop claimed from the inbox for THIS step; the per-turn index
+  // gate (M2) only fires on non-empty claims.
   const decision = await (ctx.waterfall(
     'agent/pre-step' as never,
-    { agent: fakeAgent(buildTextSession(12)) } as never,
+    {
+      agent: fakeAgent(buildTextSession(12)),
+      messages: [createUserMessage({ content: [{ type: 'text', text: 'claimed inbox input' }] })],
+      turn: 1,
+      step: 0,
+      signal: new AbortController().signal,
+    } as never,
     async () => ({ kind: 'enter', messages: [] }) as never,
   ) as never)
   const decisionObj = decision as { kind: string; messages: Array<{ content: Array<{ type: string; text?: string }> }> }
   assert.equal(decisionObj.kind, 'enter')
-  assert.equal(decisionObj.messages.length, 1, 'the nudge message was appended to the decision')
-  const text = decisionObj.messages[0]!.content.map((block) => block.text ?? '').join('')
+  // Since the per-message index (M6) the pre-step injects TWO extras into one
+  // enter decision: the acp-index line FIRST, the nudge LAST.
+  assert.equal(decisionObj.messages.length, 2, 'the index message and the nudge were appended to the decision')
+  const indexText = decisionObj.messages[0]!.content.map((block) => block.text ?? '').join('')
+  assert.ok(indexText.startsWith('[acp-index] '), 'the acp-index message precedes the nudge')
+  const text = decisionObj.messages[1]!.content.map((block) => block.text ?? '').join('')
   assert.ok(text.startsWith('引擎级自定义 '), 'the custom nudge frame reached the injected message')
 })
 

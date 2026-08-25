@@ -132,6 +132,24 @@ Two audiences: ① Path B (plain npm install) users, who must write a compositio
 
 See [docs/configurable-prompts-design.md](docs/configurable-prompts-design.md) for the full slot list, per-slot placeholders, and the empty-string/`null` semantics. Deployments that omit `prompts` use the kernel rendering directly (aligned with kernel/pi; see design doc v6).
 
+**(Optional) Per-message numbering index — `config.messageIndex`.** pi numbers every message inline (`<acp>` ref tags); DSH's session log is a frozen projection and model-visible content may not be rewritten, so the numbering directory is written into the log itself as **durable plugin messages**: on the first pre-step of each turn, one line is appended to the end of that step's injected batch (index first, nudge after it),
+
+```
+[acp-index] 12·user「run the tests please」 13·asst「checking config…」 14·tool bash「ls」 15·result bash「file-a file-b」
+```
+
+numbering every surface node appended since the previous index message with its seq, kind, and a preview (truncated to a token budget, default 24 tokens; CJK counts 1 char/token). The directory is injected **once per turn** — the model's internal tool-continuation steps do not repeat it; the user message that triggered the turn is numbered on the next turn (inherent order of an append-only log). The model can thereby map any seq back to the exact content it saw — the compressible-range table, `acp_status` drilldown rows, and `compress` boundaries all gain text anchors. After a compression the old index lines vanish together with the shadowed originals (locating becomes the block summary's job, and they are excluded from the `search_context` doc set), and later lines keep numbering from the newest live seq, so the id space stays continuous. On a cold start over an existing session, a backlog beyond `backlogLimit` collapses into one placeholder directory line (seq range only) instead of one message swallowing the whole backlog:
+
+```yaml
+      config:
+        messageIndex:
+          enabled: true        # default true; false disables the index
+          previewTokens: 24    # per-entry preview token budget (ellipsis included)
+          backlogLimit: 100    # max entries per directory line; overflow emits a placeholder
+```
+
+Watermark advance, post-compression continuity, and the one-turn lag are covered in [docs/message-index-design.md](docs/message-index-design.md).
+
 **Per-mode — an agent preset's `compaction` realm.** First *disable (or delete) the realm's existing `dsh-compaction-basic` row*, then mount this engine — two backends cannot coexist in the same realm:
 
 ```yaml
@@ -156,6 +174,7 @@ DSH derives every model request from its append-only session log (the *surface*)
 |---|---|
 | `compress` tool shadows a range | durable `surfaceOp: { op: 'replace' }` — the model-written summary becomes a checkpoint node; the originals stay in the log |
 | refs (`m00001` tags) | surface seqs, carried by the nudge's compressible-range table |
+| per-message numbering (pi's inline `<acp>` tags) | durable `[acp-index]` plugin messages: one directory line appended once per turn, numbering each new surface node with seq + kind + preview |
 | nudge ("efficiency note — compress early and keep context lean") | injected at `agent/pre-step` by the kernel's pressure decision — efficiency note + context breakdown + compression rules, tone aligned with kernel/pi; never an order |
 | `decompress` | read-only recovery of shadowed originals from the log |
 | `search_context` | scores a unified doc set (block summaries + shadowed originals) rebuilt from the log via acp-kernel `searchBlocks` (hybrid: stemming + CJK bigrams + char n-gram fuzzy); hits link back to the owning block |
@@ -209,6 +228,7 @@ This project reuses `acp-kernel`'s compression core and `billion-context-pi`'s d
 | `autoCommand` | `true` | Register the `/acp` command on `ctx.commands` |
 | `autoNudge` | `true` | Inject the nudge into `agent/pre-step` |
 | `prompts` | — | (optional) Custom prompt copy: per-slot overrides for nudge / range table / system prompt / tool descriptions (template + named placeholders, validated at construction; see “Custom prompt copy” above and [docs/configurable-prompts-design.md](docs/configurable-prompts-design.md)) |
+| `messageIndex` | `{ enabled: true, previewTokens: 24, backlogLimit: 100 }` | Per-message numbering index: a one-line `[acp-index]` directory message injected once per turn at pre-step, numbering new surface nodes with seq + kind + token-budgeted preview, so the model can map any seq back to what it saw; a backlog beyond `backlogLimit` emits one placeholder line instead. `enabled: false` turns it off. See [docs/message-index-design.md](docs/message-index-design.md) |
 
 ## Development
 
@@ -232,6 +252,7 @@ src/
 ├── tools.ts        # M3: compress / decompress / search_context / acp_status
 ├── nudge.ts        # M4: kernel pressure decision → injected advisory nudge
 ├── system-prompt.ts# M4: one-time ACP guidance section (keeps nudges short)
+├── message-index.ts# M6: acp-index per-message numbering directory (log watermark + token-budgeted previews)
 ├── config.ts       # kernel config assembly (thresholds + coreOverrides)
 ├── window.ts       # auto context-window detection (LLM runtime probe, fallback 128000)
 └── commands.ts     # M4: /acp slash command

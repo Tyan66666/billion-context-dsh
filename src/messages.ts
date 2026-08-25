@@ -90,18 +90,26 @@ export function toolCallIdOfResultEvent(event: SessionEvent): string | null {
  */
 export function buildToolCallIndex(events: readonly SessionEvent[]): ReadonlyMap<string, string> {
   const index = new Map<string, string>()
-  for (const event of events) {
-    if (event.type !== 'assistant/message') continue
-    const content = (event.data as { message?: { content?: unknown } }).message?.content
-    if (!Array.isArray(content)) continue
-    for (const block of content) {
-      const candidate = block as { type?: unknown; id?: unknown; name?: unknown } | null
-      if (candidate !== null && typeof candidate === 'object' && candidate.type === 'tool-call' && typeof candidate.id === 'string') {
-        index.set(candidate.id, typeof candidate.name === 'string' ? candidate.name : '')
-      }
+  for (const event of events) addToToolCallIndex(index, event)
+  return index
+}
+
+/**
+ * Accumulate ONE event's assistant tool-call ids into `index` (`id → name`).
+ * The shared extraction behind `buildToolCallIndex` — exposed so
+ * `src/message-index.ts` can keep an incrementally-scanned index per session
+ * (the log is append-only) without copying this logic (rule 10).
+ */
+export function addToToolCallIndex(index: Map<string, string>, event: SessionEvent): void {
+  if (event.type !== 'assistant/message') return
+  const content = (event.data as { message?: { content?: unknown } }).message?.content
+  if (!Array.isArray(content)) return
+  for (const block of content) {
+    const candidate = block as { type?: unknown; id?: unknown; name?: unknown } | null
+    if (candidate !== null && typeof candidate === 'object' && candidate.type === 'tool-call' && typeof candidate.id === 'string') {
+      index.set(candidate.id, typeof candidate.name === 'string' ? candidate.name : '')
     }
   }
-  return index
 }
 
 /**
@@ -211,4 +219,51 @@ export function extractEventText(event: SessionEvent): string {
     default:
       return ''
   }
+}
+
+/**
+ * The `source.plugin` value marking acp-index directory messages — the
+ * per-message numbering output of `src/message-index.ts`. Lives here so every
+ * consumer (region range solving, index collection) reads ONE constant.
+ */
+export const INDEX_PLUGIN = 'acp-index'
+
+/** Whether a surface user message is an acp-index directory message (the indexer's own output — never re-indexed, never treated as a real user turn). */
+export function isIndexMarkerEvent(event: SessionEvent): boolean {
+  if (event.type !== 'user/message') return false
+  return (event.data as { source?: { plugin?: string } }).source?.plugin === INDEX_PLUGIN
+}
+
+/**
+ * Whether a surface user message is a compaction checkpoint node (an
+ * already-compressed summary written by a surface replace). Shared by
+ * `src/region.ts` range solving — one implementation, never a copy.
+ */
+export function isCheckpointNode(event: SessionEvent): boolean {
+  if (event.type !== 'user/message') return false
+  return (event.data as { source?: { plugin?: string } }).source?.plugin === 'compact'
+}
+
+/**
+ * Whether a surface message event is a tool message (tool-call or
+ * tool-result) — kernel `isToolMessage` parity. Shared by `src/region.ts`
+ * share statistics — one implementation, never a copy.
+ */
+export function isToolEvent(event: SessionEvent): boolean {
+  if (event.type === 'tool/result') return true
+  if (event.type !== 'assistant/message') return false
+  const content = (event.data as { message?: { content?: unknown } }).message?.content
+  return Array.isArray(content) && content.some((block) => (block as { type?: unknown })?.type === 'tool-call')
+}
+
+/**
+ * Whether a surface message was authored by a plugin (`source.kind ===
+ * 'plugin'`) rather than a real participant — acp-index directory lines,
+ * nudge echoes, compaction checkpoints, compress-pair replacement stubs.
+ * Range solving uses ONE generic criterion so a future plugin source can
+ * never sneak into "last real user message" protection or share statistics;
+ * the specific predicates above stay for the indexer's own bookkeeping.
+ */
+export function isPluginAuthoredEvent(event: SessionEvent): boolean {
+  return (event.data as { source?: { kind?: unknown } }).source?.kind === 'plugin'
 }

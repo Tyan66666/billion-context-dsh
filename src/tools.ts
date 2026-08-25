@@ -34,7 +34,7 @@ import {
   surfaceSummary,
   type ResolvedSurfaceRange,
 } from './region.ts'
-import { allLogMessages, buildToolCallIndex, eventsToCoreMessages, extractEventText, surfaceEventsOf } from './messages.ts'
+import { allLogMessages, buildToolCallIndex, eventsToCoreMessages, extractEventText, isIndexMarkerEvent, surfaceEventsOf } from './messages.ts'
 import { shadowedTokensViaMeter } from './host-tokens.ts'
 import { DEFAULT_RESOLVED, type ResolvedPrompts } from './prompts.ts'
 
@@ -572,6 +572,13 @@ function buildSearchDocs(session: Session): SearchDoc[] {
       claimed.add(seq)
       const event = session.events[seq]
       if (event === undefined) continue
+      // acp-index directory lines are OUR OWN synthetic output. As shadowed
+      // docs they carry long `[acp-index] …` text in the user role, and the
+      // kernel's role weighting (user 1.5× vs tool 0.6×) let them monopolize
+      // the top-5 for common queries — real hits never made the leaderboard.
+      // Composing the doc set is adapter work; ranking stays kernel-owned
+      // (rules 6/7 untouched).
+      if (isIndexMarkerEvent(event)) continue
       const role = roleOfEvent(event)
       const text = extractEventText(event)
       if (role === null || text.length === 0) continue

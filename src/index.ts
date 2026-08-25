@@ -37,10 +37,12 @@ import {
 } from '@deepseek-ai/dsh-compaction'
 import { createCore, type CompressionCore } from 'acp-kernel'
 import type { Agent } from '@deepseek-ai/dsh-agent'
+import type { UserMessage } from '@deepseek-ai/dsh-llm'
 import { AcpStateStore } from './state.ts'
 import { makeTools, type ToolEnvironment } from './tools.ts'
 import { acpCommand } from './commands.ts'
 import { buildNudge } from './nudge.ts'
+import { buildIndexMessage, resolveMessageIndexConfig, type MessageIndexConfig, type ResolvedMessageIndexConfig } from './message-index.ts'
 import { ACP_SYSTEM_PROMPT_ORDER } from './system-prompt.ts'
 import { renderSystemPrompt, resolvePrompts, type AcpPrompts, type ResolvedPrompts } from './prompts.ts'
 import { DEFAULT_CONTEXT_WINDOW, detectContextWindow, type AcpWindow } from './window.ts'
@@ -66,6 +68,17 @@ export {
 export { makeTools, type ToolEnvironment } from './tools.ts'
 export { acpCommand } from './commands.ts'
 export { buildNudge, resolveTokenCount, type NudgeEnvironment, type NudgeOutcome } from './nudge.ts'
+export {
+  buildIndexMessage,
+  collectIndexEntries,
+  indexWatermarkOf,
+  resolveMessageIndexConfig,
+  truncateToTokenBudget,
+  MESSAGE_INDEX_DEFAULTS,
+  type IndexEntry,
+  type MessageIndexConfig,
+  type ResolvedMessageIndexConfig,
+} from './message-index.ts'
 export {
   DEFAULT_CONTEXT_WINDOW,
   detectContextWindow,
@@ -145,6 +158,13 @@ export interface AcpConfig {
   readonly autoCommand: boolean
   /** Inject the nudge into `agent/pre-step` when the kernel recommends it. Default true. */
   readonly autoNudge: boolean
+  /**
+   * Per-message numbering directory (acp-index): at the first pre-step of
+   * each turn, one compact plugin message numbers every new surface node, so
+   * the model can map seqs to content without a rewrite hook. See
+   * docs/message-index-design.md.
+   */
+  readonly messageIndex?: MessageIndexConfig
   /** Per-stage prompt template overrides (nudge / range table / system prompt / tool descriptions). See docs/configurable-prompts-design.md. */
   readonly prompts?: AcpPrompts
 }
@@ -191,6 +211,8 @@ export class AcpCompactionEngine extends CompactionEngine {
    * revive lost-config bugs with every unit test green.
    */
   readonly env: ToolEnvironment
+  /** Resolved acp-index options (per-message numbering directory). */
+  readonly messageIndex: ResolvedMessageIndexConfig
 
   private readonly lastNudgeTurn = new Map<string, number>()
   /** Successful compress call ids awaiting their tool/result so the pair can be hidden. */
@@ -204,6 +226,7 @@ export class AcpCompactionEngine extends CompactionEngine {
     // Resolve + validate prompt templates BEFORE building env: a template typo
     // must fail engine construction, never silently leak into model context.
     this.prompts = resolvePrompts(config.prompts)
+    this.messageIndex = resolveMessageIndexConfig(config.messageIndex)
     const ports = this.config.countTokens !== undefined ? { countTokens: this.config.countTokens } : {}
     this.kernel = createCore(ports)
     this.store = new AcpStateStore()
@@ -296,13 +319,33 @@ export class AcpCompactionEngine extends CompactionEngine {
       // in flight at pre-step (the previous step's tools all landed), so the
       // default empty in-flight set is safe.
       stripOrphanedSurfaceToolMessages(payload.agent.session)
-      if (!this.config.autoNudge) return next()
       const decision = await next()
       if (decision.kind === 'reject') return decision
-      const window = await this.windowFor(payload.agent)
-      const outcome = buildNudge(payload.agent, { ...env, modelContextLimit: window.limit }, this.lastNudgeTurn)
-      if (outcome === null) return decision
-      return { kind: 'enter', messages: [...decision.messages, outcome.message] }
+      // Index first (reference data), nudge second (the actionable ask) — both
+      // ride the SAME enter decision so the inbox batch is replaced exactly
+      // once, and neither can land between a tool-call and its result (pre-step
+      // runs before any call of the step; the durable appends are position-safe,
+      // same envelope the nudge has always used).
+      const extras: UserMessage[] = []
+      // Per-turn cadence: the directory is emitted ONLY on steps that claimed
+      // inbox input (`payload.messages` — what the loop removed from the inbox
+      // for THIS step). That is the first step of a turn, or a mid-turn
+      // follow-up that queued behind it; the model's internal tool continuation
+      // steps claim nothing and would otherwise append a directory line per
+      // tool round (30–60% token inflation on short-message sessions). Their
+      // nodes are caught by the NEXT claimed step's directory. Empty-claim
+      // wake-up rounds stay synthetic-free the same way.
+      if (payload.messages.length > 0) {
+        const indexMessage = buildIndexMessage(payload.agent.session, this.messageIndex)
+        if (indexMessage !== null) extras.push(indexMessage)
+      }
+      if (this.config.autoNudge) {
+        const window = await this.windowFor(payload.agent)
+        const outcome = buildNudge(payload.agent, { ...env, modelContextLimit: window.limit }, this.lastNudgeTurn)
+        if (outcome !== null) extras.push(outcome.message)
+      }
+      if (extras.length === 0) return decision
+      return { kind: 'enter', messages: [...decision.messages, ...extras] }
     })
     // The load-bearing ACP guidance lives in the system prompt ONCE; nudges
     // stay short and advisory (model-driven: the model decides). The

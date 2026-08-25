@@ -21,7 +21,7 @@ import {
 } from '@deepseek-ai/dsh-compaction'
 import { createAssistantMessage, createUserMessage, type ContentBlock } from '@deepseek-ai/dsh-llm'
 import { defaultCountTokens } from 'acp-kernel'
-import { extractEventText, extractText, toolCallIdOfResultEvent } from './messages.ts'
+import { extractEventText, extractText, isCheckpointNode, isPluginAuthoredEvent, isToolEvent, toolCallIdOfResultEvent } from './messages.ts'
 import { hostPriceEvent } from './host-tokens.ts'
 
 /** One durable ACP block as rebuilt from the session log. */
@@ -463,21 +463,6 @@ export interface SeqCompressibleRange {
   readonly toolPct: number
 }
 
-/** Whether a surface message event is a tool message (tool-call or tool-result) — kernel `isToolMessage` parity. */
-function isToolEvent(event: SessionEvent): boolean {
-  if (event.type === 'tool/result') return true
-  if (event.type !== 'assistant/message') return false
-  const content = (event.data as { message?: { content?: unknown } }).message?.content
-  return Array.isArray(content) && content.some((block) => (block as { type?: unknown })?.type === 'tool-call')
-}
-
-/** Whether a surface user message is a compaction checkpoint node (already compressed). */
-function isCheckpointNode(event: SessionEvent): boolean {
-  if (event.type !== 'user/message') return false
-  const source = (event.data as { source?: { plugin?: string } }).source
-  return source?.plugin === 'compact'
-}
-
 /** Tool-call ids carried by one assistant surface message. */
 function toolCallIdsOfEvent(event: SessionEvent): string[] {
   if (event.type !== 'assistant/message') return []
@@ -786,7 +771,13 @@ export function buildCompressibleSeqRanges(
   }
   for (let index = nodes.length - 1; index >= 0; index -= 1) {
     const event = session.events[nodes[index]!]
-    if (event?.type === 'user/message' && !isCheckpointNode(event)) {
+    // ANY plugin-authored row (acp-index directory lines, nudge echoes,
+    // compress-pair stubs, checkpoints) must never win "last real user
+    // message" protection — they always trail the real user input in the
+    // same enter batch, so protecting one would leave the actual last user
+    // message compressible while synthetic output sits safe. One generic
+    // criterion covers every current and future plugin source.
+    if (event?.type === 'user/message' && !isCheckpointNode(event) && !isPluginAuthoredEvent(event)) {
       protectedSeqs.add(nodes[index]!)
       break
     }
@@ -799,7 +790,12 @@ export function buildCompressibleSeqRanges(
   }
   for (const seq of nodes) {
     const event = session.events[seq]
-    if (event === undefined || protectedSeqs.has(seq) || isCheckpointNode(event)) {
+    // Plugin-authored rows (index lines, nudge echoes, pair stubs) are
+    // excluded from share statistics exactly like checkpoints: counting them
+    // as text/user dilutes `toolPct` (an 8-turn span read ~80% tool as ~65%)
+    // and hides the real mix from the model. The segment breaks there too —
+    // a range never straddles synthetic output.
+    if (event === undefined || protectedSeqs.has(seq) || isCheckpointNode(event) || isPluginAuthoredEvent(event)) {
       flush()
       continue
     }

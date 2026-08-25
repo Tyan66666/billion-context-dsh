@@ -83,6 +83,15 @@ dsh plugin --profile web add billion-context-dsh
         #     normal: '上下文使用率 {pct}%。这是建议而非命令——由你决定是否压缩。'
         #   tools:
         #     acpStatus: '报告 ACP 块账本：压缩块数、回收 token、当前上下文压力。'
+        # （可选）每消息编号索引（默认开启）：每个回合的首个 pre-step 注入单行
+        # [acp-index] 目录消息，为新出现的会话节点标注 seq + 类型 + 内容预览，
+        # 模型由此把任意 seq 对回看过的内容。enabled: false 关闭；previewTokens
+        # 是单条预览的 token 预算；backlogLimit 是单条目录的最大条目数，积压超过
+        # 时改发一行占位目录（只列 seq 范围）。见 docs/message-index-design.md。
+        # messageIndex:
+        #   enabled: true
+        #   previewTokens: 24
+        #   backlogLimit: 100
 ```
 
 作用：host 平面注册 `ctx.compaction` + 四个模型工具 + `/acp` 命令 + `agent/pre-step` nudge 监听，所有模式共享一份。
@@ -156,7 +165,7 @@ cd /Users/yintianan/GitHub/billion-context-dsh
 npm run typecheck && npm test && npm run build
 ```
 
-162 个测试覆盖：seam 挂载、窗口探测、CJK 感知 token 估算、消息投影、压缩事务（事件序列 + surface 遮蔽）、日志重建账本、四工具端到端、nudge 注入/去重/紧急绕过、可配置提示词模板与校验、**影子价格宿主词汇端到端**（真实 TokenMeter + SessionProjectionRegistry 复现 issue #54：claim == 宿主 meter 价、投影 messageTokens 非负、/acp compress resolved 边界、prune 宿主定价）、**T2 蒸馏可用性**（issue #60：nudge tier seqs 首尾直接压成 tier-2 块端到端；每次压缩结果都报告 tier——含 tier 1，无静默降级）。
+181 个测试覆盖：seam 挂载、窗口探测、CJK 感知 token 估算、消息投影、压缩事务（事件序列 + surface 遮蔽）、日志重建账本、四工具端到端、nudge 注入/去重/紧急绕过、可配置提示词模板与校验、**影子价格宿主词汇端到端**（真实 TokenMeter + SessionProjectionRegistry 复现 issue #54：claim == 宿主 meter 价、投影 messageTokens 非负、/acp compress resolved 边界、prune 宿主定价）、**T2 蒸馏可用性**（issue #60：nudge tier seqs 首尾直接压成 tier-2 块端到端；每次压缩结果都报告 tier——含 tier 1，无静默降级）、**每消息编号索引 acp-index 家族**（issue #71：条目标签/预览/token 预算截断、水位推进与多 marker 稳态、真实压缩后连续性、积压占位降级与恢复、search_context 排除被遮蔽目录行且真命中照常上榜）。
 
 ## 6. 回滚
 
