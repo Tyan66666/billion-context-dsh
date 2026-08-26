@@ -596,7 +596,7 @@ function appendMarker(session: Session, text: string): void {
 }
 
 /** Append a raw user message with an explicit source (host injection shapes). */
-function appendSourced(session: Session, text: string, source: { kind?: string; plugin?: string; form?: string }): void {
+function appendSourced(session: Session, text: string, source: { kind?: string; plugin?: string; form?: string; baselineIdentity?: string }): void {
   session.append('user/message', createUserMessage({
     content: [{ type: 'text', text }],
     source,
@@ -773,32 +773,34 @@ test('M5: a front-of-session stale AGENTS.md row opens its own block; the newest
   assert.ok(ranges.some((r) => r.start === 3 && r.end === 5), 'the real segment is offered')
 })
 
-test('M5: per-unique-payload pin — every distinct AGENTS.md payload keeps its newest row (v2.5)', () => {
-  const session = Session.create('v25-per-payload')
-  // Root baseline duplicated (copy 1 stale, copy 2 newest) plus a worktree
-  // payload: a single log-tail scan would protect only seq 2 and mark the
-  // CURRENT root row (seq 1) stale — grouping by payload protects both.
-  appendSourced(session, longText('ROOT-v1', 4), { kind: 'plugin', plugin: 'agent-instructions' })         // seq 0 ROOT copy 1 → stale
-  appendSourced(session, longText('ROOT-v1', 4), { kind: 'plugin', plugin: 'agent-instructions' })         // seq 1 ROOT NEWEST → protected
-  appendSourced(session, longText('WT-v1', 3), { kind: 'agent-instructions', form: 'instructions' })       // seq 2 WT NEWEST → protected
-  appendUser(session, longText('q0', 0))                                                                    // seq 3
-  appendToolCall(session, longText('c1', 1), 'c1')                                                           // seq 4
-  appendToolResult(session, longText('r1', 2), 'c1')                                                         // seq 5
-  appendUser(session, longText('q1', 3))                                                                     // seq 6 last real → protected
+test('M5: per-file pin — the NEWEST injection of every instruction file is protected, older copies are stale (v2.5)', () => {
+  const session = Session.create('v25-per-file')
+  // Root file (baselineIdentity 'root') injected twice with DIFFERENT payloads
+  // (v1 then v2): only the LAST root injection is the host's current root
+  // context. A worktree file (no baselineIdentity) injected once. Grouping by
+  // file identity (not payload text) protects the last root row AND the
+  // worktree row, while the root v1 copy stays stale-compressible.
+  appendSourced(session, longText('ROOT-v1', 4), { kind: 'plugin', plugin: 'agent-instructions', baselineIdentity: 'root' }) // seq 0 ROOT v1 → stale
+  appendSourced(session, longText('ROOT-v2', 4), { kind: 'plugin', plugin: 'agent-instructions', baselineIdentity: 'root' }) // seq 1 ROOT latest → protected
+  appendSourced(session, longText('WT-v1', 3), { kind: 'agent-instructions', form: 'instructions' })                        // seq 2 WT latest → protected
+  appendUser(session, longText('q0', 0))                                                                                   // seq 3
+  appendToolCall(session, longText('c1', 1), 'c1')                                                                          // seq 4
+  appendToolResult(session, longText('r1', 2), 'c1')                                                                        // seq 5
+  appendUser(session, longText('q1', 3))                                                                                    // seq 6 last real → protected
 
   const ranges = buildCompressibleSeqRanges(session, { preserveRecent: 0 })
-  assert.ok(ranges.every((r) => r.start > 1 || r.end < 1), 'the CURRENT root row (seq 1) is never offered')
-  assert.ok(ranges.every((r) => r.start > 2 || r.end < 2), 'the worktree newest (seq 2) is never offered')
-  assert.ok(ranges.some((r) => r.start === 0 && r.end === 0), 'the stale root copy opens its own block')
+  assert.ok(ranges.every((r) => r.start > 1 || r.end < 1), 'the LATEST root row (seq 1) is never offered')
+  assert.ok(ranges.every((r) => r.start > 2 || r.end < 2), 'the worktree latest (seq 2) is never offered')
+  assert.ok(ranges.some((r) => r.start === 0 && r.end === 0), 'the root v1 copy (stale, same file) opens its own block')
   assert.ok(ranges.some((r) => r.start === 3 && r.end === 5), 'the real segment is offered')
 })
 
 test('M5: a mid-session stale AGENTS.md row folds into the adjacent real segment (v2.5)', () => {
   const session = Session.create('v25-mid-stale')
   appendUser(session, longText('q0', 0))                                                                   // seq 0 real — opens segment
-  appendSourced(session, longText('AGENTS-v1', 4), { kind: 'agent-instructions', form: 'instructions' })  // seq 1 stale (v1 copy 1)
-  appendSourced(session, longText('AGENTS-v1', 4), { kind: 'agent-instructions', form: 'instructions' })  // seq 2 v1 NEWEST → protected
-  appendSourced(session, longText('AGENTS-v2', 4), { kind: 'agent-instructions', form: 'instructions' })  // seq 3 v2 NEWEST → protected
+  appendSourced(session, longText('AGENTS-v1', 4), { kind: 'agent-instructions', form: 'instructions' })  // seq 1 stale (older copy, same file)
+  appendSourced(session, longText('AGENTS-v1', 4), { kind: 'agent-instructions', form: 'instructions' })  // seq 2 stale (older copy, same file)
+  appendSourced(session, longText('AGENTS-v2', 4), { kind: 'agent-instructions', form: 'instructions' })  // seq 3 FILE NEWEST → protected
   appendToolCall(session, longText('c1', 1), 'c1')                                                          // seq 4 tool
   appendToolResult(session, longText('r1', 2), 'c1')                                                        // seq 5 tool
   appendUser(session, longText('q1', 3))                                                                    // seq 6 last real → protected
@@ -806,22 +808,23 @@ test('M5: a mid-session stale AGENTS.md row folds into the adjacent real segment
   const ranges = buildCompressibleSeqRanges(session, { preserveRecent: 0 })
   assert.equal(ranges.length, 2, 'user+stale segment, then the tool segment')
   assert.equal(ranges[0]!.start, 0, 'segment starts at the real user')
-  assert.equal(ranges[0]!.end, 1, 'the stale row folds into the running segment')
-  assert.equal(ranges[0]!.count, 2, 'count spans user + stale row')
-  assert.equal(ranges[0]!.toolPct, 0, 'toolPct denominator excludes the stale row (realCount 1, toolCount 0)')
+  assert.equal(ranges[0]!.end, 2, 'BOTH stale copies fold into the running segment (only the file-newest breaks it)')
+  assert.equal(ranges[0]!.count, 3, 'count spans user + two stale rows')
+  assert.equal(ranges[0]!.toolPct, 0, 'toolPct denominator excludes stale rows (realCount 1, toolCount 0)')
   assert.ok(ranges.some((r) => r.start === 4 && r.end === 5), 'tool pair opens its own segment after the protected rows')
 })
 
-test('M5: newestInstructionSeqsOf groups by payload and keeps only the LAST copy of each (v2.5)', () => {
+test('M5: newestInstructionSeqsOf groups by FILE identity and keeps only the last injection of each (v2.5)', () => {
   const session = Session.create('v25-log-scan')
-  appendSourced(session, longText('AGENTS-v1', 4), { kind: 'agent-instructions', form: 'instructions' }) // seq 0
-  appendSourced(session, longText('AGENTS-v2', 4), { kind: 'agent-instructions', form: 'instructions' }) // seq 1
+  appendSourced(session, longText('WT-v1', 4), { kind: 'agent-instructions', form: 'instructions' })                        // seq 0 worktree v1
+  appendSourced(session, longText('WT-v2', 4), { kind: 'agent-instructions', form: 'instructions' })                        // seq 1 worktree latest
+  appendSourced(session, longText('ROOT-v1', 4), { kind: 'plugin', plugin: 'agent-instructions', baselineIdentity: 'root' }) // seq 2 root latest
   const newest = newestInstructionSeqsOf(session)
-  assert.equal(newest.size, 2, 'two distinct payloads, both are per-payload newest')
-  assert.ok(newest.has(0) && newest.has(1), 'both rows protected (single occurrence each)')
-  // A third copy of v1: only the LAST v1 copy stays newest — seq 0 becomes stale.
-  appendSourced(session, longText('AGENTS-v1', 4), { kind: 'agent-instructions', form: 'instructions' }) // seq 2
+  assert.equal(newest.size, 2, 'two files → two newest injections')
+  assert.ok(newest.has(1) && !newest.has(0), 'only the LAST worktree injection is active; WT-v1 is stale')
+  assert.ok(newest.has(2), 'the root injection is active (single occurrence)')
+  // A newer root copy: only the latest root row stays active.
+  appendSourced(session, longText('ROOT-v2', 4), { kind: 'plugin', plugin: 'agent-instructions', baselineIdentity: 'root' }) // seq 3
   const newest2 = newestInstructionSeqsOf(session)
-  assert.equal(newest2.size, 2, 'still two payloads')
-  assert.ok(newest2.has(2) && !newest2.has(0), 'only the last v1 copy is protected; seq 0 is stale now')
+  assert.ok(newest2.has(3) && !newest2.has(2), 'only the last root injection is protected; ROOT-v1 is stale now')
 })

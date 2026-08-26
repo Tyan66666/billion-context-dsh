@@ -769,7 +769,15 @@ export function newestInstructionSeqsOf(session: Session): Set<number> {
   for (let seq = 0; seq < session.events.length; seq += 1) {
     const event = session.events[seq]
     if (event === undefined || !isAgentInstructionsRow(event)) continue
-    newest.set(extractEventText(event), seq)
+    // Group by SOURCE FILE identity, not payload text: the host's desired
+    // context is the CURRENT content of each instruction file, so the only
+    // rows whose compression triggers re-injection are the NEWEST injection
+    // of every file. Root injections carry `baselineIdentity`; worktree
+    // injections do not (grouped conservatively — if the host ever injects
+    // several worktree files, an upstream sourcePath field is needed).
+    const source = (event.data as { source?: { baselineIdentity?: unknown } }).source
+    const identity = typeof source?.baselineIdentity === 'string' ? source.baselineIdentity : 'worktree-sourced'
+    newest.set(identity, seq)
   }
   return new Set(newest.values())
 }

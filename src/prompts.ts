@@ -234,7 +234,7 @@ WHEN NOT TO COMPRESS:
 COMPRESSION AND PROVIDER CACHING:
 - Compressing shifts every later message's position and invalidates the provider's prefix cache from that point — a one-time cost, paid once per compression. Keeping stale repeats in context is instead a per-request cost, paid every turn.
 - Cache cost grows the further forward (older) the span sits; compressing near the tail is nearly free. The nudge table's oldest-first order is for stable front-to-back consumption — not a cache ranking; weigh recovery against cache cost yourself.
-- Metadata rows folded into a range (directory lines, nudge echoes, pair stubs) ride along at zero extra cache cost. Instruction and policy rows (AGENTS.md, skill catalogs, system-prompt snapshots) are NOT compressible — live policy text stays visible on purpose.
+- Metadata rows folded into a range (directory lines, nudge echoes, pair stubs) ride along at zero extra cache cost. Instruction and policy rows (AGENTS.md, skill catalogs, system-prompt snapshots): the NEWEST injection of each instruction file you see is the host's current context — compressing it re-injects (a loop); OLDER AGENTS.md copies in the same session are stale and safe to compress (the host matches only the newest copy). Skill catalogs and policy snapshots stay un-compressible.
 
 {howToCompressRules}
 

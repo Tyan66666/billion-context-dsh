@@ -22,7 +22,7 @@ nudge 的范围表（`buildCompressibleSeqRanges`，src/region.ts）历史上把
 
 **设计取舍**：`real = 其余` 的默认在 v2 中被推翻——未知名 plugin 行**保守落 instruction**（宁可多留一条不压，绝不误压；未来宿主新增注入形态不会静默漏进可压段）。宿主注入源契约：宿主新增注入 kind/plugin 名时必须同步此函数并补 fixture（见 §6 与 docs/dsh-porting-verification.md）。
 
-**v2.5（AGENTS.md 重复副本 stale 可压）**：宿主按内容 digest 去重注入但**从不移除旧副本**——长会话累积重复的整份 AGENTS.md 行（实测本会话 10 条未遮蔽、86,450 tok 占表面 46.5%，仅 1 条是当前 digest）。宿主重注条件（deepseek-harness `packages/context/agent-instructions/src/index.ts:224-233` `syncInbox`）是 `alreadySupplied` = surface 上有与 `desired` 相同的 payload（`sameContextPayload` 逐字段 deepStrictEqual）——**只认当前 digest 的可见性**：压掉重复旧副本不触发重注；压掉最新副本才重注（循环）。因此 `newestInstructionSeqsOf(session)`（尾扫日志、按 payload 文本分组，src/region.ts）把**每个唯一 payload 的最新副本** pin 进 `protectedSeqs`——多源（root + worktree 不同 digest）各自保护，宿主回退到旧 payload 时也安全（该 payload 有保护）。stale（非最新）AGENTS.md 行按 §3 折叠/开段。
+**v2.5（AGENTS.md 重复副本 stale 可压）**：宿主按内容 digest 去重注入但**从不移除旧副本**——长会话累积重复的整份 AGENTS.md 行（实测本会话 10 条未遮蔽、86,450 tok 占表面 46.5%，仅 1 条是当前 digest）。宿主重注条件（deepseek-harness `packages/context/agent-instructions/src/index.ts:224-233` `syncInbox`）是 `alreadySupplied` = surface 上有与 `desired` 相同的 payload（`sameContextPayload` 逐字段 deepStrictEqual）——**只认当前 digest 的可见性**：压掉重复旧副本不触发重注；压掉最新副本才重注（循环）。因此 `newestInstructionSeqsOf(session)`（尾扫日志、按**源文件身份**分组——根注入带 `baselineIdentity`、worktree 注入归 worktree-sourced，src/region.ts）把**每个指令文件的最新注入** pin 进 `protectedSeqs`——多文件（root + worktree）各自保护最后注入。实测：只有「宿主当前引用的文件版本」对应的副本压了才重注（19 条中压 1 条 active 触发重注、压 9 条旧副本零重注）；宿主 git 回退文件时 desired 变旧版本、该副本已被压会重注一次（自愈，可接受）。stale（非最新）AGENTS.md 行按 §3 折叠/开段。
 
 ## 3. 范围表语义（`buildCompressibleSeqRanges`，src/region.ts）
 
