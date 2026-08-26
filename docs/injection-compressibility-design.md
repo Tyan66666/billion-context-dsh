@@ -62,7 +62,18 @@ nudge 的范围表（`buildCompressibleSeqRanges`，src/region.ts）历史上把
 - 搜索排除扩展：nudge echo + 指令行影子不进文档集、真命中照常上榜（镜像既有 418 断言式）
 - **v2.5**：前端 stale 副本开段（最新副本/skill-catalog 不进段）；per-payload pin（多源各保护最新、重复旧副本 stale）；中段 stale 折叠（tokens 计入、toolPct 分母剔除）；instruction 行不计入任一延迟计数器
 - 缓存句：renderSystemPrompt 含缓存知识段
+- **review 加固（§10）**：`guardedSurfaceSeqsOf` pin 集（最新 per-file 指令 + 全部现行策略行 + 最新 marker；stale 副本**不**入集）；compress 落块吸收保护行时输出 `⚠ absorbs N protected injection row(s)` 纯真实段静默（engine-level，tests/tools.test.ts）；acp_status 注入统计行（overview 有、drilldown 无、无注入行的表面无）；目录管道行 `instr`/`meta` 只编号不给预览且保留 `[N tok]`；占位文案指向被列 span 而非占位行自身
 
 ## 9. 与 v1 方案（独立成段 + [injection] 标注 + 聚合行）的关系
 
 v1 让元数据独立成段并加 `[injection]` 标注、聚合行指引一次压完——被 kernel 5000 字符压缩门槛（`minCompressRange`，单次调用聚合）否决：目录行 600-1200 chars 单独压必失败（「看得到但压不掉」）。v2 的并入让元数据**搭车**真实段（真实段本身过门槛），不再需要标注/聚合行——模型压真实内容时自动带走。代价：元数据只能随真实段压（孤立的零散元数据留着，量小无害）；nudge 回显（~6.4K chars，唯一能单独过门槛的注入行）也必须搭车——这是有意的取舍，防被当作 bug 报。**v2.5** 把同一「搭车」逻辑扩展到 AGENTS.md 重复副本（宿主 digest 去重但旧副本不删）——唯一需要单独开段的场景是前端 stale 块（无相邻真实段，开段自压）。skill-catalog/策略快照维持全不可压（多源身份未解、单条收益小），列为 v2.6 候选项。
+
+## 10. Review hardening（PR #73 评审 items 1–6）
+
+评审确认五层防线成立后的六项加固，全部在本 PR 内落地：
+
+1. **占位文案修正**（item 1）：积压占位行原文「…compress to archive」会被读成「压这一行」——单条 marker 远低于 kernel `minCompressRange` 5000 字符门槛，必然失败。新文案显式指明归档对象是**被列出的 seq 区间**、并声明该行自身压不掉。
+2. **退化失败提示语升级**（item 2）：`resolveSurfaceRange` 两处放弃抛错（recovered 余量无法配平 / 外扩失败）补一句引导——引擎元数据行不能独立成 range，压周边真实段时它们搭车。模型第一次撞上「只压目录行」时即得正确动作，不必试错。
+3. **保护行 advisory（不阻断）**（item 3）：范围表从不**提供**保护行，但拦不住手搓 range 覆盖它们。新增 `guardedSurfaceSeqsOf(session)`（src/region.ts）——`buildCompressibleSeqRanges` 保护集的 advisory 孪生：最新 acp-index marker + **每条现行指令/策略行**（skill-catalog、策略快照无 stale 概念，全保；stale AGENTS.md 副本刻意排除——它们是 v2.5 主收益）。`handleCompress` 对每个落块的实际 shadowed span 与该集求交，命中则经纯函数 `protectedRowAdvisories`（src/tools.ts，导出供测试）在结果里追加一行 `⚠ absorbs N protected injection row(s) (seq …)` 并写明后果边界：现行指令副本回弹一次（宿主重注）、最新 marker 下轮孤儿补编号自愈。是提示不是拦截——「模型决定何时压什么」的原则不变，只是不再无声。
+4. **目录管道行降预览**（item 4）：见 docs/message-index-design.md §4.1——`instr`/`meta` 标签、零预览、保留 `[N tok]`。不可压类不再被预览「广告」，id↔内容绑定不受影响。
+5+6. **注入统计行并入 acp_status overview**（items 5+6 合并实施；nudge 每轮都发不适合塞统计，按需查询的 acp_status 正好）：`surfaceInjectionLine(session)`（src/tools.ts，导出供测试）对表面扫一遍 `classifySurfaceEvent`，输出单行 `Injection rows: <m> metadata + <i> instruction · ~<tok> tok (<pct>% of surface[, N stale AGENTS.md copies safe to compress])`——把 v2.5 的可操作数字（哪些重复副本现在压了不回弹）量化到模型做压缩决策的位置。仅 overview 模式渲染（与 Nudge 行同层），drilldown 与无注入行的表面不出现。

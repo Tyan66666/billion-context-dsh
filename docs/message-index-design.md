@@ -37,7 +37,7 @@ DSH 无法走 pi 的内联标签路线，因为模型可见内容只有一个合
 [acp-index] 12·user「帮我跑下测试」 13·asst「先看配置…」 14·tool bash「ls」 15·result bash「file-a file-b」
 ```
 
-- 标签：`user` / `asst` / `tool <name>` / `result <name>`。真实 `tool/result` 事件不带工具名（AGENTS.md 规则 10），名字经 `buildToolCallIndex` + `toolCallIdOfResultEvent` 从 assistant tool-call 索引回填——与投影共用同一实现（`src/messages.ts`）。回填不到名字时降级为中性 `tool` / `result`；无法识别的事件类型一律标 `note`，不向模型泄漏原始 event.type。
+- 标签：`user` / `asst` / `tool <name>` / `result <name>`，外加管道行的 `instr`（宿主指令/策略行：AGENTS.md 注入、skill-catalog、运行时策略快照）与 `meta`（引擎自身回显：nudge echo、pair-hide 替换行）。管道条目**只编号不给预览**——其全文本就躺在模型视野里，预览只是花 token 复述相邻内容，对不可压类更是在给「永远压不掉的行」做广告；`[N tok]` 大小标记保留，大块策略行仍以「策略行」的身份可见（review item 4）。真实 `tool/result` 事件不带工具名（AGENTS.md 规则 10），名字经 `buildToolCallIndex` + `toolCallIdOfResultEvent` 从 assistant tool-call 索引回填——与投影共用同一实现（`src/messages.ts`）。回填不到名字时降级为中性 `tool` / `result`；无法识别的事件类型一律标 `note`，不向模型泄漏原始 event.type。
 - 无文本节点保留裸条目（`16·tool`），不丢 seq。
 - `source:{kind:'plugin', plugin:'acp-index', form:'catalog'}`——dsh-llm 的 `MessageSourceMap.plugin` 支持 `ContextFormed` 扩展，声明 `catalog` 后宿主 UI 可将目录行识别为目录类消息（折叠渲染等）；谓词 `isIndexMarkerEvent` 在 `src/messages.ts`（从 region.ts 私有副本上移为单一实现）。
 
@@ -59,7 +59,7 @@ DSH 无法走 pi 的内联标签路线，因为模型可见内容只有一个合
 - `flattenPreview`：控制字符 → 空格、引号族（`「」"'‘’`）→ `'`、全角间隔号 `·` → `,`——弯引号会破坏引号对位、`·` 会伪造条目定界符，两者都必须映射走；再折叠空白串。
 - `truncateToTokenBudget(text, maxTokens)`：先按 ~`maxTokens*4` 字符粗剪短路（`defaultCountTokens` 下 L 字符 ≥ L/4 token，粗剪不可能丢掉预算内的内容，避免对超大单节点做全文二分），再二分找「预算 −1 token 内最长前缀」补 `…`；二分切点落在代理对高半区时回退一位，不产生 U+FFFD。**按 token 不按字符**——CJK 是 1 字/token，按字符截断会让中文预览实际花费 4× 预算。非有限或 <1 的预算返回空串。
 - 默认 `previewTokens: 16`（含省略号）；配置值钳制 ≥0（floor），修正时 `console.warn`。
-- **大头标记**：预览是 token 预算截断的——一条 8000 token 的工具转储和一句短注记渲染后一样长，模型看不出「谁是回收重点」。条目按 `defaultCountTokens` 估算文本 token 数，≥512 时附 `[N tok]` 后缀（≥1000 显示为 `[X.XK tok]`），把大小信号补回来。**未标注的唯一含义是「低于阈值」**：条目仍带预览文本（有预览 ≠ 空内容，也不会被读成零 token），精确大小随时可经 `acp_status` 钻取（`mN, tokens`）。阈值是常量（`LARGE_ENTRY_MIN_TOKENS = 512`），不重复 drilldown 的全量精确表。
+- **大头标记**：预览是 token 预算截断的——一条 8000 token 的工具转储和一句短注记渲染后一样长，模型看不出「谁是回收重点」。条目按 `defaultCountTokens` 估算文本 token 数，≥512 时附 `[N tok]` 后缀（≥1000 显示为 `[X.XK tok]`），把大小信号补回来。**未标注的唯一含义是「低于阈值」**：真实内容条目仍带预览文本（有预览 ≠ 空内容，也不会被读成零 token），管道行（§4.1 的 `instr`/`meta`）则本来就无预览——它们的「无标注 = 小」与真实行同义；精确大小随时可经 `acp_status` 钻取（`mN, tokens`）。阈值是常量（`LARGE_ENTRY_MIN_TOKENS = 512`），不重复 drilldown 的全量精确表。
 
 ### 4.5 稳态无上限，积压占位降级
 
@@ -68,7 +68,7 @@ DSH 无法走 pi 的内联标签路线，因为模型可见内容只有一个合
 真正的风险是**水位停旧**——冷启动接入存量会话、或长期关闭后重新开启时，一条消息要吞下全部积压：按 27 tok/条，2000 节点 ≈ 55K tokens（128K 窗口的 43%），数千节点直接越过 provider 上限；且 marker 已持久化，模型连压缩自救的入口都没有（巨行每步复现）。守卫：待索引条目超过 `backlogLimit`（默认 100 ≈ 2.7K tokens）时改发**单行占位 marker**：
 
 ```
-[acp-index] 12..4300 — 4289 earlier messages already exist, listed by seq only (inspect via acp_status, compress to archive)
+[acp-index] 12..4300 — 4289 earlier messages already exist, listed by seq only (inspect them via acp_status; to archive, compress THOSE seq ranges — not this line, which is too small to compress alone)
 ```
 
 占位行自身就是合法 acp-index marker，其 seq 成为新水位——下一回合起恢复正常逐条编号；被跳过的 seq 仍可经 acp_status 钻取与压缩摘要定位。
@@ -117,7 +117,7 @@ stripOrphans → await next() → reject 直通
 
 ## 7. 测试
 
-`tests/message-index.test.ts`（16 用例全绿）：标签与预览/裸条目形状；CJK+ASCII token 预算、引号压平映射与预算边界（0 关闭 / 恰好 / 截断 / 代理对）；水位推进不重索引与多 marker 稳态（尾扫取最新）；checkpoint/自身标记跳过 + disabled + 部分配置默认保留与钳制（含 maxDelayToolTokens/maxDelayTextTokens 的 0/-1/NaN 边界、**缺键零告警**、**小数 floor 前 warn**）；**按类型拆分的 pending 计数器（block 级口径）**——`pendingToolTokenTotal` 只累计 tool-result 嵌套内容 + tool-call `arguments`（混合节点的散文不计、**裸字符串 content 数组计入**、**纯多 call 节点按 arguments 计入**）、`pendingTextTokenTotal` 只累计 user/纯 assistant/note（同跳过集：checkpoint/自身 marker、**水位低于 marker 时 marker 仍被排除**、无 marker 时全计、水位推进后归零、**有限 cap 提前终止**、**单巨节点预筛封顶**）；真实压缩吞掉 marker 后仅索引新节点；60 节点单消息不变量；backlog 占位降级与恢复；退化标签（裸 tool/result/note）与 form:'catalog' 声明；preserveRecent:0 下保护尾跳过插件行判别；search_context 排除被遮蔽 marker 行且真命中照常上榜；**大头 `[N tok]` 标记**（K 缩写、阈值恰好、CJK 计 token、子阈值与空文本不标）。另更新 `tests/prompts.test.ts`：用例 14（engine-level）payload 补齐真实 PreStepPayload 形状（含认领的 `messages`），断言 enter 决策含 2 条 extras 且**索引先于 nudge**（顺序契约的引擎级守护）；用例 14b（engine-level）——`messages: []` 的工具续步（显式 `maxDelayToolTokens: 8192`，新 fixture `buildToolSession(8)` ≈8.3K tok 工具文本触发、`buildToolSession(3)` ≈3.1K 透传，且纯对话的 `buildTextSession(12)` ≈12.4K 文本 token 因无工具节点**永不**推动工具计数器）在未编号工具文本超过阈值时补发目录行；用例 14c（engine-level）四个关闭/静默场景——双零阈值（`maxDelayToolTokens: 0` + `maxDelayTextTokens: 0`）关闭守卫、step 0 唤醒轮永不触发（**工具密集会话**确保删除 step 门就会注入，钉住 step-0 门）、`dueByTurn`+`dueByDelay` 同时成立只注入一条（**工具密集会话真正双门同真**）、默认 `enabled:false` 配置下热路径零注入（MAJOR-1 回归）；用例 14d（engine-level）——**per-turn 从水位增量编号（BLOCKER 回归：既有 marker 的会话第二轮目录不含已编号内容）** + **text 计数器独立触发**（`maxDelayToolTokens:0` + `maxDelayTextTokens:8192` 时 12.4K 对话 token 触发、工具会话静默）。
+`tests/message-index.test.ts`（16 用例全绿）：标签与预览/裸条目形状；CJK+ASCII token 预算、引号压平映射与预算边界（0 关闭 / 恰好 / 截断 / 代理对）；水位推进不重索引与多 marker 稳态（尾扫取最新）；checkpoint/自身标记跳过 + disabled + 部分配置默认保留与钳制（含 maxDelayToolTokens/maxDelayTextTokens 的 0/-1/NaN 边界、**缺键零告警**、**小数 floor 前 warn**）；**按类型拆分的 pending 计数器（block 级口径）**——`pendingToolTokenTotal` 只累计 tool-result 嵌套内容 + tool-call `arguments`（混合节点的散文不计、**裸字符串 content 数组计入**、**纯多 call 节点按 arguments 计入**）、`pendingTextTokenTotal` 只累计 user/纯 assistant/note（同跳过集：checkpoint/自身 marker、**水位低于 marker 时 marker 仍被排除**、无 marker 时全计、水位推进后归零、**有限 cap 提前终止**、**单巨节点预筛封顶**）；真实压缩吞掉 marker 后仅索引新节点；60 节点单消息不变量；backlog 占位降级与恢复；退化标签（裸 tool/result/note）与 form:'catalog' 声明；preserveRecent:0 下保护尾跳过插件行判别；search_context 排除被遮蔽 marker 行且真命中照常上榜；**大头 `[N tok]` 标记**（K 缩写、阈值恰好、CJK 计 token、子阈值与空文本不标）。另更新 `tests/prompts.test.ts`：用例 14（engine-level）payload 补齐真实 PreStepPayload 形状（含认领的 `messages`），断言 enter 决策含 2 条 extras 且**索引先于 nudge**（顺序契约的引擎级守护）；用例 14b（engine-level）——`messages: []` 的工具续步（显式 `maxDelayToolTokens: 8192`，新 fixture `buildToolSession(8)` ≈8.3K tok 工具文本触发、`buildToolSession(3)` ≈3.1K 透传，且纯对话的 `buildTextSession(12)` ≈12.4K 文本 token 因无工具节点**永不**推动工具计数器）在未编号工具文本超过阈值时补发目录行；用例 14c（engine-level）四个关闭/静默场景——双零阈值（`maxDelayToolTokens: 0` + `maxDelayTextTokens: 0`）关闭守卫、step 0 唤醒轮永不触发（**工具密集会话**确保删除 step 门就会注入，钉住 step-0 门）、`dueByTurn`+`dueByDelay` 同时成立只注入一条（**工具密集会话真正双门同真**）、默认 `enabled:false` 配置下热路径零注入（MAJOR-1 回归）；用例 14d（engine-level）——**per-turn 从水位增量编号（BLOCKER 回归：既有 marker 的会话第二轮目录不含已编号内容）** + **text 计数器独立触发**（`maxDelayToolTokens:0` + `maxDelayTextTokens:8192` 时 12.4K 对话 token 触发、工具会话静默）；review 加固两用例——管道行 `instr`/`meta` 只编号不给预览（`[N tok]` 大小标记保留、真实行照常带预览）、积压占位文案指向被列 seq 区间而非占位行自身（单条 marker 过不了 kernel 5000 字符门槛）。
 
 ## 8. 重评门（upstream re-evaluation gates）
 
