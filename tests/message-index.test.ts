@@ -587,3 +587,56 @@ test('M6: a bare-string tool-result content array and pure tool-call arguments b
   assert.equal(pendingToolTokenTotal(callOnly, 0), defaultCountTokens(argsText), 'every call block arguments count')
   assert.equal(pendingTextTokenTotal(callOnly, 0), 0, 'a tool-call node is never conversation')
 })
+
+// ---------------------------------------------------------------------------
+// Review hardening (issue #71 review items 1+4)
+
+test('M6: plumbing rows get binding-only entries — instr/meta labels, no previews, size marker kept', () => {
+  const session = Session.create('m6-compact-rows')
+  appendTurn(session, 1)                                                             // log seq 0 — NOT a surface node
+  appendUser(session, longText('real question', 0))                                  // seq 1 real → previewed
+  session.append('user/message', createUserMessage({                                 // seq 1 instruction (AGENTS.md shape), large
+    content: [{ type: 'text', text: `RULES ${'x'.repeat(4096)}` }],
+    source: { kind: 'agent-instructions', form: 'instructions', baselineIdentity: '/repo/AGENTS.md' },
+  }), { surfaceOp: 'append' })
+  session.append('user/message', createUserMessage({                                 // seq 3 small skill catalog
+    content: [{ type: 'text', text: 'catalog: docx, pdf' }],
+    source: { kind: 'skill-catalog', form: 'catalog' },
+  }), { surfaceOp: 'append' })
+  session.append('user/message', createUserMessage({                                 // seq 3 engine metadata echo
+    content: [{ type: 'text', text: '[acp-nudge] efficiency table with ranges' }],
+    source: { kind: 'plugin', plugin: 'acp-nudge' },
+  }), { surfaceOp: 'append' })
+
+  const entries = collectIndexEntries(session, 0, INDEX_ON.previewTokens)
+  assert.equal(entries.length, 4, 'every surface node is still numbered — binding is never dropped')
+  const [realRow, agentsRow, catalogRow, echoRow] = entries
+  assert.equal(realRow!.label, 'user')
+  assert.ok(realRow!.preview !== '', 'a real row keeps its content preview')
+  assert.equal(agentsRow!.label, 'instr')
+  assert.equal(agentsRow!.preview, '', 'instruction rows carry no preview — their full text sits adjacent already')
+  assert.equal(catalogRow!.label, 'instr')
+  assert.equal(echoRow!.label, 'meta', 'engine plumbing rows (nudge echoes) bind without previewing either')
+
+  const message = buildIndexMessage(session, INDEX_ON)
+  const text = textOf(message!)
+  assert.match(text, /1·user「/, 'the real row renders its preview')
+  assert.match(text, /2·instr\[1K tok\]/, 'a large policy row keeps its size marker so it stays visible AS a policy row')
+  assert.doesNotMatch(text, /RULES/, 'no preview text leaks for the instruction row')
+  assert.match(text, /3·instr(?!\[)/, 'a small instruction row renders bare')
+  assert.doesNotMatch(text, /docx, pdf/, 'no preview for the small catalog row either')
+  assert.match(text, /4·meta(?!\[)/, 'the nudge echo binds as meta, bare')
+  assert.doesNotMatch(text, /efficiency table/, 'no preview for engine plumbing')
+})
+
+test('M6: placeholder copy points the archive action at the listed span, not at itself', () => {
+  const session = Session.create('m6-backlog-copy')
+  appendTurn(session, 1)
+  for (let index = 0; index < 120; index += 1) appendUser(session, longText('bulk', index))
+
+  const placeholder = buildIndexMessage(session, INDEX_ON)
+  const text = textOf(placeholder!)
+  assert.match(text, /^\[acp-index\] \d+\.\.\d+ — 120 earlier messages/)
+  assert.match(text, /compress THOSE seq ranges/, 'the archive verb targets the listed span')
+  assert.match(text, /not this line/, 'and explicitly excludes the marker itself, which cannot pass the size floor alone')
+})

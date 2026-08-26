@@ -1117,3 +1117,85 @@ test('M3: issue #60 P3② — every compress result reports its tier, including 
   } as never, fakeExec(session))
   assert.match((dist as { text: string }).text, /, tier 2/, 'the distilled block reports tier 2 in the same format')
 })
+
+// ---------------------------------------------------------------------------
+// Review hardening (issue #71 review items 3+5+6)
+
+import { createUserMessage } from '@deepseek-ai/dsh-llm'
+import { INDEX_PLUGIN } from '../src/messages.ts'
+
+/** Host injection shapes for the advisory/stats fixtures. */
+function appendSourced(session: Session, text: string, source: { kind?: string; plugin?: string; form?: string; baselineIdentity?: string }): void {
+  session.append('user/message', createUserMessage({ content: [{ type: 'text', text }], source }), { surfaceOp: 'append' })
+}
+
+function appendMarker(session: Session, text: string): void {
+  appendSourced(session, text, { kind: 'plugin', plugin: INDEX_PLUGIN })
+}
+
+test('M3: compress warns when a landed block absorbs protected injection rows', async () => {
+  const env = makeEnv()
+  const session = Session.create('advisory-cover')
+  appendTurn(session, 1)                                                                 // seq 0
+  appendUser(session, longText('q0', 0))                                                 // seq 1
+  appendToolCall(session, longText('c1', 1), 'c1')                                       // seq 2
+  appendToolResult(session, longText('r1', 2), 'c1')                                     // seq 3
+  appendSourced(session, 'CURRENT AGENTS rules', { kind: 'agent-instructions', form: 'instructions', baselineIdentity: '/repo/AGENTS.md' }) // seq 4 guarded (newest of its file)
+  appendMarker(session, '[acp-index] 1..4')                                              // seq 5 guarded (newest marker)
+  appendUser(session, longText('latest question stays live', 3))                         // seq 6 outside the range
+
+  const compress = toolOf(env, 'compress')
+  const result = await compress.execute({
+    content: [{
+      startSeq: 1,
+      endSeq: 6,
+      summary: 'Consumed exploration round: question q0 with tool pair c1/r1, the then-current workspace rule snapshot, and the directory marker covering them.',
+    }],
+  } as never, fakeExec(session))
+
+  const text = (result as { text: string }).text
+  assert.match(text, /Compressed 1 block/)
+  assert.match(text, /absorbs 2 protected injection row\(s\)/, 'the advisory names how many guarded rows went into the block')
+  assert.match(text, /re-injection/, 'and explains the bounded consequence for current instruction copies')
+  assert.match(text, /re-numbers its orphans/, 'and the self-healing path for a swallowed newest marker')
+})
+
+test('M3: compress emits no protected-row advisory when the block covers only real content', async () => {
+  const env = makeEnv()
+  const session = buildTextSession(12)
+
+  const compress = toolOf(env, 'compress')
+  const result = await compress.execute({
+    content: [{
+      startSeq: 1,
+      endSeq: 5,
+      summary: 'Authentication system: JWT access tokens with 15 minute expiry, refresh tokens in Redis with 30 day TTL, login flow with rate limiting, bcrypt hashing.',
+    }],
+  } as never, fakeExec(session))
+
+  assert.doesNotMatch((result as { text: string }).text, /absorbs \d+ protected/, 'real-content blocks stay quiet')
+})
+
+test('M3: acp_status overview quantifies injection rows incl. stale AGENTS.md copies; drilldown omits it', async () => {
+  const env = makeEnv()
+  const session = Session.create('injection-line')
+  appendTurn(session, 1)
+  appendUser(session, longText('q0', 0))                                                  // seq 1 real
+  appendSourced(session, 'stale AGENTS v1', { kind: 'agent-instructions', form: 'instructions', baselineIdentity: '/repo/AGENTS.md' })       // seq 2 STALE duplicate
+  appendSourced(session, 'current AGENTS v2', { kind: 'agent-instructions', form: 'instructions', baselineIdentity: '/repo/AGENTS.md' })      // seq 3 newest of the file
+  appendSourced(session, 'runtime policy snapshot', { kind: 'plugin', plugin: 'runtime-context' })                           // seq 4 host policy row
+  appendMarker(session, '[acp-index] 1..2')                                               // seq 5 metadata
+  appendUser(session, 'latest question')                                                  // seq 6
+
+  const status = toolOf(env, 'acp_status')
+  const overview = await status.execute({} as never, fakeExec(session))
+  const overviewText = (overview as { text: string }).text
+  assert.match(overviewText, /Injection rows: 1 metadata \+ 3 instruction/, 'marker counts as metadata; both AGENTS rows and the runtime-context row are instruction')
+  assert.match(overviewText, /~\d+ tok \(\d+% of surface, 1 stale AGENTS\.md copy safe to compress\)/, 'cost, share, and the actionable stale-copy count in one line')
+
+  const drilldown = await status.execute({ scope: 'compressed' } as never, fakeExec(session))
+  assert.doesNotMatch((drilldown as { text: string }).text, /Injection rows:/, 'overview-only, like the Nudge decision line')
+
+  const plainOverview = await toolOf(makeEnv(), 'acp_status').execute({} as never, fakeExec(buildTextSession(4)))
+  assert.doesNotMatch((plainOverview as { text: string }).text, /Injection rows:/, 'a surface without injection rows renders no line at all')
+})

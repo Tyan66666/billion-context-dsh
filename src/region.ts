@@ -271,7 +271,9 @@ export function resolveSurfaceRange(
   if (recovered) {
     throw new Error(
       `billion-context-dsh: no tool-pairing-balanced live remainder around seq ${start}..${end} — `
-      + 'narrow the range or consult acp_status for the current surface',
+      + 'narrow the range or consult acp_status for the current surface. '
+      + 'Engine metadata rows (acp-index directory lines, nudge echoes) cannot form a range alone — '
+      + 'compress the surrounding real segment and they ride along.',
     )
   }
   // Second pass: the inward pass collapsed (a lone tool message) — expand
@@ -293,7 +295,9 @@ export function resolveSurfaceRange(
   }
   throw new Error(
     `billion-context-dsh: no tool-pairing-balanced range around seq ${start}..${end} — `
-    + 'narrow the range or consult acp_status for the current surface',
+    + 'narrow the range or consult acp_status for the current surface. '
+    + 'Engine metadata rows (acp-index directory lines, nudge echoes) cannot form a range alone — '
+    + 'compress the surrounding real segment and they ride along.',
   )
 }
 
@@ -780,6 +784,34 @@ export function newestInstructionSeqsOf(session: Session): Set<number> {
     newest.set(identity, seq)
   }
   return new Set(newest.values())
+}
+
+/**
+ * Surface seqs a compression should think twice about absorbing (issue #71
+ * review item 3). This is the ADVISORY twin of `buildCompressibleSeqRanges`'s
+ * protection set — the range table never OFFERS these rows, but nothing stops
+ * a hand-built compress range from covering them, so `handleCompress` checks
+ * the landed span against this set and appends an advisory line when it does:
+ * - the newest acp-index marker (its numbering set orphans if swallowed —
+ *   self-healing via orphan re-numbering, but the model should know);
+ * - every CURRENT instruction/policy row (compressing one makes the host
+ *   re-inject it — a bounded bounce). Stale AGENTS.md duplicates are
+ *   deliberately EXCLUDED: they are the v2.5 primary yield, meant to go.
+ */
+export function guardedSurfaceSeqsOf(session: Session): Set<number> {
+  const guarded = new Set<number>()
+  const watermark = indexWatermarkOf(session)
+  if (watermark > 0) guarded.add(watermark)
+  const newestInstructions = newestInstructionSeqsOf(session)
+  for (const seq of session.surface.nodes) {
+    const event = session.events[seq]
+    if (event === undefined || classifySurfaceEvent(event) !== 'instruction') continue
+    // Stale AGENTS.md rows are MEANT to be compressed (v2.5) — only live
+    // policy warns.
+    if (isAgentInstructionsRow(event) && !newestInstructions.has(seq)) continue
+    guarded.add(seq)
+  }
+  return guarded
 }
 
 /**

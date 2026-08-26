@@ -25,6 +25,8 @@ import {
   blockRegistry,
   compactionIdsOfKernelBlocks,
   expandShadowedSeqs,
+  guardedSurfaceSeqsOf,
+  newestInstructionSeqsOf,
   rebuildBlockLedger,
   resolveSurfaceRange,
   runCompactionTransaction,
@@ -34,7 +36,7 @@ import {
   surfaceSummary,
   type ResolvedSurfaceRange,
 } from './region.ts'
-import { allLogMessages, buildToolCallIndex, classifySurfaceEvent, eventsToCoreMessages, extractEventText, surfaceEventsOf } from './messages.ts'
+import { allLogMessages, buildToolCallIndex, classifySurfaceEvent, eventsToCoreMessages, extractEventText, isAgentInstructionsRow, surfaceEventsOf } from './messages.ts'
 import { shadowedTokensViaMeter } from './host-tokens.ts'
 import { DEFAULT_RESOLVED, type ResolvedPrompts } from './prompts.ts'
 
@@ -248,6 +250,26 @@ function unwrapEnvelope<T extends object>(args: T): T {
 }
 
 /** Resolve seq → kernel ref, then applyCompression and land the transaction. */
+/**
+ * Advisory lines for a LANDED block whose shadowed span covers protected
+ * injection rows (issue #71 review item 3). The range table never offers
+ * these rows, but nothing stops a hand-built range from covering them — the
+ * compression itself is safe and self-healing (a swallowed current
+ * instruction copy bounces back exactly once; a swallowed newest acp-index
+ * marker re-numbers its orphans next turn), yet the model must see it
+ * immediately instead of discovering the re-injection later. Pure so tests
+ * can pin the wording; `guardedSurfaceSeqsOf` supplies the protected set.
+ */
+export function protectedRowAdvisories(guarded: ReadonlySet<number>, shadowed: readonly number[]): string[] {
+  const hits = shadowed.filter((seq) => guarded.has(seq))
+  if (hits.length === 0) return []
+  const preview = hits.slice(0, 4).join(', ')
+  const more = hits.length > 4 ? ` +${hits.length - 4} more` : ''
+  return [
+    `    ⚠ absorbs ${hits.length} protected injection row(s) (seq ${preview}${more}) — a CURRENT instruction/policy copy comes back once (host re-injection); an absorbed newest acp-index marker re-numbers its orphans next turn`,
+  ]
+}
+
 async function handleCompress(env: ToolEnvironment, args: CompressArgs, exec: ToolRunContext): Promise<TextOutput> {
   const agent = requireAgent(exec)
   const session = agent.session
@@ -290,6 +312,11 @@ async function handleCompress(env: ToolEnvironment, args: CompressArgs, exec: To
     }
   }
   args = unwrapped
+
+  // Protected injection rows (newest acp-index marker + current instruction/
+  // policy rows) for the advisory check below — computed once per call from
+  // the PRE-call log, since the compressions themselves move the surface.
+  const guardedSeqs = guardedSurfaceSeqsOf(session)
 
   const ranges: Array<
     ResolvedSurfaceRange & {
@@ -468,6 +495,9 @@ async function handleCompress(env: ToolEnvironment, args: CompressArgs, exec: To
     lines.push(
       `  block ${compactionId.slice(0, 8)}: seqs ${start}..${end}, ${shadowed.length} messages shadowed${tierLabel}${note}`,
     )
+    // Issue #71 review item 3: say so when a landed block swallowed protected
+    // injection rows — bounded and self-healing, but never silently.
+    lines.push(...protectedRowAdvisories(guardedSeqs, shadowed))
   }
 
   const summaryLine = `Compressed ${applied.result.blocksCreated} block(s), ~${applied.result.tokensCompressed} tokens reclaimed.`
@@ -672,6 +702,48 @@ function isCheckpointEvent(event: SessionEvent): boolean {
   return source?.plugin === 'compact'
 }
 
+/**
+ * One-line quantification of the injection rows on the surface (issue #71
+ * review items 5+6): how many engine-metadata rows (directory lines, nudge
+ * echoes, pair stubs) and host-instruction rows (AGENTS.md injections, skill
+ * catalogs, policy snapshots) are visible, what they cost in
+ * `defaultCountTokens`, their share of surface tokens, and — the actionable
+ * number — how many STALE AGENTS.md duplicates are safe to compress right now
+ * (v2.5: only the newest copy per instruction file re-injects). Rendered in
+ * acp_status OVERVIEW mode only, next to the Nudge line: on-demand reference
+ * data for compression decisions, not per-turn nudge noise. Null when the
+ * surface carries no injection rows at all.
+ */
+export function surfaceInjectionLine(session: Session): string | null {
+  const newestInstructions = newestInstructionSeqsOf(session)
+  let metadataRows = 0
+  let instructionRows = 0
+  let staleInstructionRows = 0
+  let injectionTokens = 0
+  let totalTokens = 0
+  for (const seq of session.surface.nodes) {
+    const event = session.events[seq]
+    if (event === undefined) continue
+    const tokens = defaultCountTokens(extractEventText(event))
+    totalTokens += tokens
+    const cls = classifySurfaceEvent(event)
+    if (cls !== 'metadata' && cls !== 'instruction') continue
+    if (cls === 'metadata') {
+      metadataRows += 1
+    } else {
+      instructionRows += 1
+      if (isAgentInstructionsRow(event) && !newestInstructions.has(seq)) staleInstructionRows += 1
+    }
+    injectionTokens += tokens
+  }
+  if (metadataRows + instructionRows === 0) return null
+  const pct = totalTokens > 0 ? Math.round((injectionTokens / totalTokens) * 100) : 0
+  const stalePart = staleInstructionRows > 0
+    ? `, ${staleInstructionRows} stale AGENTS.md cop${staleInstructionRows === 1 ? 'y' : 'ies'} safe to compress`
+    : ''
+  return `Injection rows: ${metadataRows} metadata + ${instructionRows} instruction · ~${injectionTokens} tok (${pct}% of surface${stalePart})`
+}
+
 async function handleStatus(env: ToolEnvironment, rawArgs: StatusArgs, exec: ToolRunContext): Promise<TextOutput> {
   // The model channel may wrap ANY tool's args under `{ arguments: {…} }`;
   // peel it or drilldown params never reach buildStatusReport (live-verified
@@ -714,6 +786,12 @@ async function handleStatus(env: ToolEnvironment, rawArgs: StatusArgs, exec: Too
     const nudge = turn.nudge
     if (nudge !== undefined) {
       lines.push('', `Nudge: ${nudge.shouldInject ? 'ACTIVE' : 'idle'} — ${nudge.reason}`)
+    }
+    // Issue #71 review items 5+6: quantify the injection rows (and call out
+    // the stale AGENTS.md copies that are safe to compress) in overview mode.
+    const injection = surfaceInjectionLine(session)
+    if (injection !== null) {
+      lines.push('', injection)
     }
     // Issue #60 P2: the model's only route to T2/T3 distillation is a LIVE
     // checkpoint seq — but acp_status (kernel buildStatusReport) is blind to

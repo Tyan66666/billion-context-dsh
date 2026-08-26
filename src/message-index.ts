@@ -339,10 +339,19 @@ export function collectIndexEntries(session: Session, watermark: number, preview
       if (covering >= 0 && surfaceSet.has(covering)) continue
     }
     const text = extractEventText(event)
+    // Plumbing rows — host instructions (AGENTS.md injections, skill catalogs,
+    // policy snapshots) and engine metadata (nudge echoes, pair stubs) — get
+    // BINDING-ONLY entries: their full text already sits in the model's view,
+    // so a preview would spend tokens duplicating what is adjacent, and for
+    // un-compressible classes it would advertise rows no compression can ever
+    // reclaim. The `[N tok]` size marker stays: a huge policy row remains
+    // visible AS a policy row, which is exactly how the model should see it.
+    const cls = classifySurfaceEvent(event)
+    const compact = cls === 'instruction' || cls === 'metadata'
     entries.push({
       seq,
-      label: labelOf(event, toolNames),
-      preview: truncateToTokenBudget(text, previewTokens),
+      label: compact ? (cls === 'instruction' ? 'instr' : 'meta') : labelOf(event, toolNames),
+      preview: compact ? '' : truncateToTokenBudget(text, previewTokens),
       tokens: defaultCountTokens(text),
     })
   }
@@ -480,7 +489,7 @@ export function buildIndexMessage(session: Session, config: ResolvedMessageIndex
     const first = entries[0]!.seq
     const last = entries[entries.length - 1]!.seq
     return createUserMessage({
-      content: [{ type: 'text', text: `[acp-index] ${first}..${last} — ${entries.length} earlier messages already exist, listed by seq only (inspect via acp_status, compress to archive)` }],
+      content: [{ type: 'text', text: `[acp-index] ${first}..${last} — ${entries.length} earlier messages already exist, listed by seq only (inspect them via acp_status; to archive, compress THOSE seq ranges — not this line, which is too small to compress alone)` }],
       source: indexSource,
     })
   }

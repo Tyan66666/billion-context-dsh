@@ -828,3 +828,29 @@ test('M5: newestInstructionSeqsOf groups by FILE identity and keeps only the las
   const newest2 = newestInstructionSeqsOf(session)
   assert.ok(newest2.has(3) && !newest2.has(2), 'only the last root injection is protected; ROOT-v1 is stale now')
 })
+
+// ---------------------------------------------------------------------------
+// Review hardening (issue #71 review item 3)
+
+import { guardedSurfaceSeqsOf } from '../src/region.ts'
+
+test('M5: guardedSurfaceSeqsOf pins the newest marker + every current policy row, never stale AGENTS.md copies', () => {
+  const session = Session.create('guarded-seqs')
+  appendTurn(session, 1)
+  appendUser(session, longText('q0', 0))                                                                                  // seq 1 real
+  appendSourced(session, 'AGENTS v1 rules', { kind: 'agent-instructions', form: 'instructions', baselineIdentity: '/repo/AGENTS.md' })    // seq 2 STALE (older row of the file)
+  appendSourced(session, 'AGENTS v2 rules', { kind: 'agent-instructions', form: 'instructions', baselineIdentity: '/repo/AGENTS.md' })    // seq 3 newest of the root file
+  appendSourced(session, 'worktree AGENTS rules', { kind: 'plugin', plugin: 'agent-instructions' })                        // seq 4 newest of the worktree group
+  appendSourced(session, 'skill catalog text', { kind: 'skill-catalog', form: 'catalog' })                                 // seq 5 guarded policy
+  appendMarker(session, '[acp-index] m1')                                                                                  // seq 6 newest marker
+  appendUser(session, longText('q1', 1))                                                                                   // seq 7
+
+  const guarded = guardedSurfaceSeqsOf(session)
+  assert.deepEqual([...guarded].sort((a, b) => a - b), [3, 4, 5, 6], 'newest per instruction FILE + all current policy rows + newest marker')
+  assert.equal(guarded.has(2), false, 'a stale AGENTS.md duplicate is the v2.5 primary yield — compressing it must NOT warn')
+
+  const plain = Session.create('guarded-none')
+  appendTurn(plain, 1)
+  appendUser(plain, longText('only real rows here', 0))
+  assert.equal(guardedSurfaceSeqsOf(plain).size, 0, 'no markers or injections → nothing to guard (recent-tail protection is deliberately NOT part of this advisory set)')
+})
