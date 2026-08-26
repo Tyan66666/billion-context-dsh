@@ -402,12 +402,16 @@ function pendingTokensOf(
   for (const seq of session.surface.nodes) {
     if (seq <= watermark) continue
     const event = session.events[seq]
-    // The counter measures UN-INDEXED content. Checkpoints and metadata rows
-    // (directory lines, nudge echoes, pair stubs) never get directory entries
-    // of their own and their text is engine/host plumbing, not content the
-    // model needs re-aligned — skip them or a host enabling maxDelayTextTokens
-    // would see the nudge echo inflate the counter and re-inject early.
-    if (event === undefined || isCheckpointNode(event) || classifySurfaceEvent(event) === 'metadata') continue
+    // The counter measures UN-INDEXED content. Checkpoints, metadata rows
+    // (directory lines, nudge echoes, pair stubs) and instruction rows
+    // (AGENTS.md injections, skill catalogs, policy snapshots) never get
+    // directory entries of their own and their text is engine/host plumbing,
+    // not content the model needs re-aligned — skip them or a host enabling
+    // maxDelayTextTokens would see the nudge echo / an AGENTS.md row inflate
+    // the counter and re-inject early.
+    if (event === undefined || isCheckpointNode(event)) continue
+    const cls = classifySurfaceEvent(event)
+    if (cls === 'metadata' || cls === 'instruction') continue
     const text = extract(event)
     if (text.length === 0) continue
     // `defaultCountTokens` prices every char at >= 1/4 token (ASCII floor), so

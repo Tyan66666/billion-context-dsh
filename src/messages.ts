@@ -337,6 +337,20 @@ const HOST_INSTRUCTION_PLUGINS: ReadonlySet<string> = new Set([
   'runtime-context', // current sandbox/approval policy snapshot
 ])
 
+/**
+ * True for AGENTS.md instruction rows in BOTH host shapes: the hook shape
+ * (`kind:'agent-instructions'`, form 'instructions') and the baseline shape
+ * (`kind:'plugin'` + plugin 'agent-instructions'). Shared by the newest-row
+ * scan, the range scanner, and the counters so staleness and folding always
+ * agree on what counts as an AGENTS.md row.
+ */
+export function isAgentInstructionsRow(event: SessionEvent): boolean {
+  if (event.type !== 'user/message') return false
+  const source = (event.data as { source?: { kind?: string; plugin?: string } }).source
+  if (!source) return false
+  return source.kind === 'agent-instructions' || (source.kind === 'plugin' && source.plugin === 'agent-instructions')
+}
+
 export function classifySurfaceEvent(event: SessionEvent): SurfaceEventClass {
   // Compaction summary nodes first — they are user messages too.
   if (isCheckpointNode(event)) return 'checkpoint'

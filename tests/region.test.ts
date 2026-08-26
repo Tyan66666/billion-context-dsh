@@ -18,6 +18,7 @@ import {
   runCompactionTransaction,
   shadowedSeqsOf,
   stripOrphanedSurfaceToolMessages,
+  newestInstructionSeqsOf,
 } from '../src/region.ts'
 import { appendTurn, appendToolCall, appendToolResult, appendMultiToolCall, appendUser, appendAssistant, buildTextSession, longText } from './helpers.ts'
 
@@ -746,4 +747,81 @@ test('M5: metadata rows before any real content are skipped, never opening a seg
   assert.equal(ranges[0]!.start, 1, 'segment starts at the first real user (seq 1), not the leading marker (seq 0)')
   assert.equal(ranges[0]!.end, 3, 'segment ends at the tool pair')
   assert.ok(ranges[0]!.count === 3 && ranges[0]!.tokens > 0, 'count/tokens cover only the real rows')
+})
+
+test('M5: a front-of-session stale AGENTS.md row opens its own block; the newest per payload and skill-catalog stay out (v2.5)', () => {
+  const session = Session.create('v25-front-stale')
+  // Stale rows are DUPLICATE copies of a payload (the host de-duplicates by
+  // digest but never removes older copies). They sit BEFORE the payload's
+  // newest row (which breaks the scan), so there is no adjacent real segment
+  // to fold into — they must open one.
+  appendSourced(session, longText('AGENTS-v1', 4), { kind: 'agent-instructions', form: 'instructions' }) // seq 0 stale (v1 copy 1)
+  appendSourced(session, longText('AGENTS-v1', 4), { kind: 'agent-instructions', form: 'instructions' }) // seq 1 v1 NEWEST → protected
+  appendSourced(session, 'skill catalog text', { kind: 'skill-catalog', form: 'catalog' })               // seq 2 instruction
+  appendUser(session, longText('q0', 0))                                                                  // seq 3 real
+  appendToolCall(session, longText('c1', 1), 'c1')                                                         // seq 4 tool
+  appendToolResult(session, longText('r1', 2), 'c1')                                                       // seq 5 tool
+  appendUser(session, longText('q1', 3))                                                                   // seq 6 real — last real → protected
+
+  const ranges = buildCompressibleSeqRanges(session, { preserveRecent: 0 })
+  assert.equal(ranges.length, 2, 'stale front block + the real segment')
+  assert.equal(ranges[0]!.start, 0, 'stale block opens the FIRST range (oldest-first)')
+  assert.equal(ranges[0]!.end, 0, 'stale block is exactly the stale row')
+  assert.ok(ranges[0]!.count === 1 && ranges[0]!.tokens > 0, 'stale block counts the stale row')
+  assert.ok(ranges.every((r) => r.start > 1 || r.end < 1), 'the newest AGENTS.md row never appears in a range')
+  assert.ok(ranges.every((r) => r.start > 2 || r.end < 2), 'skill-catalog rows never fold (v2.5 keeps them instruction)')
+  assert.ok(ranges.some((r) => r.start === 3 && r.end === 5), 'the real segment is offered')
+})
+
+test('M5: per-unique-payload pin — every distinct AGENTS.md payload keeps its newest row (v2.5)', () => {
+  const session = Session.create('v25-per-payload')
+  // Root baseline duplicated (copy 1 stale, copy 2 newest) plus a worktree
+  // payload: a single log-tail scan would protect only seq 2 and mark the
+  // CURRENT root row (seq 1) stale — grouping by payload protects both.
+  appendSourced(session, longText('ROOT-v1', 4), { kind: 'plugin', plugin: 'agent-instructions' })         // seq 0 ROOT copy 1 → stale
+  appendSourced(session, longText('ROOT-v1', 4), { kind: 'plugin', plugin: 'agent-instructions' })         // seq 1 ROOT NEWEST → protected
+  appendSourced(session, longText('WT-v1', 3), { kind: 'agent-instructions', form: 'instructions' })       // seq 2 WT NEWEST → protected
+  appendUser(session, longText('q0', 0))                                                                    // seq 3
+  appendToolCall(session, longText('c1', 1), 'c1')                                                           // seq 4
+  appendToolResult(session, longText('r1', 2), 'c1')                                                         // seq 5
+  appendUser(session, longText('q1', 3))                                                                     // seq 6 last real → protected
+
+  const ranges = buildCompressibleSeqRanges(session, { preserveRecent: 0 })
+  assert.ok(ranges.every((r) => r.start > 1 || r.end < 1), 'the CURRENT root row (seq 1) is never offered')
+  assert.ok(ranges.every((r) => r.start > 2 || r.end < 2), 'the worktree newest (seq 2) is never offered')
+  assert.ok(ranges.some((r) => r.start === 0 && r.end === 0), 'the stale root copy opens its own block')
+  assert.ok(ranges.some((r) => r.start === 3 && r.end === 5), 'the real segment is offered')
+})
+
+test('M5: a mid-session stale AGENTS.md row folds into the adjacent real segment (v2.5)', () => {
+  const session = Session.create('v25-mid-stale')
+  appendUser(session, longText('q0', 0))                                                                   // seq 0 real — opens segment
+  appendSourced(session, longText('AGENTS-v1', 4), { kind: 'agent-instructions', form: 'instructions' })  // seq 1 stale (v1 copy 1)
+  appendSourced(session, longText('AGENTS-v1', 4), { kind: 'agent-instructions', form: 'instructions' })  // seq 2 v1 NEWEST → protected
+  appendSourced(session, longText('AGENTS-v2', 4), { kind: 'agent-instructions', form: 'instructions' })  // seq 3 v2 NEWEST → protected
+  appendToolCall(session, longText('c1', 1), 'c1')                                                          // seq 4 tool
+  appendToolResult(session, longText('r1', 2), 'c1')                                                        // seq 5 tool
+  appendUser(session, longText('q1', 3))                                                                    // seq 6 last real → protected
+
+  const ranges = buildCompressibleSeqRanges(session, { preserveRecent: 0 })
+  assert.equal(ranges.length, 2, 'user+stale segment, then the tool segment')
+  assert.equal(ranges[0]!.start, 0, 'segment starts at the real user')
+  assert.equal(ranges[0]!.end, 1, 'the stale row folds into the running segment')
+  assert.equal(ranges[0]!.count, 2, 'count spans user + stale row')
+  assert.equal(ranges[0]!.toolPct, 0, 'toolPct denominator excludes the stale row (realCount 1, toolCount 0)')
+  assert.ok(ranges.some((r) => r.start === 4 && r.end === 5), 'tool pair opens its own segment after the protected rows')
+})
+
+test('M5: newestInstructionSeqsOf groups by payload and keeps only the LAST copy of each (v2.5)', () => {
+  const session = Session.create('v25-log-scan')
+  appendSourced(session, longText('AGENTS-v1', 4), { kind: 'agent-instructions', form: 'instructions' }) // seq 0
+  appendSourced(session, longText('AGENTS-v2', 4), { kind: 'agent-instructions', form: 'instructions' }) // seq 1
+  const newest = newestInstructionSeqsOf(session)
+  assert.equal(newest.size, 2, 'two distinct payloads, both are per-payload newest')
+  assert.ok(newest.has(0) && newest.has(1), 'both rows protected (single occurrence each)')
+  // A third copy of v1: only the LAST v1 copy stays newest — seq 0 becomes stale.
+  appendSourced(session, longText('AGENTS-v1', 4), { kind: 'agent-instructions', form: 'instructions' }) // seq 2
+  const newest2 = newestInstructionSeqsOf(session)
+  assert.equal(newest2.size, 2, 'still two payloads')
+  assert.ok(newest2.has(2) && !newest2.has(0), 'only the last v1 copy is protected; seq 0 is stale now')
 })

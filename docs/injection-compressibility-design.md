@@ -17,16 +17,19 @@ nudge 的范围表（`buildCompressibleSeqRanges`，src/region.ts）历史上把
 |---|---|---|---|
 | `metadata` | `kind==='plugin'` 且 `plugin ∈ {acp-index, acp-nudge, billion-context-dsh}` | **并入相邻真实段**（可压） | acp-index 目录行、nudge 回显、compress-pair stub |
 | `checkpoint` | `plugin === 'compact'` | 排除（蒸馏是显式动作，规则 7） | 压缩摘要节点 |
-| `instruction` | `kind==='agent-instructions'` / `'skill-catalog'`，或 `kind==='plugin' && plugin==='agent-instructions'`（基线形态）；外加宿主策略行（`@deepseek-ai/dsh-system-prompt`、`tool-jobs`、runtime-context 快照）；**任何未知名 `kind==='plugin'` 行** | 排除（不可压） | AGENTS.md 注入两形态、技能目录、系统策略快照、job 通知 |
+| `instruction` | `kind==='agent-instructions'` / `'skill-catalog'`，或 `kind==='plugin' && plugin==='agent-instructions'`（基线形态，共享谓词 `isAgentInstructionsRow`）；外加宿主策略行（`@deepseek-ai/dsh-system-prompt`、`tool-jobs`、runtime-context 快照）；**任何未知名 `kind==='plugin'` 行** | 最新副本排除（不可压）；**重复旧副本 stale 可压**（v2.5）；其余排除 | AGENTS.md 注入两形态、技能目录、系统策略快照、job 通知 |
 | `real` | 其余（真实 user/assistant/tool/result；含 subagent relay/notice） | 正常分段 | 对话与工具内容 |
 
 **设计取舍**：`real = 其余` 的默认在 v2 中被推翻——未知名 plugin 行**保守落 instruction**（宁可多留一条不压，绝不误压；未来宿主新增注入形态不会静默漏进可压段）。宿主注入源契约：宿主新增注入 kind/plugin 名时必须同步此函数并补 fixture（见 §6 与 docs/dsh-porting-verification.md）。
+
+**v2.5（AGENTS.md 重复副本 stale 可压）**：宿主按内容 digest 去重注入但**从不移除旧副本**——长会话累积重复的整份 AGENTS.md 行（实测本会话 10 条未遮蔽、86,450 tok 占表面 46.5%，仅 1 条是当前 digest）。宿主重注条件（deepseek-harness `packages/context/agent-instructions/src/index.ts:224-233` `syncInbox`）是 `alreadySupplied` = surface 上有与 `desired` 相同的 payload（`sameContextPayload` 逐字段 deepStrictEqual）——**只认当前 digest 的可见性**：压掉重复旧副本不触发重注；压掉最新副本才重注（循环）。因此 `newestInstructionSeqsOf(session)`（尾扫日志、按 payload 文本分组，src/region.ts）把**每个唯一 payload 的最新副本** pin 进 `protectedSeqs`——多源（root + worktree 不同 digest）各自保护，宿主回退到旧 payload 时也安全（该 payload 有保护）。stale（非最新）AGENTS.md 行按 §3 折叠/开段。
 
 ## 3. 范围表语义（`buildCompressibleSeqRanges`，src/region.ts）
 
 - **按真实 user 消息分段**：一条新的 `user/message`（`classify==='real'`）闭合当前段、开启下一段——段粒度 ≈ 一个回合，与 v1 基线一致（v1 的断点本来就是每轮的 marker/nudge，v2 只是把这些断点从「排除」换成「并入」）。
 - **metadata 折叠**：`metadata` 行并入**当前段**（它紧跟的回合）——tokens 计入段显示总量；`toolPct = round(toolCount / realCount × 100)`，分母剔除 metadata（`realCount = count - metadataCount`；`realCount === 0` 时 toolPct 取 0，防除零）。模型压一个已消费的真实段时，紧随其后的目录行/nudge 回显/stub **顺手带走**——零额外缓存代价（一段一次 replace）。
-- **instruction / checkpoint 行 flush 断段**：遇到即闭合当前段，自身不进任何段。
+- **instruction / checkpoint 行 flush 断段**：遇到即闭合当前段，自身不进任何段。**v2.5 例外**：`isAgentInstructionsRow` 且不在 `protectedSeqs`（stale 重复副本）——归 metadata 同路径处理（见下）。
+- **metadata / stale 折叠**：`metadata` 行并入**当前段**（它紧跟的回合）——tokens 计入段显示总量；`toolPct = round(toolCount / realCount × 100)`，分母剔除 metadata（`realCount = count - metadataCount`；`realCount === 0` 时 toolPct 取 0，防除零）。stale AGENTS.md 行同样折叠；**段未开（`cur === null`）时 stale 行允许开段**（前端重复副本场景——它们全在会话最前、与第一个真实段之间隔着最新副本必 flush，折叠语义够不到；单条 stale ~34K chars 远超 kernel 5000 门槛，无小段陷阱；oldest-first 排第一，天然最先压）。模型压一个已消费的真实段时，紧随其后的目录行/nudge 回显/stub/stale 副本**顺手带走**——零额外缓存代价（一段一次 replace）。
 - **保护尾**：回扫判据是 `classify==='real'` 且非 relay/notice（`isRealUserTurn`）——合成行（含指令类）永远赢不了「最后真实用户消息」保护；这修复了 v1 现状 bug（skill-catalog 重发布尾随真实用户时抢走保护）。
 - **最新 marker 保护**：`indexWatermarkOf(session)` 返回的 seq（最新 acp-index marker）额外 pin 进 `protectedSeqs`——「索引了未压缩内容」的目录行永不进可压段。残差窗口由 §4 的孤儿补编号兜底。
 
@@ -46,7 +49,7 @@ nudge 的范围表（`buildCompressibleSeqRanges`，src/region.ts）历史上把
 
 ## 7. 系统提示缓存知识（src/prompts.ts 默认 systemPromptTemplate）
 
-`WHEN NOT TO COMPRESS` 段后追加**提供者前缀缓存知识**：压缩使被压位置之后所有消息位置偏移、该段之后缓存一次性失效——压尾部近无损；中部大块（如旧注入行）代价最高；引擎元数据随真实段折叠压缩零额外代价。措辞约束：不得泛化「注入可安全压」（instruction 类是例外）；不得把「压尾部」框成压缩目标（尾部是最新活动内容）；表述为「缓存失效一次性 vs 陈旧重复每请求成本」。属默认模板内容，自定义 `systemPromptTemplate` 的宿主不自动获得。
+`WHEN NOT TO COMPRESS` 段后追加**提供者前缀缓存知识**：压缩使被压位置之后所有消息位置偏移、该段之后缓存一次性失效——压尾部近无损；中部大块（如旧注入行）代价最高；引擎元数据与**旧版本指令副本**随真实段折叠压缩零额外代价（宿主只看当前指令版本是否可见——压旧副本不触发重注，压当前版本会）。措辞约束：不得泛化「注入可安全压」（**当前生效的指令**与技能目录/策略快照不可压）；不得把「压尾部」框成压缩目标（尾部是最新活动内容）；表述为「缓存失效一次性 vs 陈旧重复每请求成本」。属默认模板内容，自定义 `systemPromptTemplate` 的宿主不自动获得。
 
 ## 8. 测试清单（tests/region.test.ts、tests/message-index.test.ts、tests/prompts.test.ts）
 
@@ -57,8 +60,9 @@ nudge 的范围表（`buildCompressibleSeqRanges`，src/region.ts）历史上把
 - 最新 marker 不进可压段（preserveRecent 内 + pin）；追加消息挤出保护尾后才并入
 - 孤儿补编号：marker 被压但编号内容可见 → 下一 marker 重新编号、已遮蔽内容跳过
 - 搜索排除扩展：nudge echo + 指令行影子不进文档集、真命中照常上榜（镜像既有 418 断言式）
+- **v2.5**：前端 stale 副本开段（最新副本/skill-catalog 不进段）；per-payload pin（多源各保护最新、重复旧副本 stale）；中段 stale 折叠（tokens 计入、toolPct 分母剔除）；instruction 行不计入任一延迟计数器
 - 缓存句：renderSystemPrompt 含缓存知识段
 
 ## 9. 与 v1 方案（独立成段 + [injection] 标注 + 聚合行）的关系
 
-v1 让元数据独立成段并加 `[injection]` 标注、聚合行指引一次压完——被 kernel 5000 字符压缩门槛（`minCompressRange`，单次调用聚合）否决：目录行 600-1200 chars 单独压必失败（「看得到但压不掉」）。v2 的并入让元数据**搭车**真实段（真实段本身过门槛），不再需要标注/聚合行——模型压真实内容时自动带走。代价：元数据只能随真实段压（孤立的零散元数据留着，量小无害）；nudge 回显（~6.4K chars，唯一能单独过门槛的注入行）也必须搭车——这是有意的取舍，防被当作 bug 报。
+v1 让元数据独立成段并加 `[injection]` 标注、聚合行指引一次压完——被 kernel 5000 字符压缩门槛（`minCompressRange`，单次调用聚合）否决：目录行 600-1200 chars 单独压必失败（「看得到但压不掉」）。v2 的并入让元数据**搭车**真实段（真实段本身过门槛），不再需要标注/聚合行——模型压真实内容时自动带走。代价：元数据只能随真实段压（孤立的零散元数据留着，量小无害）；nudge 回显（~6.4K chars，唯一能单独过门槛的注入行）也必须搭车——这是有意的取舍，防被当作 bug 报。**v2.5** 把同一「搭车」逻辑扩展到 AGENTS.md 重复副本（宿主 digest 去重但旧副本不删）——唯一需要单独开段的场景是前端 stale 块（无相邻真实段，开段自压）。skill-catalog/策略快照维持全不可压（多源身份未解、单条收益小），列为 v2.6 候选项。

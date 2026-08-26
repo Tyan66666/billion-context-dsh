@@ -21,7 +21,7 @@ import {
 } from '@deepseek-ai/dsh-compaction'
 import { createAssistantMessage, createUserMessage, type ContentBlock } from '@deepseek-ai/dsh-llm'
 import { defaultCountTokens } from 'acp-kernel'
-import { classifySurfaceEvent, extractEventText, extractText, isCheckpointNode, isRealUserTurn, isToolEvent, toolCallIdOfResultEvent } from './messages.ts'
+import { classifySurfaceEvent, extractEventText, extractText, isAgentInstructionsRow, isCheckpointNode, isRealUserTurn, isToolEvent, toolCallIdOfResultEvent } from './messages.ts'
 import { hostPriceEvent } from './host-tokens.ts'
 import { indexWatermarkOf } from './message-index.ts'
 
@@ -753,16 +753,40 @@ export function deferCompressPairHide(
 }
 
 /**
+ * Newest AGENTS.md instruction row per unique payload (issue #71 v2.5). The
+ * host re-injects instructions only when NO surface row matches the current
+ * desired payload (`alreadySupplied` — deepStrictEqual on content+source,
+ * deepseek-harness packages/context/agent-instructions/src/index.ts:224-233).
+ * So compressing a STALE row (superseded payload) never triggers re-injection,
+ * but compressing the CURRENT row of any scope does. "Current" cannot be told
+ * from position alone (multiple scopes — root + worktree AGENTS.md — and
+ * content rollback both break a single log-tail scan), so protect the NEWEST
+ * row of EVERY distinct payload: tail-scan the log, group by content text,
+ * keep the last seq of each group. O(events), mirrors indexWatermarkOf.
+ */
+export function newestInstructionSeqsOf(session: Session): Set<number> {
+  const newest = new Map<string, number>()
+  for (let seq = 0; seq < session.events.length; seq += 1) {
+    const event = session.events[seq]
+    if (event === undefined || !isAgentInstructionsRow(event)) continue
+    newest.set(extractEventText(event), seq)
+  }
+  return new Set(newest.values())
+}
+
+/**
  * Compute compressible spans directly from the surface — independent of the
  * kernel's ref map, which can drift after surface replacements in long
  * sessions and hide large tool results from the nudge range table. Skips the
  * recent protected tail, the last real user message, compaction checkpoints,
  * host instruction/policy rows, and the newest acp-index marker; metadata
- * rows (directory lines, nudge echoes, pair stubs) fold into the adjacent
- * real segment. Real user turns close a segment (one segment per turn, so the
- * tool/text share stays meaningful); edges are then balanced through
- * resolveSurfaceRange. Ranges are ordered oldest-first (stable across turns —
- * matches the kernel's `oldest first`).
+ * rows (directory lines, nudge echoes, pair stubs) and STALE AGENTS.md rows
+ * (superseded instruction payloads — v2.5) fold into the adjacent real
+ * segment, and a stale row with no open segment starts one (the front-of-
+ * session stale block is the v2.5 primary yield). Real user turns close a
+ * segment (one segment per turn, so the tool/text share stays meaningful);
+ * edges are then balanced through resolveSurfaceRange. Ranges are ordered
+ * oldest-first (stable across turns — matches the kernel's `oldest first`).
  * UPSTREAM: this self-computation is a labeled workaround for kernel
  * ref-map drift after surface replacements (AGENTS.md rule 11) — drop it and
  * use kernel compressibleRanges once the drift is fixed upstream.
@@ -801,6 +825,11 @@ export function buildCompressibleSeqRanges(
   // next directory row re-numbers it (issue #71 review, MAJOR-A mitigation).
   const watermark = indexWatermarkOf(session)
   if (watermark > 0) protectedSeqs.add(watermark)
+  // The newest AGENTS.md row of EVERY distinct payload is never offered either
+  // (v2.5): the host re-injects when no surface row matches the current
+  // payload, so compressing a current row would bounce the instruction back.
+  // Stale rows (older payloads) are NOT protected — they fold/segment below.
+  for (const seq of newestInstructionSeqsOf(session)) protectedSeqs.add(seq)
   const raw: Array<{ start: number; end: number; count: number; tokens: number; toolCount: number; realCount: number }> = []
   let cur: { start: number; end: number; count: number; tokens: number; toolCount: number; realCount: number } | null = null
   const flush = (): void => {
@@ -821,7 +850,11 @@ export function buildCompressibleSeqRanges(
     // segment and never join it: checkpoints are distillation targets (rule 7)
     // and folding policy text would silently strip live instructions from the
     // model's view. Unknown plugin rows fall into 'instruction' deliberately.
-    if (cls === 'checkpoint' || cls === 'instruction') {
+    // EXCEPTION (v2.5): a STALE AGENTS.md row — an instruction row that is NOT
+    // the newest of its payload (not in protectedSeqs) — is superseded text the
+    // host never re-injects (alreadySupplied matches the current payload only),
+    // so it folds like metadata and may even open a segment when none is open.
+    if (cls === 'checkpoint' || (cls === 'instruction' && !(isAgentInstructionsRow(event) && !protectedSeqs.has(seq)))) {
       flush()
       continue
     }
@@ -829,15 +862,20 @@ export function buildCompressibleSeqRanges(
     // running real segment — their content is derived from visible messages,
     // so carrying them along is zero-loss. They never open a segment on their
     // own (too small for the kernel's 5000-char floor) and never break one.
-    if (cls === 'metadata') {
-      if (cur !== null) {
+    // Stale AGENTS.md rows take the same path but MAY open a segment: the
+    // front-of-session stale block (all stale rows precede the newest one,
+    // which breaks the scan) has no adjacent real segment — folding would drop
+    // it, and a stale row alone (~34K chars) is far above the 5000-char floor.
+    if (cls === 'metadata' || (isAgentInstructionsRow(event) && !protectedSeqs.has(seq))) {
+      const stale = cls !== 'metadata'
+      if (cur !== null || stale) {
         cur = {
-          start: cur.start,
+          start: cur === null ? seq : cur.start,
           end: seq,
-          count: cur.count + 1,
-          tokens: cur.tokens + defaultCountTokens(extractEventText(event)),
-          toolCount: cur.toolCount,
-          realCount: cur.realCount,
+          count: (cur === null ? 0 : cur.count) + 1,
+          tokens: (cur === null ? 0 : cur.tokens) + defaultCountTokens(extractEventText(event)),
+          toolCount: cur === null ? 0 : cur.toolCount,
+          realCount: cur === null ? 0 : cur.realCount,
         }
       }
       continue

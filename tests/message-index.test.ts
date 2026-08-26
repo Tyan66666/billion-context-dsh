@@ -190,6 +190,9 @@ test('M6: pending token totals split by kind — tool nodes feed maxDelayToolTok
   // counter — it is plumbing text, not un-indexed content (issue #71 v2: the
   // skip set aligns with classifySurfaceEvent's metadata bucket).
   appendSourced(session, longText('nudge-echo', 1), { kind: 'plugin', plugin: 'acp-nudge' })
+  // An AGENTS.md instruction row must NOT feed the text counter either (v2.5:
+  // instruction rows are host plumbing, not content needing re-alignment).
+  appendSourced(session, longText('AGENTS.md', 1), { kind: 'agent-instructions', form: 'instructions' })
   // Above the newest marker: one user message, one tool call, one tool result.
   appendUser(session, longText('b', 1))
   appendToolCall(session, longText('call', 2), 'call-1')
