@@ -90,7 +90,7 @@ const NUDGE_ALLOWED: { [K in keyof NudgePrompts]: ReadonlySet<string> } = {
 const RANGE_TABLE_ALLOWED: { [K in keyof RangeTablePrompts]: ReadonlySet<string> } = {
   header: new Set(['surface']),
   title: new Set(['count']),
-  line: new Set(['start', 'end', 'count', 'tokens']),
+  line: new Set(['start', 'end', 'count', 'tokens', 'toolPct', 'textPct']),
   footer: new Set(),
 }
 const TOOLS_ALLOWED: { [K in keyof ToolPrompts]: ReadonlySet<string> } = {

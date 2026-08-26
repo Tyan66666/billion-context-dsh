@@ -52,6 +52,7 @@ import {
   isIndexMarkerEvent,
   isToolEvent,
   toolCallIdOfResultEvent,
+  classifySurfaceEvent,
 } from './messages.ts'
 
 /** User-tunable acp-index options (all optional; see resolveMessageIndexConfig). */
@@ -401,7 +402,12 @@ function pendingTokensOf(
   for (const seq of session.surface.nodes) {
     if (seq <= watermark) continue
     const event = session.events[seq]
-    if (event === undefined || isCheckpointNode(event) || isIndexMarkerEvent(event)) continue
+    // The counter measures UN-INDEXED content. Checkpoints and metadata rows
+    // (directory lines, nudge echoes, pair stubs) never get directory entries
+    // of their own and their text is engine/host plumbing, not content the
+    // model needs re-aligned — skip them or a host enabling maxDelayTextTokens
+    // would see the nudge echo inflate the counter and re-inject early.
+    if (event === undefined || isCheckpointNode(event) || classifySurfaceEvent(event) === 'metadata') continue
     const text = extract(event)
     if (text.length === 0) continue
     // `defaultCountTokens` prices every char at >= 1/4 token (ASCII floor), so

@@ -731,3 +731,19 @@ test('M5: a segment with a folded metadata row resolves cleanly through resolveS
   const fromMarker = resolveSurfaceRange(session, 2, 4)
   assert.ok(fromMarker.start <= 2 && fromMarker.end >= 4, 'edge on the marker resolves without collapsing')
 })
+
+test('M5: metadata rows before any real content are skipped, never opening a segment', () => {
+  const session = Session.create('metadata-lead')
+  appendMarker(session, 'm0')                         // seq 1 metadata — BEFORE any real row, cur===null → skipped
+  appendUser(session, longText('q0', 0))              // seq 2 real — opens the first segment
+  appendToolCall(session, longText('c1', 1), 'c1')    // seq 3 tool
+  appendToolResult(session, longText('r1', 2), 'c1')  // seq 4 tool
+  appendUser(session, longText('q1', 3))              // seq 5 real — last real user → protected
+  appendMarker(session, 'm2')                         // seq 6 metadata — NEWEST → protected
+
+  const ranges = buildCompressibleSeqRanges(session, { preserveRecent: 0 })
+  assert.equal(ranges.length, 1, 'exactly one segment, opened by the first real row')
+  assert.equal(ranges[0]!.start, 1, 'segment starts at the first real user (seq 1), not the leading marker (seq 0)')
+  assert.equal(ranges[0]!.end, 3, 'segment ends at the tool pair')
+  assert.ok(ranges[0]!.count === 3 && ranges[0]!.tokens > 0, 'count/tokens cover only the real rows')
+})

@@ -279,6 +279,16 @@ test('M4/prompts 9: renderTemplate throws on a missing value for a known placeho
   )
 })
 
+test('M4/prompts 9b: custom range-table line templates may use toolPct/textPct (allowed set parity)', () => {
+  const prompts = resolvePrompts({
+    rangeTable: { line: '  - seq {start}..{end} — {count} msgs, ~{tokens} tok [tool {toolPct}% | text {textPct}%]' },
+  })
+  const rendered = renderTemplate(prompts.rangeTable.line, {
+    start: 1, end: 5, count: 3, tokens: 42, toolPct: 67, textPct: 33,
+  })
+  assert.ok(rendered.includes('[tool 67% | text 33%]'), 'tool/text share renders from a custom template')
+})
+
 test('M4/prompts 10: empty guidance removes the line cleanly (frame + newline + table + tip)', () => {
   const session = buildTextSession(12)
   const prompts = resolvePrompts({

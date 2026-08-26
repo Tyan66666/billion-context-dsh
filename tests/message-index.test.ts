@@ -186,6 +186,10 @@ test('M6: pending token totals split by kind — tool nodes feed maxDelayToolTok
   appendTurn(session, 1)
   appendUser(session, longText('a', 0))
   appendMarker(session, '[acp-index] batch')
+  // A nudge echo (engine metadata) above the marker must NOT feed either
+  // counter — it is plumbing text, not un-indexed content (issue #71 v2: the
+  // skip set aligns with classifySurfaceEvent's metadata bucket).
+  appendSourced(session, longText('nudge-echo', 1), { kind: 'plugin', plugin: 'acp-nudge' })
   // Above the newest marker: one user message, one tool call, one tool result.
   appendUser(session, longText('b', 1))
   appendToolCall(session, longText('call', 2), 'call-1')
