@@ -75,6 +75,14 @@ function appendMarker(session: Session, text: string): void {
   }), { surfaceOp: 'append' })
 }
 
+/** Append a user message with an explicit host-style source shape. */
+function appendSourced(session: Session, text: string, source: { kind?: string; plugin?: string; form?: string }): void {
+  session.append('user/message', createUserMessage({
+    content: [{ type: 'text', text }],
+    source,
+  }), { surfaceOp: 'append' })
+}
+
 test('M6: entries number every new surface node with kind labels and previews', () => {
   const session = Session.create('m6-labels')
   appendTurn(session, 1)
@@ -299,13 +307,22 @@ test('M6: the protected-tail scan treats index lines as plugin output, not the l
   appendMarker(session, '[acp-index] tail batch')
 
   // Last REAL user message — mirrors the src/region.ts buildCompressibleSeqRanges
-  // tail-scan predicate (user/message minus plugin-authored/checkpoint rows);
-  // kept inline so this test pins the scan even if region.ts refactors around it.
+  // tail-scan predicate (isRealUserTurn: a real user turn is classify 'real'
+  // and never a sub-agent relay); kept inline so this test pins the scan even
+  // if region.ts refactors around it.
   let lastRealUserSeq = 0
   for (let index = session.surface.nodes.length - 1; index >= 0; index -= 1) {
     const seq = session.surface.nodes[index]!
     const event = session.events[seq]
-    if (event !== undefined && event.type === 'user/message' && !isIndexMarkerEvent(event) && !isCheckpointNode(event)) {
+    const kind = (event?.data as { source?: { kind?: string } }).source?.kind
+    if (
+      event !== undefined &&
+      event.type === 'user/message' &&
+      !isIndexMarkerEvent(event) &&
+      !isCheckpointNode(event) &&
+      kind !== 'subagent-report' &&
+      kind !== 'subagent-settled'
+    ) {
       lastRealUserSeq = seq
       break
     }
@@ -442,6 +459,34 @@ test('M6: search_context never ranks shadowed acp-index rows over real hits', as
   const out = await search.execute({ query: 'ERROR' } as never, fakeExec(session)) as { text: string }
   assert.match(out.text, /deploy ERROR traceback/, 'the real hit surfaces')
   assert.equal(out.text.includes('[acp-index]'), false, 'synthetic directory rows are excluded from the search doc set')
+})
+
+test('M6: search_context excludes ALL shadowed metadata and instruction rows, not just markers', async () => {
+  const env = makeEnv()
+  // The metadata fold now puts nudge echoes into compressible segments; the
+  // search doc set must exclude them AND host instruction rows even when a
+  // direct compress span happens to cover them (adapter-layer defense).
+  const session = buildTextSession(12)
+  appendUser(session, 'deploy ERROR traceback happened here')
+  appendSourced(session, 'nudge echo: range table seq tokens compress', { kind: 'plugin', plugin: 'acp-nudge' })
+  appendSourced(session, 'skill catalog entries list', { kind: 'skill-catalog', form: 'catalog', entries: [] })
+  appendMarker(session, '[acp-index] error error tail batch')
+  const markerSeq = session.events.length - 1
+  appendUser(session, 'tail one')
+  appendAssistant(session, 'tail reply one', 2, 1)
+  appendUser(session, 'tail two')
+  appendAssistant(session, 'tail reply two', 2, 2)
+  appendUser(session, 'tail three')
+
+  const compress = toolOf(env, 'compress')
+  await compress.execute({ content: [{ startSeq: session.surface.nodes[0]!, endSeq: markerSeq, summary: 'Archived early conversation batch: alternating turns plus one deploy incident; folded nudge echo and skill catalog rows ride along (inspect via acp_status).' }] } as never, fakeExec(session))
+
+  const search = toolOf(env, 'search_context')
+  const out = await search.execute({ query: 'ERROR' } as never, fakeExec(session)) as { text: string }
+  assert.match(out.text, /deploy ERROR traceback/, 'the real hit surfaces')
+  assert.equal(out.text.includes('[acp-index]'), false, 'marker rows are excluded from the search doc set')
+  assert.equal(out.text.includes('nudge echo'), false, 'nudge echo rows are excluded from the search doc set')
+  assert.equal(out.text.includes('skill catalog'), false, 'instruction rows are excluded from the search doc set')
 })
 
 test('M6: entries at or above the large-entry threshold carry a [N tok] marker; smaller ones stay bare', () => {

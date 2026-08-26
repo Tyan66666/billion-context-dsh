@@ -331,6 +331,8 @@ systemPromptTemplate:
   + 'When you write a summary, …(现有结尾)…'
 ```
 
+默认模板在 `WHEN NOT TO COMPRESS` 段后追加**提供者前缀缓存知识段**（v2 注入分层同 PR 加入，属默认模板内容；自定义 `systemPromptTemplate` 的宿主不自动获得，需自行携带）：压缩会使被压位置之后的所有消息位置偏移、该段之后的前缀缓存一次性失效——压尾部近无损、中部大块（如旧注入行）代价最高、引擎元数据（目录行/nudge 回显/占位行）随真实段折叠压缩零额外代价。措辞约束：不得泛化「注入行可安全压」（指令/策略注入不可压）；不得把「压尾部」框成压缩目标（尾部是最新活动内容，语义上最不该压）——句子的作用是让模型在「回收收益」与「缓存代价」间自行权衡。
+
 `renderSystemPrompt` 注入 4 个变量(K5):`{philosophy: COMPRESS_PHILOSOPHY}`、`{howToCompressRules: HOW_TO_COMPRESS_RULES}`、`{tier2DistillRules: TIER2_DISTILL_RULES}`、`{tier3CondenseRules: TIER3_CONDENSE_RULES}`(全部来自 kernel 导入)。
 
 ### 5.4 工具描述

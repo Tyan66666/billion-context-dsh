@@ -169,7 +169,7 @@ cd /Users/yintianan/GitHub/billion-context-dsh
 npm run typecheck && npm test && npm run build
 ```
 
-181 个测试覆盖：seam 挂载、窗口探测、CJK 感知 token 估算、消息投影、压缩事务（事件序列 + surface 遮蔽）、日志重建账本、四工具端到端、nudge 注入/去重/紧急绕过、可配置提示词模板与校验、**影子价格宿主词汇端到端**（真实 TokenMeter + SessionProjectionRegistry 复现 issue #54：claim == 宿主 meter 价、投影 messageTokens 非负、/acp compress resolved 边界、prune 宿主定价）、**T2 蒸馏可用性**（issue #60：nudge tier seqs 首尾直接压成 tier-2 块端到端；每次压缩结果都报告 tier——含 tier 1，无静默降级）、**每消息编号索引 acp-index 家族**（issue #71：条目标签/预览/token 预算截断、水位推进与多 marker 稳态、真实压缩后连续性、积压占位降级与恢复、search_context 排除被遮蔽目录行且真命中照常上榜）。
+199 个测试覆盖：seam 挂载、窗口探测、CJK 感知 token 估算、消息投影、压缩事务（事件序列 + surface 遮蔽）、日志重建账本、四工具端到端、nudge 注入/去重/紧急绕过、可配置提示词模板与校验、**影子价格宿主词汇端到端**（真实 TokenMeter + SessionProjectionRegistry 复现 issue #54：claim == 宿主 meter 价、投影 messageTokens 非负、/acp compress resolved 边界、prune 宿主定价）、**T2 蒸馏可用性**（issue #60：nudge tier seqs 首尾直接压成 tier-2 块端到端；每次压缩结果都报告 tier——含 tier 1，无静默降级）、**每消息编号索引 acp-index 家族**（issue #71：条目标签/预览/token 预算截断、水位推进与多 marker 稳态、真实压缩后连续性、积压占位降级与恢复、search_context 排除被遮蔽目录行且真命中照常上榜）、**注入行可压性分层**（issue #71 v2：`classifySurfaceEvent` 分类——元数据行并入相邻可压段、指令/策略注入与 checkpoint 不可压、未知插件保守不压、最新目录行永不进可压段、压缩吞目录行后孤儿内容重新编号）。
 
 ## 6. 回滚
 

@@ -577,3 +577,157 @@ test('M5: deferCompressPairHide lands the hide on the microtask queue', async ()
   assert.ok(!after.some((message) => message.role === 'assistant' && message.content.some((block) => (block as { type?: string }).type === 'tool-call')), 'the pair is hidden after the microtask drains')
   assert.ok(after.some((message) => message.role === 'user' && message.content.some((block) => (block as { type?: string }).type === 'text' && (block as { text?: string }).text === 'ok')), 'the compress result text is preserved')
 })
+
+// ---------------------------------------------------------------------------
+// v2 injection-tiering tests: classifySurfaceEvent buckets, metadata folding,
+// turn-closing segments, newest-marker protection, clean resolve with folded rows.
+// ---------------------------------------------------------------------------
+
+import { classifySurfaceEvent, isRealUserTurn, INDEX_PLUGIN } from '../src/messages.ts'
+import { defaultCountTokens } from 'acp-kernel'
+
+/** A real host-shaped acp-index directory row (the engine's own marker). */
+function appendMarker(session: Session, text: string): void {
+  session.append('user/message', createUserMessage({
+    content: [{ type: 'text', text }],
+    source: { kind: 'plugin', plugin: INDEX_PLUGIN },
+  }), { surfaceOp: 'append' })
+}
+
+/** Append a raw user message with an explicit source (host injection shapes). */
+function appendSourced(session: Session, text: string, source: { kind?: string; plugin?: string; form?: string }): void {
+  session.append('user/message', createUserMessage({
+    content: [{ type: 'text', text }],
+    source,
+  }), { surfaceOp: 'append' })
+}
+
+test('M5: classifySurfaceEvent buckets rows by plugin name; unknown plugin rows stay conservatively un-compressible', () => {
+  const ev = (source: { kind?: string; plugin?: string } | undefined): ReturnType<typeof classifySurfaceEvent> =>
+    classifySurfaceEvent({ type: 'user/message', seq: 1, data: { source } } as never)
+  const evOther = (type: string): ReturnType<typeof classifySurfaceEvent> =>
+    classifySurfaceEvent({ type, seq: 2, data: {} } as never)
+  // Real content
+  assert.equal(ev({ kind: 'user' }), 'real', 'host-stamped user turn')
+  assert.equal(ev(undefined), 'real', 'source-less user turn')
+  assert.equal(evOther('tool/result'), 'real', 'tool result')
+  assert.equal(evOther('assistant/message'), 'real', 'assistant message')
+  assert.equal(ev({ kind: 'subagent-report' }), 'real', 'sub-agent relay is real content')
+  assert.equal(ev({ kind: 'subagent-settled' }), 'real', 'sub-agent settle notice is real content')
+  // Metadata — the engine's own three plugin names
+  assert.equal(ev({ kind: 'plugin', plugin: 'acp-index' }), 'metadata')
+  assert.equal(ev({ kind: 'plugin', plugin: 'acp-nudge' }), 'metadata')
+  assert.equal(ev({ kind: 'plugin', plugin: 'billion-context-dsh' }), 'metadata')
+  // Checkpoint
+  assert.equal(ev({ kind: 'plugin', plugin: 'compact' }), 'checkpoint')
+  // Instruction / policy rows — including the AGENTS.md BASELINE shape
+  // (kind 'plugin', plugin 'agent-instructions') and the hook shape
+  assert.equal(ev({ kind: 'plugin', plugin: 'agent-instructions' }), 'instruction', 'AGENTS.md baseline is kind plugin')
+  assert.equal(ev({ kind: 'agent-instructions' }), 'instruction', 'AGENTS.md hook shape')
+  assert.equal(ev({ kind: 'skill-catalog' }), 'instruction')
+  assert.equal(ev({ kind: 'plugin', plugin: '@deepseek-ai/dsh-system-prompt' }), 'instruction')
+  assert.equal(ev({ kind: 'plugin', plugin: 'tool-jobs' }), 'instruction')
+  assert.equal(ev({ kind: 'plugin', plugin: 'runtime-context' }), 'instruction')
+  // Unknown plugin names are conservatively un-compressible — a future host
+  // injection must never silently become compressible real content (MAJOR-B).
+  assert.equal(ev({ kind: 'plugin', plugin: 'future-unknown' }), 'instruction', 'unknown plugin falls to instruction')
+  // isRealUserTurn: only real user turns win protection; relays never do.
+  assert.equal(isRealUserTurn({ type: 'user/message', seq: 1, data: { source: { kind: 'user' } } } as never), true)
+  assert.equal(isRealUserTurn({ type: 'user/message', seq: 2, data: { source: { kind: 'subagent-report' } } } as never), false)
+  assert.equal(isRealUserTurn({ type: 'tool/result', seq: 3, data: {} } as never), false)
+})
+
+test('M5: metadata rows fold into the real segment — exact tokens, toolPct denominator excludes them', () => {
+  const session = Session.create('fold')
+  appendTurn(session, 1)
+  appendUser(session, longText('q0', 0))                 // seq 1 real
+  appendMarker(session, 'marker one')                    // seq 2 metadata (OLD marker — folds)
+  appendAssistant(session, longText('a0', 1), 1, 1)      // seq 3 real
+  appendToolCall(session, longText('call0', 2), 'c0')    // seq 4 tool
+  appendToolResult(session, longText('res0', 3), 'c0')   // seq 5 tool
+  appendUser(session, longText('q1', 4))                 // seq 6 real — closes the segment (turn)
+  appendMarker(session, 'marker two')                    // seq 7 metadata (NEWEST marker — protected)
+  appendAssistant(session, longText('a1', 5), 1, 2)      // seq 8 real
+
+  const ranges = buildCompressibleSeqRanges(session, { preserveRecent: 0 })
+  const first = ranges[0]!
+  assert.equal(first.start, 1, 'segment starts at the first real message')
+  assert.equal(first.end, 5, 'segment ends after the tool result')
+  assert.equal(first.count, 5, 'count includes the folded marker (real breadth)')
+  assert.equal(first.toolPct, Math.round((2 / 4) * 100), 'toolPct denominator excludes the metadata row (2 tool / 4 real)')
+  const expectedTokens =
+    defaultCountTokens(longText('q0', 0)) +
+    defaultCountTokens('marker one') +
+    defaultCountTokens(longText('a0', 1)) +
+    defaultCountTokens(longText('call0', 2)) +
+    defaultCountTokens(longText('res0', 3))
+  assert.equal(first.tokens, expectedTokens, 'tokens are the exact sum including the folded row')
+})
+
+test('M5: metadata rows do not break a segment; checkpoints and instruction rows do', () => {
+  const session = Session.create('break')
+  appendTurn(session, 1)
+  appendUser(session, longText('q0', 0))                                    // seq 1 real
+  appendMarker(session, 'm1')                                               // seq 2 metadata (old — folds)
+  appendAssistant(session, longText('a0', 1), 1, 1)                         // seq 3 real
+  appendSourced(session, 'skill list', { kind: 'skill-catalog', form: 'catalog', entries: [] }) // seq 4 instruction — breaks
+  appendAssistant(session, longText('a1', 2), 1, 2)                         // seq 5 real
+  appendSourced(session, 'checkpoint summary', { kind: 'plugin', plugin: 'compact', compactionId: 'x' }) // seq 6 checkpoint — breaks
+  appendAssistant(session, longText('a2', 3), 1, 3)                         // seq 7 real
+  appendUser(session, longText('q1', 4))                                    // seq 8 real — last real user → protected
+  appendMarker(session, 'm2')                                               // seq 9 metadata (newest — protected)
+
+  const ranges = buildCompressibleSeqRanges(session, { preserveRecent: 0 })
+  const seqs = ranges.flatMap((range) => {
+    const out: number[] = []
+    for (const node of session.surface.nodes) {
+      if (node >= range.start && node <= range.end) out.push(node)
+    }
+    return out
+  })
+  // seq 1..3 fold into one segment (metadata m1 inside, instruction/checkpoint excluded)
+  assert.ok(seqs.includes(1) && seqs.includes(2) && seqs.includes(3), 'real + folded metadata form one segment')
+  assert.ok(!seqs.includes(4), 'instruction row is never in a segment')
+  assert.ok(!seqs.includes(6), 'checkpoint is never in a segment')
+  assert.ok(!seqs.includes(9), 'newest marker is never in a segment')
+  // No single range straddles an instruction or checkpoint row.
+  for (const range of ranges) {
+    assert.ok(range.end < 4 || range.start > 4, 'no range straddles the instruction row')
+    assert.ok(range.end < 6 || range.start > 6, 'no range straddles the checkpoint')
+  }
+})
+
+test('M5: the newest acp-index marker is never offered for compression', () => {
+  const session = Session.create('newest-marker')
+  appendTurn(session, 1)
+  appendUser(session, longText('q0', 0))              // seq 1 real
+  appendAssistant(session, longText('a0', 1), 1, 1)   // seq 2 real
+  appendUser(session, longText('q1', 2))              // seq 3 real — last real user → protected
+  appendMarker(session, 'm1')                         // seq 4 metadata — NEWEST → protected
+  appendAssistant(session, longText('a1', 3), 1, 2)   // seq 5 real
+
+  const ranges = buildCompressibleSeqRanges(session, { preserveRecent: 0 })
+  assert.ok(ranges.every((range) => range.start > 4 || range.end < 4), 'the newest marker seq never appears in a range')
+  assert.ok(ranges.some((range) => range.start === 1 && range.end === 2), 'the earlier real segment is still offered')
+})
+
+test('M5: a segment with a folded metadata row resolves cleanly through resolveSurfaceRange', () => {
+  const session = Session.create('fold-resolve')
+  appendTurn(session, 1)
+  appendUser(session, longText('q0', 0))              // seq 1 real
+  appendMarker(session, 'm1')                         // seq 2 metadata (old — folds)
+  appendToolCall(session, longText('c1', 1), 'c1')    // seq 3 tool
+  appendToolResult(session, longText('r1', 2), 'c1')  // seq 4 tool
+  appendUser(session, longText('q1', 3))              // seq 5 real — last real user → protected
+  appendMarker(session, 'm2')                         // seq 6 metadata — NEWEST → protected
+
+  const ranges = buildCompressibleSeqRanges(session, { preserveRecent: 0 })
+  assert.equal(ranges.length, 1, 'one foldable segment')
+  assert.equal(ranges[0]!.start, 1, 'segment includes the real user')
+  assert.equal(ranges[0]!.end, 4, 'segment includes the tool pair and the folded marker')
+  assert.equal(ranges[0]!.count, 4, 'count spans user + marker + tool pair')
+  // Direct requests whose edges land ON the marker resolve cleanly (marker is a
+  // user message with a plain ref — a balanced cut point).
+  const fromMarker = resolveSurfaceRange(session, 2, 4)
+  assert.ok(fromMarker.start <= 2 && fromMarker.end >= 4, 'edge on the marker resolves without collapsing')
+})

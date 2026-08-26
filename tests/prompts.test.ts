@@ -83,6 +83,12 @@ test('M4/prompts 1: default system prompt contains key sections in correct order
   assert.ok(rendered.includes('WHEN NOT TO COMPRESS:'), 'WHEN NOT TO COMPRESS section present')
   assert.ok(rendered.includes('A task phase has ended'), 'WHEN TO bullet present')
   assert.ok(rendered.includes('Protected tool outputs'), 'WHEN NOT bullet present')
+  // Provider-caching guidance: position shifts invalidate the prefix cache
+  // (one-time cost) vs stale repeats (per-request cost); instruction/policy
+  // rows are explicitly NOT compressible.
+  assert.ok(rendered.includes('COMPRESSION AND PROVIDER CACHING:'), 'caching guidance section present')
+  assert.ok(rendered.includes('prefix cache from that point'), 'caching guidance explains the one-time invalidation')
+  assert.ok(rendered.includes('Instruction and policy rows'), 'caching guidance names the un-compressible rows')
   // HOW_TO_COMPRESS_RULES
   assert.ok(rendered.includes('HOW TO COMPRESS'), 'HOW_TO_COMPRESS_RULES section present')
   assert.ok(rendered.includes('KEEP VERBATIM'), 'KEEP VERBATIM section present')
@@ -130,7 +136,7 @@ test('M4/prompts 2b: default nudge renders through the kernel renderNudgeText pa
   // the kernel mN range rows are what must be gone.
   assert.ok(!text.includes('m00150'), 'kernel ref range sample gone')
   assert.ok(text.includes('exact surface seqs — usable as-is'), 'seq-dialect title injected')
-  assert.ok(text.includes('seq 1..7'), 'surface-seq range table injected')
+  assert.ok(text.includes('seq 1..2'), 'surface-seq range table injected')
   assert.ok(text.includes('Surface: 12 nodes, seqs 1..12'), 'surface summary present')
   // No usage statement; the only mNNNNN tokens are inside kernel's own
   // HOW_TO_COMPRESS_RULES example text (m00420 key anchors), not a leak.
@@ -155,11 +161,18 @@ test('M4/prompts 3: default emergency nudge — ⚠️ frame + HOW_TO_COMPRESS_R
 
 test('M4/prompts 4: range table snapshot (with ranges) and zero-range early return', () => {
   assert.equal(rangeTable(buildTextSession(4)), '')
+  // One segment per turn: a real user message closes the running segment
+  // (rule 3 — the tool/text share must stay meaningful per turn), so the six
+  // (user, assistant) pairs become four unprotected segments (the last five
+  // nodes sit in the protected tail and break after seq 7).
   assert.equal(
     rangeTable(buildTextSession(12)),
     `\nSurface: 12 nodes, seqs 1..12
-Compressible ranges (1, oldest first; exact surface seqs — usable as-is):
-  - seq 1..7 — 7 messages, ~7227 tokens [tool 0% | text 100%]
+Compressible ranges (4, oldest first; exact surface seqs — usable as-is):
+  - seq 1..2 — 2 messages, ~2065 tokens [tool 0% | text 100%]
+  - seq 3..4 — 2 messages, ~2065 tokens [tool 0% | text 100%]
+  - seq 5..6 — 2 messages, ~2065 tokens [tool 0% | text 100%]
+  - seq 7..7 — 1 messages, ~1032 tokens [tool 0% | text 100%]
 Compress with: compress({ content: [{ startSeq, endSeq, summary }] }) — content is an array: batch multiple unrelated segments in one call, each entry its own block. Keep ranges disjoint.
 Snapshot taken at nudge time: the seqs go stale once the surface moves (a later compress shadows them), so re-run acp_status for fresh refs before compressing; if you are unsure about context pressure or block structure, drill in first.`,
   )

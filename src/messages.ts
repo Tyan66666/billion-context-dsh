@@ -290,3 +290,83 @@ export function isToolEvent(event: SessionEvent): boolean {
 export function isPluginAuthoredEvent(event: SessionEvent): boolean {
   return (event.data as { source?: { kind?: unknown } }).source?.kind === 'plugin'
 }
+
+/**
+ * Injection/authoring classification of one surface event — the ONE shared
+ * classifier for range scanning, the protected-tail scan, and search-doc
+ * filtering (never three ad-hoc predicates that drift apart).
+ *
+ * - `real` — genuine conversation content (user turns without an injected
+ *   source, assistant prose/tool-calls, tool results, sub-agent relay rows).
+ *   This is the only class that may win "last real user message" protection
+ *   (minus relay rows, see `isRealUserTurn`) and the only class that forms
+ *   compressible segments on its own.
+ * - `metadata` — the engine's own ephemeral rows: acp-index directory lines,
+ *   nudge echoes, compress-pair replacement stubs. Their content is derived
+ *   from already-visible messages, so folding them into an adjacent real
+ *   segment is zero-loss (the acp-index watermark recovers from the log).
+ * - `checkpoint` — compaction summary nodes (`plugin: 'compact'`).
+ *   Distillation is an explicit act; never folded into any segment.
+ * - `instruction` — host-authored policy/instructions: AGENTS.md injections
+ *   (both shapes), skill catalogs, runtime-context snapshots, system-prompt
+ *   snapshots, tool-job notices, and ANY unknown `kind:'plugin'` row. Folding
+ *   these is unsafe (the model would lose live policy text) — unknown plugin
+ *   names fall here deliberately: a future host injection must never silently
+ *   become compressible `real` content (issue #71 review, MAJOR-B).
+ */
+export type SurfaceEventClass = 'real' | 'metadata' | 'checkpoint' | 'instruction'
+
+/** Plugin names the engine itself authors — safe to fold into real segments. */
+export const METADATA_PLUGINS: ReadonlySet<string> = new Set([
+  INDEX_PLUGIN, // acp-index directory lines
+  'acp-nudge', // nudge echo (src/nudge.ts)
+  'billion-context-dsh', // compress-pair replacement stub (src/region.ts)
+])
+
+/** Known host policy kinds that must never be folded (safe-listing beyond `plugin`). */
+const HOST_INSTRUCTION_KINDS: ReadonlySet<string> = new Set([
+  'agent-instructions', // AGENTS.md injection (hook shape: {kind:'agent-instructions', form:'instructions'})
+  'skill-catalog', // skill catalog (form:'catalog')
+])
+
+/** Host policy rows that arrive under `kind:'plugin'` — excluded by plugin name. */
+const HOST_INSTRUCTION_PLUGINS: ReadonlySet<string> = new Set([
+  'agent-instructions', // AGENTS.md baseline shape is {kind:'plugin', plugin:'agent-instructions'}
+  '@deepseek-ai/dsh-system-prompt', // runtime system-prompt snapshot
+  'tool-jobs', // tool job notices (real job output, but host-authored)
+  'runtime-context', // current sandbox/approval policy snapshot
+])
+
+export function classifySurfaceEvent(event: SessionEvent): SurfaceEventClass {
+  // Compaction summary nodes first — they are user messages too.
+  if (isCheckpointNode(event)) return 'checkpoint'
+  // Assistant / tool events are always genuine content.
+  if (event.type !== 'user/message') return 'real'
+  const source = (event.data as { source?: { kind?: string; plugin?: string } }).source
+  if (!source) return 'real' // user turn written without a source: genuine content
+  const kind = source.kind
+  if (kind === 'user') return 'real' // real user turn (host stamps {kind:'user'})
+  if (kind === 'plugin') {
+    if (source.plugin !== undefined && METADATA_PLUGINS.has(source.plugin)) return 'metadata'
+    // Unknown plugin names are policy rows until proven otherwise (MAJOR-B).
+    return 'instruction'
+  }
+  if (kind !== undefined && HOST_INSTRUCTION_KINDS.has(kind)) return 'instruction'
+  // Sub-agent relay rows and any future kind: treat as real content for
+  // compressibility, but they must not win "last real user message" protection
+  // (see isRealUserTurn) — a relay is not a user speaking.
+  return 'real'
+}
+
+/**
+ * Whether an event is a real user turn — the protected-tail criterion. A
+ * sub-agent relay/notice row is real *content* (compressible) but is not the
+ * user speaking: the latest real user message must keep its protection window
+ * even when a relay lands after it.
+ */
+export function isRealUserTurn(event: SessionEvent): boolean {
+  if (event.type !== 'user/message') return false
+  if (classifySurfaceEvent(event) !== 'real') return false
+  const kind = (event.data as { source?: { kind?: string } }).source?.kind
+  return kind !== 'subagent-report' && kind !== 'subagent-settled'
+}

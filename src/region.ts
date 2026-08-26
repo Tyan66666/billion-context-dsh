@@ -21,8 +21,9 @@ import {
 } from '@deepseek-ai/dsh-compaction'
 import { createAssistantMessage, createUserMessage, type ContentBlock } from '@deepseek-ai/dsh-llm'
 import { defaultCountTokens } from 'acp-kernel'
-import { extractEventText, extractText, isCheckpointNode, isPluginAuthoredEvent, isToolEvent, toolCallIdOfResultEvent } from './messages.ts'
+import { classifySurfaceEvent, extractEventText, extractText, isCheckpointNode, isRealUserTurn, isToolEvent, toolCallIdOfResultEvent } from './messages.ts'
 import { hostPriceEvent } from './host-tokens.ts'
+import { indexWatermarkOf } from './message-index.ts'
 
 /** One durable ACP block as rebuilt from the session log. */
 export interface AcpBlockLedgerEntry {
@@ -457,9 +458,18 @@ export function rebuildBlockLedger(events: readonly SessionEvent[]): AcpBlockLed
 export interface SeqCompressibleRange {
   readonly start: number
   readonly end: number
+  /**
+   * Total messages in the span, INCLUDING folded metadata rows (acp-index
+   * directory lines, nudge echoes, pair stubs) — the span's real breadth.
+   */
   readonly count: number
+  /** Estimated tokens for the whole span, including folded metadata rows. */
   readonly tokens: number
-  /** Share of messages that are tool messages (tool-call or tool-result), 0-100 — kernel `toolPct` parity. */
+  /**
+   * Share of REAL messages that are tool messages (tool-call or tool-result),
+   * 0-100 — kernel `toolPct` parity. The denominator excludes folded metadata
+   * rows (they are user-role text and would dilute the tool share).
+   */
   readonly toolPct: number
 }
 
@@ -746,9 +756,13 @@ export function deferCompressPairHide(
  * Compute compressible spans directly from the surface — independent of the
  * kernel's ref map, which can drift after surface replacements in long
  * sessions and hide large tool results from the nudge range table. Skips the
- * recent protected tail, the last user message, and compaction checkpoints;
- * edges are then balanced through resolveSurfaceRange. Ranges are ordered
- * oldest-first (stable across turns — matches the kernel's `oldest first`).
+ * recent protected tail, the last real user message, compaction checkpoints,
+ * host instruction/policy rows, and the newest acp-index marker; metadata
+ * rows (directory lines, nudge echoes, pair stubs) fold into the adjacent
+ * real segment. Real user turns close a segment (one segment per turn, so the
+ * tool/text share stays meaningful); edges are then balanced through
+ * resolveSurfaceRange. Ranges are ordered oldest-first (stable across turns —
+ * matches the kernel's `oldest first`).
  * UPSTREAM: this self-computation is a labeled workaround for kernel
  * ref-map drift after surface replacements (AGENTS.md rule 11) — drop it and
  * use kernel compressibleRanges once the drift is fixed upstream.
@@ -771,33 +785,70 @@ export function buildCompressibleSeqRanges(
   }
   for (let index = nodes.length - 1; index >= 0; index -= 1) {
     const event = session.events[nodes[index]!]
-    // ANY plugin-authored row (acp-index directory lines, nudge echoes,
-    // compress-pair stubs, checkpoints) must never win "last real user
-    // message" protection — they always trail the real user input in the
-    // same enter batch, so protecting one would leave the actual last user
-    // message compressible while synthetic output sits safe. One generic
-    // criterion covers every current and future plugin source.
-    if (event?.type === 'user/message' && !isCheckpointNode(event) && !isPluginAuthoredEvent(event)) {
+    // Only a REAL user turn may win "last real user message" protection.
+    // Every injected row (AGENTS.md, skill catalogs, directory lines, nudge
+    // echoes, sub-agent relays) trails the real user input in the same enter
+    // batch, so protecting one would leave the actual last user message
+    // compressible while synthetic output sits safe (AGENTS.md rule 3).
+    if (event !== undefined && isRealUserTurn(event)) {
       protectedSeqs.add(nodes[index]!)
       break
     }
   }
-  const raw: Array<{ start: number; end: number; count: number; tokens: number; toolCount: number }> = []
-  let cur: { start: number; end: number; count: number; tokens: number; toolCount: number } | null = null
+  // The newest acp-index marker (watermark) is never offered for compression:
+  // its numbering set covers the latest un-compressed messages, and folding it
+  // into a segment would orphan that visible-but-unindexed window until the
+  // next directory row re-numbers it (issue #71 review, MAJOR-A mitigation).
+  const watermark = indexWatermarkOf(session)
+  if (watermark > 0) protectedSeqs.add(watermark)
+  const raw: Array<{ start: number; end: number; count: number; tokens: number; toolCount: number; realCount: number }> = []
+  let cur: { start: number; end: number; count: number; tokens: number; toolCount: number; realCount: number } | null = null
   const flush = (): void => {
     if (cur !== null) raw.push(cur)
     cur = null
   }
   for (const seq of nodes) {
     const event = session.events[seq]
-    // Plugin-authored rows (index lines, nudge echoes, pair stubs) are
-    // excluded from share statistics exactly like checkpoints: counting them
-    // as text/user dilutes `toolPct` (an 8-turn span read ~80% tool as ~65%)
-    // and hides the real mix from the model. The segment breaks there too —
-    // a range never straddles synthetic output.
-    if (event === undefined || protectedSeqs.has(seq) || isCheckpointNode(event) || isPluginAuthoredEvent(event)) {
+    // Protected nodes (recent tail, last real user, newest acp-index marker)
+    // break the segment exactly like the pre-v2 scan did — a protected row is
+    // never part of any compressible span, and it must not bridge two spans.
+    if (event === undefined || protectedSeqs.has(seq)) {
       flush()
       continue
+    }
+    const cls = classifySurfaceEvent(event)
+    // Compaction checkpoints and host instruction/policy rows break the
+    // segment and never join it: checkpoints are distillation targets (rule 7)
+    // and folding policy text would silently strip live instructions from the
+    // model's view. Unknown plugin rows fall into 'instruction' deliberately.
+    if (cls === 'checkpoint' || cls === 'instruction') {
+      flush()
+      continue
+    }
+    // Metadata rows (directory lines, nudge echoes, pair stubs) FOLD INTO the
+    // running real segment — their content is derived from visible messages,
+    // so carrying them along is zero-loss. They never open a segment on their
+    // own (too small for the kernel's 5000-char floor) and never break one.
+    if (cls === 'metadata') {
+      if (cur !== null) {
+        cur = {
+          start: cur.start,
+          end: seq,
+          count: cur.count + 1,
+          tokens: cur.tokens + defaultCountTokens(extractEventText(event)),
+          toolCount: cur.toolCount,
+          realCount: cur.realCount,
+        }
+      }
+      continue
+    }
+    // A REAL user turn closes the running segment (a new turn opens a new
+    // segment) — without this rule the whole session collapses into one giant
+    // range and the tool/text share becomes a session-wide average (rule 3's
+    // "spot consumed tool-heavy spans" breaks).
+    if (event.type === 'user/message' && cur !== null) {
+      flush()
+      cur = null
     }
     // Surface nodes can be locally out of order after surface replacements in
     // long sessions; a node with a SMALLER seq than the running segment would
@@ -810,9 +861,9 @@ export function buildCompressibleSeqRanges(
     const tokens = defaultCountTokens(extractEventText(event))
     const isTool = isToolEvent(event)
     if (cur === null) {
-      cur = { start: seq, end: seq, count: 1, tokens, toolCount: isTool ? 1 : 0 }
+      cur = { start: seq, end: seq, count: 1, tokens, toolCount: isTool ? 1 : 0, realCount: 1 }
     } else {
-      cur = { start: cur.start, end: seq, count: cur.count + 1, tokens: cur.tokens + tokens, toolCount: cur.toolCount + (isTool ? 1 : 0) }
+      cur = { start: cur.start, end: seq, count: cur.count + 1, tokens: cur.tokens + tokens, toolCount: cur.toolCount + (isTool ? 1 : 0), realCount: cur.realCount + 1 }
     }
   }
   flush()
@@ -820,13 +871,15 @@ export function buildCompressibleSeqRanges(
   for (const range of raw) {
     try {
       const { start, end } = resolveSurfaceRange(session, range.start, range.end)
-      const count = range.count
       out.push({
         start,
         end,
-        count,
+        count: range.count,
         tokens: range.tokens,
-        toolPct: count > 0 ? Math.round((range.toolCount / count) * 100) : 0,
+        // toolPct measures the REAL messages only: folded metadata rows are
+        // user-role text and would dilute the tool share. A segment of pure
+        // metadata (realCount 0) reports 0% tool.
+        toolPct: range.realCount > 0 ? Math.round((range.toolCount / range.realCount) * 100) : 0,
       })
     } catch {
       // Cannot be balanced into a compressible span — skip.

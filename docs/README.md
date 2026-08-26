@@ -17,6 +17,7 @@ Model-driven context management (Active Context Pruning / ACP) for the DeepSeek 
 | [Configurable prompts design](configurable-prompts-design.md) | Design review draft: per-stage prompt overrides (nudge / range table / system prompt / tool descriptions) via `config.prompts`, template + named placeholders, build-time validation |
 | [Shadow-price host-vocabulary design](shadow-price-host-vocabulary-design.md) | Why `shadowedTokenCount` claims must speak the host token-meter's flat-4 vocabulary (issue #54: CJK sessions bricked when priced with the CJK-aware `defaultCountTokens`); meter-first pricing with an exact mirror fallback; L2 upstream direction |
 | [Per-message numbering index design](message-index-design.md) | The `acp-index` directory (issue #71): why pi's inline `<acp>` tags are impossible on DSH (three verified walls), the durable local-ledger route, watermark/backlog semantics, and per-turn cadence + mid-turn token-delay re-injection |
+| [Injection-row compressibility design](injection-compressibility-design.md) | Which injected rows can be compressed: engine metadata (acp-index directory, nudge echoes, compress-pair stubs) folds into adjacent spans; instructions and host policy rows never compress; how the range table stays granular and provider-prefix-cache aware |
 
 ## 🗂 Source layout
 

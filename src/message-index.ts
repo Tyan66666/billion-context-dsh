@@ -291,14 +291,52 @@ function toolNamesFor(session: Session): ReadonlyMap<string, string> {
   return cache.index
 }
 
-/** Number every surfaced node above the watermark, in surface order. Checkpoint nodes and prior index messages are skipped. */
+/**
+ * Number every surfaced node, in surface order. Checkpoint nodes and prior
+ * index messages are skipped. Rows ABOVE the watermark are the new batch.
+ * Rows AT or BELOW the watermark normally already have a visible numbering
+ * (their covering marker is still on the surface) and are skipped — but when
+ * that covering marker was itself compressed away, its numbering set becomes
+ * ORPHANED: still visible, still un-compressed, yet never re-numbered by the
+ * simple `seq <= watermark` cut (issue #71 review, MAJOR-A). The covering
+ * marker of a node is the smallest marker seq >= node (each marker numbered
+ * [previous+1 .. itself]); if it no longer exists on the surface, the node is
+ * re-numbered here — the directory never loses a visible seq.
+ */
 export function collectIndexEntries(session: Session, watermark: number, previewTokens: number): IndexEntry[] {
   const toolNames = toolNamesFor(session)
+  // Marker seqs in log order (append-only, monotonic). Scanned per call like
+  // indexWatermarkOf — same O(events) cost class, only on index turns.
+  const markers: number[] = []
+  for (let seq = 0; seq < session.events.length; seq += 1) {
+    const event = session.events[seq]
+    if (event !== undefined && isIndexMarkerEvent(event)) markers.push(seq)
+  }
+  const surfaceSet = new Set(session.surface.nodes)
   const entries: IndexEntry[] = []
   for (const seq of session.surface.nodes) {
-    if (seq <= watermark) continue
     const event = session.events[seq]
     if (event === undefined || isCheckpointNode(event) || isIndexMarkerEvent(event)) continue
+    if (seq <= watermark) {
+      // Binary search: the smallest marker seq >= node = its covering marker.
+      let lo = 0
+      let hi = markers.length - 1
+      let covering = -1
+      while (lo <= hi) {
+        const mid = (lo + hi) >> 1
+        const marker = markers[mid]!
+        if (marker >= seq) {
+          covering = marker
+          hi = mid - 1
+        } else {
+          lo = mid + 1
+        }
+      }
+      // Covering marker still on the surface → its text carries the numbering
+      // → skip (incremental directory). Missing or compressed-away → orphan →
+      // re-number below.
+      if (covering >= 0 && surfaceSet.has(covering)) continue
+    }
     const text = extractEventText(event)
     entries.push({
       seq,
