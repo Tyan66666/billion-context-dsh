@@ -105,6 +105,16 @@ const compressParameters = {
   // intentionally NOT `required: true` — a required property would reject the
   // wrapped shape before `handleCompress` can see it. The tool description
   // still tells the model content is mandatory.
+  //
+  // The items fields are the opposite case: startSeq/endSeq/summary MUST be
+  // `required: true`. Without that, a model call that omits `summary` (only
+  // startSeq/endSeq/topic present) passed schema validation and failed late
+  // inside the kernel with "Summary is empty" — and live sessions showed the
+  // model retrying the identical broken call in a loop. With the fields
+  // required, the same call is rejected at the schema gate with
+  // `missing required property "content[0].summary"`, which tells the model
+  // exactly which field to add (same pattern as decompress's required
+  // blockId / search_context's required query).
   arguments: { type: 'json', description: 'Tolerated wrapped-arguments form (model-generated); unwrapped in handleCompress. Prefer passing content directly.' },
   topic: { type: 'string' as const, description: 'Fallback topic for entries without their own.' },
   content: {
@@ -114,18 +124,20 @@ const compressParameters = {
       type: 'object' as const,
       properties: {
         startSeq: {
+          required: true,
           oneOf: [
             { type: 'integer' as const, description: 'First surface seq of the range.' },
             { type: 'string' as const, description: 'Seq as text; a trailing #callId fragment is ignored.' },
           ],
         },
         endSeq: {
+          required: true,
           oneOf: [
             { type: 'integer' as const, description: 'Inclusive last surface seq of the range.' },
             { type: 'string' as const, description: 'Seq as text; a trailing #callId fragment is ignored.' },
           ],
         },
-        summary: { type: 'string' as const, description: 'Complete technical summary replacing the range; keep paths, decisions, values verbatim. Minimum 50 characters.' },
+        summary: { type: 'string' as const, required: true, description: 'Complete technical summary replacing the range; keep paths, decisions, values verbatim. Minimum 50 characters.' },
         topic: { type: 'string' as const, description: 'Short label (3-5 words) for this range.' },
       },
       additionalProperties: false,

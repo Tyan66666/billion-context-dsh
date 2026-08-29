@@ -722,6 +722,36 @@ test('M3: compress reports a clear error when neither form carries content', asy
   assert.equal(rebuildBlockLedger(session.events).length, 0, 'no block lands without content')
 })
 
+test('M3: compress schema gate rejects a range entry missing summary (required field)', async () => {
+  // Live-session failure: the model kept sending `content: [{startSeq, endSeq, topic}]`
+  // — no summary. The items schema declared no `required` fields, so the call
+  // passed schema validation and only failed deep inside the kernel with
+  // "Summary is empty", which does not name the missing field — the model
+  // retried the identical broken call in a loop. startSeq/endSeq/summary are
+  // now `required: true` on the items properties, so the same call is rejected
+  // at the schema gate with the exact field path (same pattern as decompress's
+  // required blockId / search_context's required query).
+  const env = makeEnv()
+  const session = buildTextSession(12)
+  const compress = toolOf(env, 'compress')
+  await assert.rejects(
+    compress.execute({
+      content: [{ startSeq: 1, endSeq: 5, topic: 'no summary here' }],
+    } as never, fakeExec(session)),
+    /missing required property "content\[0\]\.summary"/,
+    'a summary-less range entry fails at the schema gate and names the missing field',
+  )
+  assert.equal(rebuildBlockLedger(session.events).length, 0, 'no block lands from a schema-rejected call')
+  const ok = await compress.execute({
+    content: [{
+      startSeq: 1,
+      endSeq: 5,
+      summary: 'Authentication summary with enough technical detail to satisfy the kernel threshold: JWT, Redis refresh tokens, login flow, rate limiting, bcrypt.',
+    }],
+  } as never, fakeExec(session))
+  assert.match((ok as { text: string }).text, /Compressed 1 block/, 'a full entry still compresses')
+})
+
 /** A session whose second node is a multi-tool-call assistant message. */
 function buildMultiCallSession(): Session {
   const session = Session.create('multi')
