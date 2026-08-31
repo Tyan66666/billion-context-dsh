@@ -86,11 +86,12 @@ jobs:
                 && echo "upstream flag set" ;;
           esac
 
-  # 每日巡检 docs/upstream-tracker.md 里登记的上游 PR。
-  # 规则:只认 docs/upstream-tracker.md 里形如
-  #   https://github.com/ranxianglei/acp-kernel/pull/<n>
-  # 的链接;上游 PR 已 merged 的,给「同一表格行引用的本地 issue」
-  # 打 upstream-merged 标签并留言。标签打过的不会重复(幂等)。
+  # 每日巡检上游 acp-kernel 的 PR。追踪来源取并集:
+  #   1. docs/upstream-tracker.md 表格行(本地 issue 链接 + 上游 PR 链接同行出现);
+  #   2. 本仓库开放 issue 的正文/标题里贴的 https://github.com/ranxianglei/acp-kernel/pull/<n>
+  #      ——issue 正文附上游 PR 链接即被自动追踪,无需改 workflow。
+  # 上游 PR 已 merged 的,给对应本地 issue 打 upstream-merged 标签并留言。
+  # 已打过的不会重复(幂等)。
   # 注意:上游合并 ≠ 可以解除 workaround——等 release + bump pin 后,
   # 按 AGENTS.md §4b SOP 人工升级,那时才删 workaround 并把标签换成 resolved。
   watch-upstream:
@@ -98,20 +99,35 @@ jobs:
     if: github.event_name == 'schedule'
     steps:
       - uses: actions/checkout@v4
-      - name: Check upstream PRs from the tracker doc
+      - name: Check upstream PRs (tracker doc + issue bodies)
         env:
           GH_TOKEN: ${{ github.token }}
           UPSTREAM_REPO: ranxianglei/acp-kernel
         run: |
           set -euo pipefail
-          # collect "local_issue upstream_pr" pairs — same table row must mention both
-          # (issue link and PR link live in different cells, so match row-wise, not line-wise pairs)
+          # 1) pairs from the tracker doc: same table row must mention both
+          #    (issue link and PR link live in different cells, so match row-wise)
           awk -F'|' '/billion-context-dsh\/issues/ && /acp-kernel\/pull/ {
             match($0, /billion-context-dsh\/issues\/[0-9]+/); li=substr($0,RSTART,RLENGTH);
             match($0, /acp-kernel\/pull\/[0-9]+/);            up=substr($0,RSTART,RLENGTH);
             gsub(/.*issues\//,"",li); gsub(/.*pull\//,"",up);
             print li" "up
-          }' docs/upstream-tracker.md > pairs.txt
+          }' docs/upstream-tracker.md > pairs.txt || true
+          # 2) pairs from open issue bodies/titles: an issue that pastes an
+          #    acp-kernel pull link tracks that PR by itself (multiple links → keep all).
+          #    Bodies are multi-line, so jq emits "NUMBER\tTITLE\nBODY" and awk tracks
+          #    the most recent issue-number line while scanning paragraphs.
+          gh issue list --state open --limit 200 --json number,title,body \
+            --jq '.[] | "\(.number)\t\(.title)\n\(.body)"' > issues.txt
+          awk -F'\t' '
+            /^[0-9]+\t/ { split($0,a,"\t"); num=a[1]; next }
+            /acp-kernel\/pull\/[0-9]+/ && num != "" {
+              while (match($0, /acp-kernel\/pull\/[0-9]+/)) {
+                s=substr($0,RSTART,RLENGTH); gsub(/.*pull\//,"",s); print num" "s;
+                $0=substr($0,RSTART+RLENGTH)
+              }
+            }' issues.txt >> pairs.txt
+          sort -u pairs.txt -o pairs.txt
           if [ ! -s pairs.txt ]; then echo "no tracked upstream PRs"; exit 0; fi
           while read -r ISSUE PR; do
             STATE=$(gh api "repos/$UPSTREAM_REPO/pulls/$PR" --jq '.state + ":" + (.merged|tostring)')
