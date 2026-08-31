@@ -4,18 +4,23 @@
 #   - upstream-pending 标签 → "Blocked by upstream" 文本字段打勾说明
 # Project V2 写操作走 gh CLI 的 GraphQL,需要 fine-grained PAT(勾选 org project 权限)存在
 # 仓库 secret GH_PROJECT_TOKEN;没有时本 action 静默跳过字段同步步骤。
+# 另有每日定时巡检(docs/upstream-tracker.md 里登记的上游 PR):上游 PR 合并后,
+#   给对应本地 issue 打 upstream-merged 标签并留言提醒 bump kernel(见 job watch-upstream)。
 name: issue-triage
 
 on:
   issues:
     types: [labeled, opened]
+  schedule:
+    - cron: '23 3 * * *'
 
 permissions:
-  issues: read
+  issues: write
   contents: read
 
+# 定时任务没有 issue number,用固定组即可;事件任务按 issue 去重
 concurrency:
-  group: issue-triage-${{ github.event.issue.number }}
+  group: issue-triage-${{ github.event.issue.number || 'cron' }}
   cancel-in-progress: true
 
 jobs:
@@ -80,3 +85,37 @@ jobs:
                 -f v="上游修复合入后需解除本地 workaround(见 docs/upstream-tracker.md)" >/dev/null \
                 && echo "upstream flag set" ;;
           esac
+
+  # 每日巡检 docs/upstream-tracker.md 里登记的上游 PR。
+  # 规则:只认 docs/upstream-tracker.md 里形如
+  #   https://github.com/ranxianglei/acp-kernel/pull/<n>
+  # 的链接;上游 PR 已 merged 的,给「同一表格行引用的本地 issue」
+  # 打 upstream-merged 标签并留言。标签打过的不会重复(幂等)。
+  # 注意:上游合并 ≠ 可以解除 workaround——等 release + bump pin 后,
+  # 按 AGENTS.md §4b SOP 人工升级,那时才删 workaround 并把标签换成 resolved。
+  watch-upstream:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check upstream PRs from the tracker doc
+        env:
+          GH_TOKEN: ${{ github.token }}
+          UPSTREAM_REPO: ranxianglei/acp-kernel
+        run: |
+          set -euo pipefail
+          # collect "local_issue:upstream_pr" pairs from the tracker table
+          grep -oE 'billion-context-dsh/issues/[0-9]+\)?[^|]*acp-kernel/pull/[0-9]+' docs/upstream-tracker.md | \
+            grep -oE 'issues/[0-9]+|pull/[0-9]+' | paste - - | \
+            sed -E 's#issues/([0-9]+)\tpull/([0-9]+)#\1 \2#' > pairs.txt || true
+          if [ ! -s pairs.txt ]; then echo "no tracked upstream PRs"; exit 0; fi
+          while read -r ISSUE PR; do
+            STATE=$(gh api "repos/$UPSTREAM_REPO/pulls/$PR" --jq '.state + ":" + (.merged|tostring)')
+            echo "issue #$ISSUE <- upstream PR #$PR: $STATE"
+            [ "$STATE" = "open:false" ] && continue          # 未合并,继续等
+            # 已合并(open:true 不可能出现在 pulls API;closed:true 即已合并)
+            ALREADY=$(gh issue view "$ISSUE" --json labels --jq '[.labels[].name] | join(",")')
+            case ",$ALREADY," in *",upstream-merged,"*) continue ;; esac
+            gh issue edit "$ISSUE" --add-label "upstream-merged" --remove-label "upstream-pending"
+            gh issue comment "$ISSUE" --body "上游 PR [$UPSTREAM_REPO#$PR](https://github.com/$UPSTREAM_REPO/pull/$PR) 已合并 ✅。请在下一次 acp-kernel 升级(AGENTS.md §4b SOP)时:确认已发布包含该修复的版本 → bump pin → 解除本地 workaround → 更新 docs/upstream-tracker.md → 关闭本 issue。"
+          done < pairs.txt
