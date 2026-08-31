@@ -14,8 +14,8 @@
 
 | 本仓库 Issue | 上游 Issue/PR | 本地 workaround 位置 | 状态 | 备注 |
 |---|---|---|---|---|
-| [#38](https://github.com/Tyan66666/billion-context-dsh/issues/38) | acp-kernel ref-map drift(待补上游号) | `buildCompressibleSeqRanges`(自算 range 表,`UPSTREAM:` 注释) | waiting-upstream | kernel ref map 在 surface replace 后漂移:`compressibleRanges` 乱序(end<start)、大工具结果丢 ref。每次 kernel bump 都要复查:上游修了就删 workaround,回到 kernel `compressibleRanges`(AGENTS.md 规则 3/11) |
-| [#46](https://github.com/Tyan66666/billion-context-dsh/issues/46) | `/acp status` reverse/offset(待补上游号) | — | waiting-upstream | `/acp status` 查看消息记录只显示最早一段;等上游 reverse/offset 修复后关闭 |
+| [#38](https://github.com/Tyan66666/billion-context-dsh/issues/38) | —(尚未提上游 issue;#38 的 E 节明确「尚未提交上游 issue」,本 issue 即追踪行) | `buildCompressibleSeqRanges`(自算 range 表,`UPSTREAM:` 注释) | waiting-upstream | kernel ref map 在 surface replace 后漂移:`compressibleRanges` 乱序(end<start)、大工具结果丢 ref。每次 kernel bump 都要复查:上游修了就删 workaround,回到 kernel `compressibleRanges`(AGENTS.md 规则 3/11) |
+| [#46](https://github.com/Tyan66666/billion-context-dsh/issues/46) | [acp-kernel#93](https://github.com/ranxianglei/acp-kernel/issues/93) → PR [acp-kernel#123](https://github.com/ranxianglei/acp-kernel/pull/123)(`reverse` + `offset`,基于 v0.0.38,7 条回归测试,444 tests 全绿) | — | waiting-upstream(PR #123 已核实 **open,未合并**) | `/acp status` 查看消息记录只显示最早一段;PR 合并发布、本仓库 bump 内核后关闭 |
 
 ## 维护规则
 
