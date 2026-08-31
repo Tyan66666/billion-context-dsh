@@ -62,7 +62,7 @@ jobs:
           # gh 内置 --jq 只接受单个表达式,不能绑定 --arg 变量(实测 gh 2.88.1 报
           # "accepts at most 1 arg(s)"),带变量的过滤一律管道到系统 jq(ubuntu-latest 预装)。
           ITEM_ID=$(gh project item-list "$PROJECT" --owner "$OWNER" --limit 1000 --format json \
-            | jq -r --arg u "$ISSUE_URL" '[.items[] | select(.content.url==$u)][0].id')
+            | jq -r --arg u "$ISSUE_URL" '[.items[] | select(.content.url==$u)][0].id // empty')
           if [ -z "${ITEM_ID:-}" ]; then
             ITEM_ID=$(gh project item-add "$PROJECT" --owner "$OWNER" --url "$ISSUE_URL" --format json --jq .id)
           fi
@@ -92,7 +92,7 @@ jobs:
           elif [ -n "${OPT_NAME:-}" ]; then
             OPT=$(gh project field-list "$PROJECT" --owner "$OWNER" --format json \
               | jq -r --arg f "$PRIORITY_FIELD_ID" --arg n "$OPT_NAME" \
-              '.fields[] | select(.id==$f) | .options[] | select(.name==$n) | .id')
+              '.fields[] | select(.id==$f) | .options[] | select(.name==$n) | .id // empty')
             if [ -z "$OPT" ]; then
               echo "Priority option '$OPT_NAME' not found in project field $PRIORITY_FIELD_ID" >&2
               exit 1
