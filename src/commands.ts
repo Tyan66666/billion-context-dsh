@@ -1,6 +1,7 @@
 /**
  * M4 — the `/acp` slash command: a human-friendly window into the same
- * machinery the model tools expose (status, one-shot compress, decompress).
+ * machinery the model tools expose (status, one-shot compress, decompress,
+ * runtime settings read/write).
  * @module billion-context-dsh/commands
  */
 
@@ -9,6 +10,15 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import { resolveEffectiveWindow, type ToolEnvironment } from './tools.ts'
 import { resolveTokenCount } from './nudge.ts'
 import { kernelConfigFor } from './config.ts'
+import { SettingsConflictError } from '@deepseek-ai/dsh-settings'
+import {
+  parseSettingValue,
+  SETTINGS_KEYS,
+  type AcpSettings,
+  type AcpSettingsInput,
+  type SettingsCommandSurface,
+  type SettingsKey,
+} from './settings.ts'
 import {
   blockIdOfKernelRef,
   blockRefForSummarySeq,
@@ -46,7 +56,7 @@ async function statusText(env: ToolEnvironment, agent: Agent): Promise<string> {
   // can't tell why pressure looks wrong (issue #63: a gateway that disclosed
   // no window read as ~55% of 128K instead of ~18% of the real 1M window).
   if (window.probeFailed === true) {
-    lines.push(`  ⚠ window auto-detection failed — using the ${limit} fallback (restart to re-probe, or set modelContextLimit explicitly)`)
+    lines.push(`  ⚠ window auto-detection failed — using the ${limit} fallback (change modelContextLimit or autoModelContextLimit via /acp config — or restart — to re-probe)`)
   }
   // Nudge arbitration on the SAME inputs the nudge path uses — a read-only
   // diagnostic, so run on a cloned state and never write it back to the store.
@@ -135,11 +145,14 @@ export function acpCommand(env: ToolEnvironment): CommandDefinition {
     name: 'acp',
     description:
       'Active Context Pruning — model-driven context compression. '
-      + 'Usage: /acp status | /acp compress <startSeq> <endSeq> <summary> | /acp decompress <blockId>',
+      + 'Usage: /acp status | /acp compress <startSeq> <endSeq> <summary> | /acp decompress <blockId> | /acp config [list|set <key> <value>|reset <key>|all]',
     handler: async (invocation) => {
       const raw = invocation.rawInput.trim()
       if (raw === '' || raw === 'status') {
         return { kind: 'success', text: await statusText(env, invocation.agent) }
+      }
+      if (raw === 'config' || raw.startsWith('config ')) {
+        return { kind: 'success', text: await configText(env, raw.slice('config'.length).trim()) }
       }
       if (raw.startsWith('compress')) {
         return { kind: 'success', text: compressText(env, invocation.agent, raw.slice('compress'.length).trim().split(/\s+/) ) }
@@ -147,7 +160,119 @@ export function acpCommand(env: ToolEnvironment): CommandDefinition {
       if (raw.startsWith('decompress')) {
         return { kind: 'success', text: decompressText(env, invocation.agent, raw.slice('decompress'.length).trim().split(/\s+/)) }
       }
-      return { kind: 'error', text: `unknown /acp subcommand "${raw.split(/\s+/)[0]}" — use status | compress | decompress` }
+      return { kind: 'error', text: `unknown /acp subcommand "${raw.split(/\s+/)[0]}" — use status | compress | decompress | config` }
     },
   }
+}
+
+/** True for plain objects — the settings descriptor layers are JSON documents. */
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function isSettingsKey(key: string): key is SettingsKey {
+  return (SETTINGS_KEYS as readonly string[]).includes(key)
+}
+
+/** Display form of one knob in the list table: an absent value shows what it MEANS, not a blank. */
+function formatSettingsValue(key: SettingsKey, value: AcpSettings[SettingsKey]): string {
+  if (value === undefined) {
+    if (key === 'modelContextLimit') return 'auto'
+    if (key === 'nudgeMinContextLimitPct') return '0.45 (kernel)'
+    return '—'
+  }
+  return String(value)
+}
+
+function configListText(surface: SettingsCommandSurface | undefined): string {
+  if (surface === undefined) return 'runtime settings are not wired in this engine build'
+  const snapshot = surface.snapshot()
+  const descriptor = surface.describe()
+  const lines = [
+    'ACP runtime settings — namespace "compaction-acp"',
+    '  key                         value        source',
+  ]
+  for (const key of SETTINGS_KEYS) {
+    // Presence in a layer marks the override: user settings.yaml wins over
+    // the composition row (base), which wins over the engine default.
+    const userSection = isRecord(descriptor?.user) ? descriptor.user : {}
+    const baseSection = isRecord(descriptor?.base) ? descriptor.base : {}
+    const source = key in userSection ? 'user' : key in baseSection ? 'base' : 'default'
+    lines.push(`  ${key.padEnd(27)} ${formatSettingsValue(key, snapshot[key]).padEnd(12)} ${source}`)
+  }
+  lines.push('', '  changes apply to running sessions immediately (no restart)')
+  lines.push('  coreOverrides (composition layer) merge LAST and beat these values on same-name keys')
+  lines.push('  /acp config reset <key> returns the key to the composition row / engine default')
+  return lines.join('\n')
+}
+
+async function configSetText(surface: SettingsCommandSurface | undefined, key: string, rawValue: string): Promise<string> {
+  if (!isSettingsKey(key)) {
+    return `unknown key "${key}" — keys: ${SETTINGS_KEYS.join(', ')}`
+  }
+  if (surface === undefined) return 'runtime settings are not wired in this engine build'
+  if (!surface.available) {
+    return 'no settings provider in this process — edit the compaction-acp row in cordis.patch.yml instead (a restart applies it)'
+  }
+  const parsed = parseSettingValue(rawValue)
+  if (!parsed.ok) return parsed.reason
+  if (parsed.value === null) {
+    // `null` is the reset-this-key sentinel: same path as /acp config reset.
+    return configResetText(surface, key)
+  }
+  // Narrow the union to the key's field type; the settings schema re-validates
+  // at the service boundary, so a mismatched value fails there, not here.
+  const patch: AcpSettingsInput = key === 'autoNudge' || key === 'autoModelContextLimit'
+    ? { [key]: parsed.value as boolean }
+    : { [key]: parsed.value as number }
+  try {
+    await surface.update(patch)
+  } catch (error) {
+    if (error instanceof SettingsConflictError) {
+      return 'conflict: another writer changed this setting at the same time — run /acp config again'
+    }
+    return `rejected: ${String(error)}`
+  }
+  const windowNote = key === 'modelContextLimit' || key === 'autoModelContextLimit'
+    ? '\n  window cache cleared — the next step re-resolves the context window'
+    : ''
+  return `✓ ${key} = ${String(parsed.value)} — applied to running sessions${windowNote}`
+}
+
+async function configResetText(surface: SettingsCommandSurface | undefined, target: string): Promise<string> {
+  if (surface === undefined) return 'runtime settings are not wired in this engine build'
+  if (!surface.available) {
+    return 'no settings provider in this process — edit the compaction-acp row in cordis.patch.yml instead (a restart applies it)'
+  }
+  if (target === 'all') {
+    await surface.replaceSection({})
+    return '✓ all runtime settings reset — values now come from the composition row / engine defaults'
+  }
+  if (!isSettingsKey(target)) {
+    return `unknown key "${target}" — keys: ${SETTINGS_KEYS.join(', ')}`
+  }
+  const descriptor = surface.describe()
+  // Single-key reset = delete the key from the USER section; the namespace
+  // then falls back to the composition row (base) or the engine default.
+  const userSection = isRecord(descriptor?.user) ? { ...descriptor.user } : {}
+  delete userSection[target]
+  await surface.replaceSection(userSection)
+  const baseSection = isRecord(descriptor?.base) ? descriptor.base : {}
+  const baseValue = baseSection[target]
+  return `✓ ${target} reset — it now reads ${baseValue === undefined ? 'the engine default' : `the composition value ${String(baseValue)}`}`
+}
+
+async function configText(env: ToolEnvironment, rest: string): Promise<string> {
+  const surface = env.settingsCommand
+  const args = rest.split(/\s+/).filter((part) => part.length > 0)
+  const verb = args[0] ?? 'list'
+  if (verb === 'list') return configListText(surface)
+  if (verb === 'set') {
+    if (args.length < 3) return 'usage: /acp config set <key> <value> (e.g. /acp config set nudgeMaxContextLimitPct 0.72)'
+    return configSetText(surface, args[1]!, args.slice(2).join(' '))
+  }
+  if (verb === 'reset') {
+    return configResetText(surface, args[1] ?? 'all')
+  }
+  return `unknown /acp config verb "${verb}" — use list | set <key> <value> | reset <key>|all`
 }

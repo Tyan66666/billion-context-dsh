@@ -200,8 +200,8 @@ test('M4: /acp status flags a failed window probe with a restart hint (issue #63
   const session = buildSession(12)
   const text = await runAcp(env, fakeAgent(session), 'status')
 
-  assert.match(text, /context window: 128000 \(default \(auto-detection failed — restart to re-probe\)\)/, 'window line labels the failure')
-  assert.match(text, /window auto-detection failed — using the 128000 fallback \(restart to re-probe/, 'probe-failure hint line with restart guidance')
+  assert.match(text, /context window: 128000 \(default \(auto-detection failed — see \/acp config\)\)/, 'window line labels the failure')
+  assert.match(text, /window auto-detection failed — using the 128000 fallback \(change modelContextLimit or autoModelContextLimit via \/acp config — or restart — to re-probe/, 'probe-failure hint line with re-probe guidance')
 })
 
 test('M4: /acp status shows no probe-failure hint when the probe succeeds', async () => {

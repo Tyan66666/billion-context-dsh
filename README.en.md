@@ -132,6 +132,24 @@ Two audiences: ① Path B (plain npm install) users, who must write a compositio
 
 See [docs/configurable-prompts-design.md](docs/configurable-prompts-design.md) for the full slot list, per-slot placeholders, and the empty-string/`null` semantics. Deployments that omit `prompts` use the kernel rendering directly (aligned with kernel/pi; see design doc v6).
 
+**(Optional) Runtime settings — edit `~/.dsh/settings.yaml` or use `/acp config`; no restart.** Six scalar keys (`modelContextLimit`, `autoModelContextLimit`, `nudgeMinContextLimitPct`, `nudgeMaxContextLimitPct`, `nudgeEmergencyThresholdPct`, `autoNudge` — the rows marked “runtime-adjustable” in the Configuration table) have a hot-editable copy in the host settings layer: editing the settings file or `/acp config` takes effect **immediately on running sessions** (the composition-row `config:` stays the starting point — the layering is schema default → composition row → user settings section):
+
+```yaml
+# ~/.dsh/settings.yaml
+compaction-acp:
+  nudgeMaxContextLimitPct: 0.72   # saved → live, no restart
+```
+
+```text
+/acp config                                  # list the six keys + source layer (user / base / default)
+/acp config set nudgeMaxContextLimitPct 0.72 # change one key live
+/acp config set autoNudge false              # boolean keys accept false
+/acp config reset nudgeMaxContextLimitPct    # back to the composition row / engine default
+/acp config reset all
+```
+
+Changing a window key (`modelContextLimit` / `autoModelContextLimit`) clears the window-probe cache — the next pre-step re-probes under the new values (probe failures are cached too, so this is also how a fixed gateway gets re-probed). In provider-less plain-npm compositions `/acp config` degrades to advice text; `settingsEnabled: false` disables the integration entirely (composition-row-only — the switch is deliberately NOT part of the settings layer: it cannot turn itself off). Design details: [docs/settings-integration-design.md](docs/settings-integration-design.md).
+
 **Per-mode — an agent preset's `compaction` realm.** First *disable (or delete) the realm's existing `dsh-compaction-basic` row*, then mount this engine — two backends cannot coexist in the same realm:
 
 ```yaml
@@ -199,15 +217,16 @@ This project reuses `acp-kernel`'s compression core and `billion-context-pi`'s d
 
 | Key | Default | Meaning |
 |---|---|---|
-| `modelContextLimit` | auto-detected (fallback `128000`) | Context window used for the kernel's pressure decisions; an explicit value wins and skips the probe |
-| `autoModelContextLimit` | `true` | Probe the model's real window from the model API (`agent.ctx.llm.resolveModelInfo`); fall back to the default on failure, the `/acp` command shows the window source (the `acp_status` model tool carries no window info). A failed probe is surfaced in the host log and the `/acp` panel (`restart to re-probe`) — the failure is cached like a success, so fixing the gateway requires a restart or an explicit `modelContextLimit` before the probe retries |
-| `nudgeMinContextLimitPct` | kernel default `0.45` | Nudge window lower bound (usage fraction) — validation only; the growth-driven trigger has no percentage floor — same default as billion-context-pi |
-| `nudgeMaxContextLimitPct` | engine default `0.70` (kernel/pi default `0.75`) | Over-limit line: above this the nudge fires regardless of growth — deliberately below the host compaction-basic 80% auto-compaction line so the forced nudge fires first; an explicit value wins (a same-name key in `coreOverrides.nudge` outranks it — see below) |
-| `nudgeEmergencyThresholdPct` | engine default `0.85` (kernel/pi default `0.95`) | Emergency nudge (bypasses the per-turn dedup) — lowered from `0.95`: at 95% the model has no room to act and the 80% auto-compaction line shadows it; an explicit value wins (a same-name key in `coreOverrides.nudge` outranks it — see below) |
-| `coreOverrides` | — | Any other acp-kernel `Config` override (billion-context-pi's `coreOverrides` escape hatch). Merge order: kernel defaults → top-level pct knobs → `coreOverrides.nudge` lands last — same-name keys take its value |
+| `modelContextLimit` | auto-detected (fallback `128000`) | Context window used for the kernel's pressure decisions; an explicit value wins and skips the probe (runtime-adjustable: `/acp config`) |
+| `autoModelContextLimit` | `true` | Probe the model's real window from the model API (`agent.ctx.llm.resolveModelInfo`); fall back to the default on failure, the `/acp` command shows the window source (the `acp_status` model tool carries no window info). A failed probe is surfaced in the host log and the `/acp` panel — the failure is cached like a success, so the probe retries after changing `modelContextLimit`/`autoModelContextLimit` (`/acp config` clears the window cache) or a restart (runtime-adjustable: `/acp config`) |
+| `nudgeMinContextLimitPct` | kernel default `0.45` | Nudge window lower bound (usage fraction) — validation only; the growth-driven trigger has no percentage floor — same default as billion-context-pi (runtime-adjustable: `/acp config`) |
+| `nudgeMaxContextLimitPct` | engine default `0.70` (kernel/pi default `0.75`) | Over-limit line: above this the nudge fires regardless of growth — deliberately below the host compaction-basic 80% auto-compaction line so the forced nudge fires first; an explicit value wins (a same-name key in `coreOverrides.nudge` outranks it — see below) (runtime-adjustable: `/acp config`) |
+| `nudgeEmergencyThresholdPct` | engine default `0.85` (kernel/pi default `0.95`) | Emergency nudge (bypasses the per-turn dedup) — lowered from `0.95`: at 95% the model has no room to act and the 80% auto-compaction line shadows it; an explicit value wins (a same-name key in `coreOverrides.nudge` outranks it — see below) (runtime-adjustable: `/acp config`) |
+| `coreOverrides` | — | Any other acp-kernel `Config` override (billion-context-pi's `coreOverrides` escape hatch). Merge order: kernel defaults → top-level pct knobs → `coreOverrides.nudge` lands last — same-name keys take its value (read-only: composition-row-only, not exposed through settings) |
 | `autoTools` | `true` | Register the four model tools on `ctx.tools` |
 | `autoCommand` | `true` | Register the `/acp` command on `ctx.commands` |
-| `autoNudge` | `true` | Inject the nudge into `agent/pre-step` |
+| `autoNudge` | `true` | Inject the nudge into `agent/pre-step` (runtime-adjustable: `/acp config`) |
+| `settingsEnabled` | `true` (enabled when unset) | (optional) Disable the runtime-settings integration entirely (composition-row-only, deliberately NOT in the settings layer — the switch cannot turn itself off; with it off the composition-row `config:` stays the only effective channel) |
 | `prompts` | — | (optional) Custom prompt copy: per-slot overrides for nudge / range table / system prompt / tool descriptions (template + named placeholders, validated at construction; see “Custom prompt copy” above and [docs/configurable-prompts-design.md](docs/configurable-prompts-design.md)) |
 
 ## Development
