@@ -1,16 +1,19 @@
 # Issue 打标签时自动同步到 GitHub Project「billion-context-dsh Roadmap」(project #1):
 #   - 新开/改标签的 issue 自动加入项目(已加入则跳过,幂等)
-#   - priority: P0/P1/P2/backlog 标签 → Priority 单选字段
+#   - priority: P0/P1/P2/backlog 标签 → Priority 单选字段(只响应本次事件的标签,
+#     不重算全部标签——避免覆盖人工在项目面板里改过的值)
 #   - upstream-pending 标签 → "Blocked by upstream" 文本字段打勾说明
 # Project V2 写操作走 gh CLI 的 GraphQL,需要 fine-grained PAT(勾选 org project 权限)存在
 # 仓库 secret GH_PROJECT_TOKEN;没有时本 action 静默跳过字段同步步骤。
+# 依赖:docs/upstream-tracker.md 由另一个 PR(#84)先合并进来;watch-upstream job
+#   对该文件缺失有保护(不存在时跳过 tracker 来源,不会报错)。
 # 另有每日定时巡检(docs/upstream-tracker.md 里登记的上游 PR):上游 PR 合并后,
 #   给对应本地 issue 打 upstream-merged 标签并留言提醒 bump kernel(见 job watch-upstream)。
 name: issue-triage
 
 on:
   issues:
-    types: [labeled, opened]
+    types: [labeled, unlabeled, opened]
   schedule:
     - cron: '23 3 * * *'
 
@@ -18,28 +21,32 @@ permissions:
   issues: write
   contents: read
 
-# 定时任务没有 issue number,用固定组即可;事件任务按 issue 去重
+# 定时任务没有 issue number,用固定组即可;事件任务按 issue 去重。
+# 不取消进行中的运行:连续打标签时,取消会把"条目已加、字段未写"留在半途。
+# 两个 job 用独立的并发组:schedule 触发时 sync 不跑,若共用一组,watch-upstream
+# 会被同组的按 issue 分组逻辑意外取消/排队。
 concurrency:
-  group: issue-triage-${{ github.event.issue.number || 'cron' }}
-  cancel-in-progress: true
+  group: issue-triage-sync-${{ github.event.issue.number || 'cron' }}
+  cancel-in-progress: false
 
 jobs:
   sync:
     runs-on: ubuntu-latest
+    if: github.event_name != 'schedule'
     steps:
       - name: Sync issue to Roadmap project
         env:
           GH_TOKEN: ${{ secrets.GH_PROJECT_TOKEN }}
           ISSUE_URL: ${{ github.event.issue.html_url }}
-          LABELS: ${{ join(github.event.issue.labels.*.name, ',') }}
+          # 只看本次事件对应的标签:重放全部标签会覆盖人工在项目面板改过的字段,
+          # 且一个 issue 同时挂 P0+P1 时永远写先匹配的那个。
+          EVENT_LABEL: ${{ github.event.label.name }}
           PROJECT: 1
           OWNER: Tyan66666
-          # Field ids from the project (stable GraphQL node ids)
+          # Priority 单选字段 id(PVTSSF_ 前缀,项目级稳定 node id)。
+          # 选项 id 不再硬编码:运行时按 option name 从 field-list 查完整 node id,
+          # 避免复制时截断(GraphQL 只认完整 PVTSEO_ 前缀 id)。
           PRIORITY_FIELD_ID: PVTSSF_lAHOAluDGs4Bh_qSzhg5Q5Q
-          OPT_P0: '6600f446'
-          OPT_P1: '5e823b78'
-          OPT_P2: 'd831c249'
-          OPT_BACKLOG: '63d3047c'
           UPSTREAM_FIELD_ID: PVTF_lAHOAluDGs4Bh_qSzhg5Q5U
         run: |
           set -euo pipefail
@@ -47,42 +54,53 @@ jobs:
             echo "GH_PROJECT_TOKEN not set — skipping (configure the secret to enable auto-triage)."
             exit 0
           fi
-          # 1) ensure the issue is in the project (idempotent)
-          ITEM_ID=$(gh project item-add "$PROJECT" --owner "$OWNER" --url "$ISSUE_URL" --format json --jq .id 2>/dev/null || true)
+          # projectId 只取一次,两个 mutation 复用
+          PROJECT_ID=$(gh project view "$PROJECT" --owner "$OWNER" --format json --jq .id)
+          # 1) ensure the issue is in the project (idempotent):
+          #    先查是否已存在,不存在再添加——不要靠 item-add 失败再回查,
+          #    那会把 PAT 无效/无权限等真实错误吞掉
+          ITEM_ID=$(gh project item-list "$PROJECT" --owner "$OWNER" --format json \
+            --jq --arg u "$ISSUE_URL" '[.items[] | select(.content.url==$u)][0].id')
           if [ -z "${ITEM_ID:-}" ]; then
-            # already in the project: look the item up
-            ITEM_ID=$(gh project item-list "$PROJECT" --owner "$OWNER" --format json \
-              --jq ".items[] | select(.content.url==\"$ISSUE_URL\") | .id" | head -1)
+            ITEM_ID=$(gh project item-add "$PROJECT" --owner "$OWNER" --url "$ISSUE_URL" --format json --jq .id)
           fi
           if [ -z "${ITEM_ID:-}" ]; then
             echo "Could not resolve project item id for $ISSUE_URL" >&2
             exit 1
           fi
           echo "item: $ITEM_ID"
-          # 2) map priority label → Priority field (single-select)
-          case ",$LABELS," in
-            *,"priority: P0",*)   OPT=$OPT_P0 ;;
-            *,"priority: P1",*)   OPT=$OPT_P1 ;;
-            *,"priority: P2",*)   OPT=$OPT_P2 ;;
-            *,"priority: backlog",*) OPT=$OPT_BACKLOG ;;
-            *) OPT="" ;;
+          # 2) 本次标签 → Priority 字段(single-select)。运行时按名查 option id:
+          #    field-list 一次拿全,后续无需再查。查不到(字段被改名/删除)时报错退出,
+          #    不静默写空值。
+          OPT=""
+          case ",$EVENT_LABEL," in
+            *,"priority: P0",*)   OPT_NAME="P0" ;;
+            *,"priority: P1",*)   OPT_NAME="P1" ;;
+            *,"priority: P2",*)   OPT_NAME="P2" ;;
+            *,"priority: backlog",*) OPT_NAME="backlog" ;;
           esac
-          if [ -n "$OPT" ]; then
+          if [ -n "${OPT_NAME:-}" ]; then
+            OPT=$(gh project field-list "$PROJECT" --owner "$OWNER" --format json \
+              --jq --arg f "$PRIORITY_FIELD_ID" --arg n "$OPT_NAME" \
+              '.fields[] | select(.id==$f) | .options[] | select(.name==$n) | .id')
+            if [ -z "$OPT" ]; then
+              echo "Priority option '$OPT_NAME' not found in project field $PRIORITY_FIELD_ID" >&2
+              exit 1
+            fi
             gh api graphql -f query='mutation($p:ID!,$i:ID!,$f:ID!,$v:String!){
               updateProjectV2ItemFieldValue(input:{projectId:$p,itemId:$i,fieldId:$f,value:{singleSelectOptionId:$v}})
               { projectV2Item { id } } }' \
-              -f p="$(gh project view "$PROJECT" --owner "$OWNER" --format json --jq .id)" \
-              -f i="$ITEM_ID" -f f="$PRIORITY_FIELD_ID" -f v="$OPT" >/dev/null && echo "priority set"
+              -f p="$PROJECT_ID" -f i="$ITEM_ID" -f f="$PRIORITY_FIELD_ID" -f v="$OPT" \
+              && echo "priority set"
           fi
           # 3) upstream-pending → mark the Upstream field
-          case ",$LABELS," in
+          case ",$EVENT_LABEL," in
             *,"upstream-pending",*)
               gh api graphql -f query='mutation($p:ID!,$i:ID!,$f:ID!,$v:String!){
                 updateProjectV2ItemFieldValue(input:{projectId:$p,itemId:$i,fieldId:$f,value:{text:$v}})
                 { projectV2Item { id } } }' \
-                -f p="$(gh project view "$PROJECT" --owner "$OWNER" --format json --jq .id)" \
-                -f i="$ITEM_ID" -f f="$UPSTREAM_FIELD_ID" \
-                -f v="上游修复合入后需解除本地 workaround(见 docs/upstream-tracker.md)" >/dev/null \
+                -f p="$PROJECT_ID" -f i="$ITEM_ID" -f f="$UPSTREAM_FIELD_ID" \
+                -f v="上游修复合入后需解除本地 workaround(见 docs/upstream-tracker.md)" \
                 && echo "upstream flag set" ;;
           esac
 
@@ -97,6 +115,9 @@ jobs:
   watch-upstream:
     runs-on: ubuntu-latest
     if: github.event_name == 'schedule'
+    concurrency:
+      group: issue-triage-watch-upstream
+      cancel-in-progress: false
     steps:
       - uses: actions/checkout@v4
       - name: Check upstream PRs (tracker doc + issue bodies)
@@ -107,12 +128,18 @@ jobs:
           set -euo pipefail
           # 1) pairs from the tracker doc: same table row must mention both
           #    (issue link and PR link live in different cells, so match row-wise)
-          awk -F'|' '/billion-context-dsh\/issues/ && /acp-kernel\/pull/ {
-            match($0, /billion-context-dsh\/issues\/[0-9]+/); li=substr($0,RSTART,RLENGTH);
-            match($0, /acp-kernel\/pull\/[0-9]+/);            up=substr($0,RSTART,RLENGTH);
-            gsub(/.*issues\//,"",li); gsub(/.*pull\//,"",up);
-            print li" "up
-          }' docs/upstream-tracker.md > pairs.txt || true
+          #    该文件由 PR #84 引入;未合并时文件不存在,跳过这一来源而不是报错
+          if [ -f docs/upstream-tracker.md ]; then
+            awk -F'|' '/billion-context-dsh\/issues/ && /acp-kernel\/pull/ {
+              match($0, /billion-context-dsh\/issues\/[0-9]+/); li=substr($0,RSTART,RLENGTH);
+              match($0, /acp-kernel\/pull\/[0-9]+/);            up=substr($0,RSTART,RLENGTH);
+              gsub(/.*issues\//,"",li); gsub(/.*pull\//,"",up);
+              print li" "up
+            }' docs/upstream-tracker.md >> pairs.txt || true
+          else
+            echo "docs/upstream-tracker.md not found — tracker-source skipped (merge PR #84 to enable)"
+          fi
+          touch pairs.txt
           # 2) pairs from open issue bodies/titles: an issue that pastes an
           #    acp-kernel pull link tracks that PR by itself (multiple links → keep all).
           #    Bodies are multi-line, so jq emits "NUMBER\tTITLE\nBODY" and awk tracks
