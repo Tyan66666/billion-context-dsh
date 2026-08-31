@@ -81,6 +81,7 @@ test('M4/prompts 1: default system prompt contains key sections in correct order
   assert.ok(rendered.includes('WHEN NOT TO COMPRESS:'), 'WHEN NOT TO COMPRESS section present')
   assert.ok(rendered.includes('A task phase has ended'), 'WHEN TO bullet present')
   assert.ok(rendered.includes('Protected tool outputs'), 'WHEN NOT bullet present')
+  assert.ok(rendered.includes('Content you will still need to cite verbatim'), 'WHEN NOT cite-verbatim bullet present (issue #55)')
   // HOW_TO_COMPRESS_RULES
   assert.ok(rendered.includes('HOW TO COMPRESS'), 'HOW_TO_COMPRESS_RULES section present')
   assert.ok(rendered.includes('KEEP VERBATIM'), 'KEEP VERBATIM section present')
@@ -167,7 +168,7 @@ test('M4/prompts 5: tool descriptions render the defaults byte-identical', () =>
   const descriptions = Object.fromEntries(makeTools(makeEnv(128000)).map((t) => [t.name, t.description]))
   assert.equal(
     descriptions['compress'],
-    'Replace older conversation ranges with dense summaries you write. Each message seq is a surface reference. Single range: compress({ content: [{ startSeq, endSeq, summary }] }). Batch multiple unrelated ranges in one call (each content entry becomes its own block); keep ranges disjoint. Never compress content the current step is actively using. Compress boundaries are SURFACE SEQS (acp_status Surface: row, latest nudge table) — NOT the block refs (bN, e.g. b1) that acp_status COMPRESSED BLOCKS shows, which are for decompress only. Drilldown mN refs (e.g. m00306) are ALSO accepted as startSeq/endSeq — they are auto-mapped to the live surface seq; an unknown mN (never assigned on the current surface) fails with guidance. Seq refs must come from the CURRENT surface (acp_status or the latest nudge): a span whose edges were shadowed by an earlier compress is auto-remapped to its still-live content, a fully compressed span is reported as already compressed, and invented/other-session seqs fail with guidance. Good compression moments: stage or subtask completion, strategy switches, intermediate milestones, and wrapping up failed exploration — when the details are consumed and no longer critical for the task ahead. When you write a summary, turn dead-end exploration into a conclusion (what was tried, why it failed, the next step) — not a blow-by-blow; and keep the summary the ONLY record: self-contained, so a later reader (or you, after decompress) can continue without the original.',
+    'Replace older conversation ranges with dense summaries you write. Each message seq is a surface reference. Single range: compress({ content: [{ startSeq, endSeq, summary }] }). Batch multiple unrelated ranges in one call (each content entry becomes its own block); keep ranges disjoint. Never compress content the current step is actively using. Compress boundaries are SURFACE SEQS (acp_status Surface: row, latest nudge table) — NOT the block refs (bN, e.g. b1) that acp_status COMPRESSED BLOCKS shows, which are for decompress only. Drilldown mN refs (e.g. m00306) are ALSO accepted as startSeq/endSeq — they are auto-mapped to the live surface seq; an unknown mN (never assigned on the current surface) fails with guidance. Seq refs must come from the CURRENT surface (acp_status or the latest nudge): a span whose edges were shadowed by an earlier compress is auto-remapped to its still-live content, a fully compressed span is reported as already compressed, and invented/other-session seqs fail with guidance. Good compression moments: stage or subtask completion whose details you have fully consumed and will not re-check, strategy switches, intermediate milestones, and wrapping up failed exploration — when the details are consumed and no longer critical for the task ahead. Before compressing, ask: will I need to re-verify any detail from this range in this task? If yes, keep it live. When you write a summary, turn dead-end exploration into a conclusion (what was tried, why it failed, the next step) — not a blow-by-blow; and keep the summary the ONLY record: self-contained, so a later reader (or you, after decompress) can continue without the original.',
   )
   assert.equal(descriptions['decompress'], 'Recover the original content of a compressed block by its blockId — the kernel block ref `bN` shown by acp_status (e.g. b1), or a compaction id from search_context (read-only; does not unshadow the range).')
   assert.equal(descriptions['search_context'], 'Search inside compressed blocks (summaries and original content) for information the model no longer sees in context. When a summary lacks a detail you need (exact values, error strings, decisions, verbatim code), SEARCH the compressed blocks FIRST — never guess or reconstruct from memory: search_context(query) locates the right block, then decompress only that block to recover the original.')
@@ -184,7 +185,7 @@ test('M4/prompts 5b: default compress description ships the #43 semantic-timing 
   const descriptions = Object.fromEntries(makeTools(makeEnv(128000)).map((t) => [t.name, t.description]))
   const compress = descriptions['compress']
   assert.ok(
-    compress.includes('Good compression moments: stage or subtask completion, strategy switches, intermediate milestones, and wrapping up failed exploration'),
+    compress.includes('Good compression moments: stage or subtask completion whose details you have fully consumed and will not re-check, strategy switches, intermediate milestones, and wrapping up failed exploration'),
     'semantic compression moments present (issue #43)',
   )
   assert.ok(
@@ -223,6 +224,36 @@ test('M4/prompts 5c: search-first carriers ship in the default search_context de
   assert.ok(
     rendered.includes('exact values, error strings, decisions, verbatim code'),
     'quick-reference carrier list matches the tool description (issue #44)',
+  )
+})
+
+test('M4/prompts 5d: anti-over-compression carriers ship in the default compress description AND the system prompt (issue #55)', () => {
+  // issue #55: in review/audit/verification tasks the model compressed source
+  // reads and then decompressed them back (compress -> decompress ->
+  // re-compress loop). Three carriers guide it away: (a) the WHEN NOT TO
+  // COMPRESS cite-verbatim bullet, (b) the "fully consumed" qualifier on the
+  // subtask completion trigger, (c) the re-verify self-check at the end of
+  // the compress description. Proven out locally via config.prompts
+  // overrides (live-verified in cordis.patch.yml) before promotion to the
+  // defaults.
+  const descriptions = Object.fromEntries(makeTools(makeEnv(128000)).map((t) => [t.name, t.description]))
+  const compress = descriptions['compress']
+  assert.ok(
+    compress.includes('stage or subtask completion whose details you have fully consumed and will not re-check'),
+    'consumed-qualifier on subtask completion present (issue #55)',
+  )
+  assert.ok(
+    compress.includes('Before compressing, ask: will I need to re-verify any detail from this range in this task? If yes, keep it live.'),
+    're-verify self-check present (issue #55)',
+  )
+  const rendered = renderSystemPrompt(resolvePrompts())
+  assert.ok(
+    rendered.includes('Content you will still need to cite verbatim — in review/audit/verification tasks, keep source reads un-compressed until the final report is written.'),
+    'cite-verbatim WHEN NOT bullet present in system prompt (issue #55)',
+  )
+  assert.ok(
+    rendered.includes('decompress costs a full round-trip; prefer delaying the compress'),
+    'round-trip cost warning present in system prompt (issue #55)',
   )
 })
 
