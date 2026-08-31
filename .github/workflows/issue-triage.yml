@@ -1,0 +1,82 @@
+# Issue 打标签时自动同步到 GitHub Project「billion-context-dsh Roadmap」(project #1):
+#   - 新开/改标签的 issue 自动加入项目(已加入则跳过,幂等)
+#   - priority: P0/P1/P2/backlog 标签 → Priority 单选字段
+#   - upstream-pending 标签 → "Blocked by upstream" 文本字段打勾说明
+# Project V2 写操作走 gh CLI 的 GraphQL,需要 fine-grained PAT(勾选 org project 权限)存在
+# 仓库 secret GH_PROJECT_TOKEN;没有时本 action 静默跳过字段同步步骤。
+name: issue-triage
+
+on:
+  issues:
+    types: [labeled, opened]
+
+permissions:
+  issues: read
+  contents: read
+
+concurrency:
+  group: issue-triage-${{ github.event.issue.number }}
+  cancel-in-progress: true
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Sync issue to Roadmap project
+        env:
+          GH_TOKEN: ${{ secrets.GH_PROJECT_TOKEN }}
+          ISSUE_URL: ${{ github.event.issue.html_url }}
+          LABELS: ${{ join(github.event.issue.labels.*.name, ',') }}
+          PROJECT: 1
+          OWNER: Tyan66666
+          # Field ids from the project (stable GraphQL node ids)
+          PRIORITY_FIELD_ID: PVTSSF_lAHOAluDGs4Bh_qSzhg5Q5Q
+          OPT_P0: '6600f446'
+          OPT_P1: '5e823b78'
+          OPT_P2: 'd831c249'
+          OPT_BACKLOG: '63d3047c'
+          UPSTREAM_FIELD_ID: PVTF_lAHOAluDGs4Bh_qSzhg5Q5U
+        run: |
+          set -euo pipefail
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "GH_PROJECT_TOKEN not set — skipping (configure the secret to enable auto-triage)."
+            exit 0
+          fi
+          # 1) ensure the issue is in the project (idempotent)
+          ITEM_ID=$(gh project item-add "$PROJECT" --owner "$OWNER" --url "$ISSUE_URL" --format json --jq .id 2>/dev/null || true)
+          if [ -z "${ITEM_ID:-}" ]; then
+            # already in the project: look the item up
+            ITEM_ID=$(gh project item-list "$PROJECT" --owner "$OWNER" --format json \
+              --jq ".items[] | select(.content.url==\"$ISSUE_URL\") | .id" | head -1)
+          fi
+          if [ -z "${ITEM_ID:-}" ]; then
+            echo "Could not resolve project item id for $ISSUE_URL" >&2
+            exit 1
+          fi
+          echo "item: $ITEM_ID"
+          # 2) map priority label → Priority field (single-select)
+          case ",$LABELS," in
+            *,"priority: P0",*)   OPT=$OPT_P0 ;;
+            *,"priority: P1",*)   OPT=$OPT_P1 ;;
+            *,"priority: P2",*)   OPT=$OPT_P2 ;;
+            *,"priority: backlog",*) OPT=$OPT_BACKLOG ;;
+            *) OPT="" ;;
+          esac
+          if [ -n "$OPT" ]; then
+            gh api graphql -f query='mutation($p:ID!,$i:ID!,$f:ID!,$v:String!){
+              updateProjectV2ItemFieldValue(input:{projectId:$p,itemId:$i,fieldId:$f,value:{singleSelectOptionId:$v}})
+              { projectV2Item { id } } }' \
+              -f p="$(gh project view "$PROJECT" --owner "$OWNER" --format json --jq .id)" \
+              -f i="$ITEM_ID" -f f="$PRIORITY_FIELD_ID" -f v="$OPT" >/dev/null && echo "priority set"
+          fi
+          # 3) upstream-pending → mark the Upstream field
+          case ",$LABELS," in
+            *,"upstream-pending",*)
+              gh api graphql -f query='mutation($p:ID!,$i:ID!,$f:ID!,$v:String!){
+                updateProjectV2ItemFieldValue(input:{projectId:$p,itemId:$i,fieldId:$f,value:{text:$v}})
+                { projectV2Item { id } } }' \
+                -f p="$(gh project view "$PROJECT" --owner "$OWNER" --format json --jq .id)" \
+                -f i="$ITEM_ID" -f f="$UPSTREAM_FIELD_ID" \
+                -f v="上游修复合入后需解除本地 workaround(见 docs/upstream-tracker.md)" >/dev/null \
+                && echo "upstream flag set" ;;
+          esac
