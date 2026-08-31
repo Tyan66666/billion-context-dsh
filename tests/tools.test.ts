@@ -752,6 +752,81 @@ test('M3: compress schema gate rejects a range entry missing summary (required f
   assert.match((ok as { text: string }).text, /Compressed 1 block/, 'a full entry still compresses')
 })
 
+const SUMMARY_SAMPLE = 'Authentication summary with enough technical detail to satisfy the kernel threshold: JWT, Redis refresh tokens, login flow, rate limiting, bcrypt.'
+
+test('M3: compress schema gate rejects a topic-only entry, naming the missing seq fields', async () => {
+  // The other half of the live failure mode: a `{ topic }`-only entry omits
+  // startSeq/endSeq too. The gate must name every missing field, not fall
+  // through to the kernel's field-less `invalid seq "undefined"`.
+  const env = makeEnv()
+  const session = buildTextSession(12)
+  const compress = toolOf(env, 'compress')
+  await assert.rejects(
+    compress.execute({ content: [{ topic: 'no seqs, no summary' }] } as never, fakeExec(session)),
+    (error: unknown) => {
+      const message = (error as Error).message
+      return (
+        message.includes('missing required property "content[0].startSeq"') &&
+        message.includes('missing required property "content[0].endSeq"') &&
+        message.includes('missing required property "content[0].summary"')
+      )
+    },
+    'a topic-only entry names all three missing fields at the schema gate',
+  )
+  assert.equal(rebuildBlockLedger(session.events).length, 0, 'no block lands from a schema-rejected topic-only call')
+})
+
+test('M3: compress rejects a summary-less entry in the wrapped { arguments } form too', async () => {
+  // The DSH schema gate only sees the model's TOP-LEVEL arguments, so a call
+  // wrapped as { arguments: { content: [...] } } bypasses the items check and
+  // used to fall through to the kernel's field-less "Summary is empty" — the
+  // retry-loop window survived in the wrapped form. handleCompress now runs
+  // the same per-item check on the unwrapped content, with the SAME error
+  // surface the gate produces for the direct form.
+  const env = makeEnv()
+  const session = buildTextSession(12)
+  const compress = toolOf(env, 'compress')
+  await assert.rejects(
+    compress.execute({ arguments: { content: [{ startSeq: 1, endSeq: 5 }] } } as never, fakeExec(session)),
+    /missing required property "content\[0\]\.summary"/,
+    'the wrapped form is rejected with the exact field path, not the late kernel error',
+  )
+  assert.equal(rebuildBlockLedger(session.events).length, 0, 'no block lands from a wrapped schema-rejected call')
+  // L1: an empty/whitespace summary counts as missing, not merely present.
+  await assert.rejects(
+    compress.execute({ arguments: { content: [{ startSeq: 1, endSeq: 5, summary: '   ' }] } } as never, fakeExec(session)),
+    /missing required property "content\[0\]\.summary"/,
+    'a whitespace-only summary is treated as missing at the gate',
+  )
+})
+
+test('M3: the wrapped OBJECT arguments form still compresses a full entry', async () => {
+  // Rule-9 envelope contract: `content` must stay OPTIONAL at the top level
+  // precisely so the wrapped form reaches handleCompress, which peels the
+  // envelope. The pre-existing tolerance test covers the JSON-string form;
+  // this pins the object form { arguments: { content: [...] } } so a future
+  // "make content required" change cannot silently break the envelope.
+  const env = makeEnv()
+  const session = buildTextSession(12)
+  const compress = toolOf(env, 'compress')
+  const result = await compress.execute({
+    arguments: { content: [{ startSeq: 1, endSeq: 5, summary: SUMMARY_SAMPLE }] },
+  } as never, fakeExec(session))
+  assert.match((result as { text: string }).text, /Compressed 1 block/, 'the wrapped object form unwraps and compresses')
+  assert.equal(rebuildBlockLedger(session.events).length, 1, 'the wrapped object form lands the durable block')
+})
+
+test('M3: an empty array content is benign — zero blocks, no error', async () => {
+  // content: [] passes the gate (present, no items) and resolves to a no-op.
+  // Pin that benign outcome so a future stricter gate is a deliberate change.
+  const env = makeEnv()
+  const session = buildTextSession(12)
+  const compress = toolOf(env, 'compress')
+  const result = await compress.execute({ content: [] } as never, fakeExec(session))
+  assert.match((result as { text: string }).text, /Compressed 0 block\(s\)/, 'an empty content array is a no-op, not an error')
+  assert.equal(rebuildBlockLedger(session.events).length, 0, 'no block lands from an empty content array')
+})
+
 /** A session whose second node is a multi-tool-call assistant message. */
 function buildMultiCallSession(): Session {
   const session = Session.create('multi')

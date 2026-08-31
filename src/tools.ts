@@ -10,7 +10,7 @@
  * @module billion-context-dsh/tools
  */
 
-import { defineTool, type ToolDefinition, type ToolRunContext } from '@deepseek-ai/dsh-tools'
+import { defineTool, ToolArgsError, type ToolDefinition, type ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { buildStatusReport, defaultCountTokens, searchBlocks, type CompressionCore, type MessageRole, type SearchDoc } from 'acp-kernel'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
@@ -259,6 +259,35 @@ function unwrapEnvelope<T extends object>(args: T): T {
   return { ...args, ...(inner as object) } as T
 }
 
+/**
+ * Enforce the items-level `required` contract on the EFFECTIVE content, after
+ * the wrapped-arguments envelope has been peeled. The DSH schema gate only
+ * sees the model's top-level arguments object — when the call arrives wrapped
+ * as `{ arguments: { content: [...] } }`, the top-level `content` property is
+ * absent there (it lives inside the envelope), so the gate never checks the
+ * items and a missing `summary`/`startSeq`/`endSeq` sailed through to the
+ * kernel, which fails late with a field-less "Summary is empty" and sent live
+ * sessions into a retry loop (the same failure mode the schema gate fix for
+ * the direct form closed). Running the SAME check on the unwrapped content
+ * closes that window for both forms, and produces the identical
+ * `invalid arguments: missing required property "content[0].summary"` surface
+ * by reusing the host's `ToolArgsError` instead of a hand-rolled format.
+ * An empty/whitespace-only summary counts as missing (the kernel would
+ * reject it anyway — fail early with the field name instead).
+ */
+function validateContentItems(content: NonNullable<CompressArgs['content']>): void {
+  const violations: string[] = []
+  content.forEach((item, index) => {
+    const path = `content[${index}]`
+    if (item.startSeq === undefined) violations.push(`missing required property "${path}.startSeq"`)
+    if (item.endSeq === undefined) violations.push(`missing required property "${path}.endSeq"`)
+    if (typeof item.summary !== 'string' || item.summary.trim().length === 0) {
+      violations.push(`missing required property "${path}.summary"`)
+    }
+  })
+  if (violations.length > 0) throw new ToolArgsError(violations)
+}
+
 /** Resolve seq → kernel ref, then applyCompression and land the transaction. */
 async function handleCompress(env: ToolEnvironment, args: CompressArgs, exec: ToolRunContext): Promise<TextOutput> {
   const agent = requireAgent(exec)
@@ -302,6 +331,9 @@ async function handleCompress(env: ToolEnvironment, args: CompressArgs, exec: To
     }
   }
   args = unwrapped
+  // Items-level required check AFTER the envelope peel (see
+  // validateContentItems for why the schema gate alone cannot do this).
+  validateContentItems(args.content!)
 
   const ranges: Array<
     ResolvedSurfaceRange & {
