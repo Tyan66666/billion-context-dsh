@@ -59,7 +59,7 @@ jobs:
           # 1) ensure the issue is in the project (idempotent):
           #    先查是否已存在,不存在再添加——不要靠 item-add 失败再回查,
           #    那会把 PAT 无效/无权限等真实错误吞掉
-          ITEM_ID=$(gh project item-list "$PROJECT" --owner "$OWNER" --format json \
+          ITEM_ID=$(gh project item-list "$PROJECT" --owner "$OWNER" --limit 1000 --format json \
             --jq --arg u "$ISSUE_URL" '[.items[] | select(.content.url==$u)][0].id')
           if [ -z "${ITEM_ID:-}" ]; then
             ITEM_ID=$(gh project item-add "$PROJECT" --owner "$OWNER" --url "$ISSUE_URL" --format json --jq .id)
@@ -72,14 +72,22 @@ jobs:
           # 2) 本次标签 → Priority 字段(single-select)。运行时按名查 option id:
           #    field-list 一次拿全,后续无需再查。查不到(字段被改名/删除)时报错退出,
           #    不静默写空值。
-          OPT=""
+          #    unlabeled 移除的是 priority 标签时,清除 Priority 字段(clearProjectV2ItemFieldValue)
+          #    而不是把旧值重写一遍——重写与"移除标签"的意图正好相反。
+          IS_UNLABELED="${{ github.event.action == 'unlabeled' }}"
           case ",$EVENT_LABEL," in
             *,"priority: P0",*)   OPT_NAME="P0" ;;
             *,"priority: P1",*)   OPT_NAME="P1" ;;
             *,"priority: P2",*)   OPT_NAME="P2" ;;
-            *,"priority: backlog",*) OPT_NAME="backlog" ;;
+            *,"priority: backlog",*) OPT_NAME="Backlog" ;;
           esac
-          if [ -n "${OPT_NAME:-}" ]; then
+          if [ "$IS_UNLABELED" = "true" ] && [ -n "${OPT_NAME:-}" ]; then
+            gh api graphql -f query='mutation($p:ID!,$i:ID!,$f:ID!){
+              clearProjectV2ItemFieldValue(input:{projectId:$p,itemId:$i,fieldId:$f})
+              { projectV2Item { id } } }' \
+              -f p="$PROJECT_ID" -f i="$ITEM_ID" -f f="$PRIORITY_FIELD_ID" \
+              && echo "priority field cleared (label removed)"
+          elif [ -n "${OPT_NAME:-}" ]; then
             OPT=$(gh project field-list "$PROJECT" --owner "$OWNER" --format json \
               --jq --arg f "$PRIORITY_FIELD_ID" --arg n "$OPT_NAME" \
               '.fields[] | select(.id==$f) | .options[] | select(.name==$n) | .id')
@@ -106,7 +114,7 @@ jobs:
 
   # 每日巡检上游 acp-kernel 的 PR。追踪来源取并集:
   #   1. docs/upstream-tracker.md 表格行(本地 issue 链接 + 上游 PR 链接同行出现);
-  #   2. 本仓库开放 issue 的正文/标题里贴的 https://github.com/ranxianglei/acp-kernel/pull/<n>
+  #   2. 本仓库开放 issue 的正文里贴的 https://github.com/ranxianglei/acp-kernel/pull/<n>
   #      ——issue 正文附上游 PR 链接即被自动追踪,无需改 workflow。
   # 上游 PR 已 merged 的,给对应本地 issue 打 upstream-merged 标签并留言。
   # 已打过的不会重复(幂等)。
