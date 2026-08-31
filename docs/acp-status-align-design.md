@@ -196,6 +196,8 @@ buildStatusReport(state: CompressionState, messages: CoreMessage[], countTokens:
 
 **窗口来源（issue #63）**：`config.modelContextLimit` 不再是 `env.modelContextLimit`（128K 初始兜底），而是经 `windowFor(agent)` 探测后的有效窗口——`handleCompress` / `handleStatus` 与人类侧 `statusText` 统一走 `resolveEffectiveWindow(env, agent)`（`src/tools.ts`），再 `kernelConfigFor({ ...env, modelContextLimit: window.limit })`。模型工具只消费探测后的窗口进 nudge 决策（规则 9：窗口行不进工具输出），窗口来源的人类可见性由 `/acp` 的 `context window:` 行承担。
 
+**窗口优先读宿主投影（探针路由快照陷阱）**：`agent.options.provider/model` 是会话创建时的路由快照——会话中途切换模型后它不会跟随，`detectContextWindow` 若只探这条路由，会得到**上一模型**的窗口（1M 窗口会话被读成 96K → usage 300%+ 的假 EMERGENCY nudge）。修复：`windowFor`（`src/index.ts`）优先读 `sessionProjections.contextPressure.contextWindow`（宿主按**当前真实路由**披露的最新容量，`dsh-token-meter` 的 `ContextPressureProjection`，`src/window.ts` 的 `projectedContextWindow`），该值每次请求刷新、天然随模型切换自适应且无需重启/配置；无投影时回退到 `llm.resolveModelInfo` 探针（保留原缓存与 128K fallback 语义）。投影来源不在 `windowCache` 缓存——缓存会冻结切模型前的旧窗口整个进程生命周期，与 `(restart to re-probe)` 同源（issue #63 假警报陷阱）。`autoModelContextLimit: false` 时投影与探针均跳过。
+
 ### 4.3 人类 `/acp` 命令
 
 `src/commands.ts:26-74` `statusText` **保留窗口行**（对齐上游 `/acp` 面板语义：人类排查需要窗口）。`/acp` 与模型工具**不强制共用渲染函数**（P2-4）：改后两条路径分叉（模型工具走 kernel 渲染、`/acp` 保留现状窗口格式），且现状两函数本就有差异（`handleStatus` 有 `surface:` 行、`statusText` 无；`statusText` 块行带 `[T${tier}]` 标签、`handleStatus` 不带）。可共享的仅"ledger→块列表行"这一小段，列为可选重构，不引入耦合。`/acp` 输出保持现状：
