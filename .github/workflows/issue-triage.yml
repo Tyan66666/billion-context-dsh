@@ -104,10 +104,14 @@ jobs:
           UPSTREAM_REPO: ranxianglei/acp-kernel
         run: |
           set -euo pipefail
-          # collect "local_issue:upstream_pr" pairs from the tracker table
-          grep -oE 'billion-context-dsh/issues/[0-9]+\)?[^|]*acp-kernel/pull/[0-9]+' docs/upstream-tracker.md | \
-            grep -oE 'issues/[0-9]+|pull/[0-9]+' | paste - - | \
-            sed -E 's#issues/([0-9]+)\tpull/([0-9]+)#\1 \2#' > pairs.txt || true
+          # collect "local_issue upstream_pr" pairs — same table row must mention both
+          # (issue link and PR link live in different cells, so match row-wise, not line-wise pairs)
+          awk -F'|' '/billion-context-dsh\/issues/ && /acp-kernel\/pull/ {
+            match($0, /billion-context-dsh\/issues\/[0-9]+/); li=substr($0,RSTART,RLENGTH);
+            match($0, /acp-kernel\/pull\/[0-9]+/);            up=substr($0,RSTART,RLENGTH);
+            gsub(/.*issues\//,"",li); gsub(/.*pull\//,"",up);
+            print li" "up
+          }' docs/upstream-tracker.md > pairs.txt
           if [ ! -s pairs.txt ]; then echo "no tracked upstream PRs"; exit 0; fi
           while read -r ISSUE PR; do
             STATE=$(gh api "repos/$UPSTREAM_REPO/pulls/$PR" --jq '.state + ":" + (.merged|tostring)')
