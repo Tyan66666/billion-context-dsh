@@ -57,3 +57,12 @@ PR titles are enforced by CI (`.github/workflows/pr-lint.yml`, rule in `scripts/
 ## Releasing
 
 See AGENTS.md §5: `npm version` bump → sync version refs in docs → `npm publish` → `release vX.Y.Z` commit → `gh release create` → Pages rebuilds automatically.
+
+## Issue triage automation (labels → Roadmap project)
+
+`.github/workflows/issue-triage.yml` keeps the GitHub Project「billion-context-dsh Roadmap」in sync with issue labels:
+
+- **sync job** — when an issue is opened, labeled, or unlabeled, it is added to project #1 (idempotently), and the label currently applied maps to project fields: `priority: P0/P1/P2/backlog` → the Priority single-select field; `upstream-pending` → a pointer in the Upstream text field (see `docs/upstream-tracker.md`). Only the label from the triggering event is synced — other labels are left untouched.
+- **watch-upstream job** — a daily cron compares the upstream PRs referenced in `docs/upstream-tracker.md` and in issue bodies (links of the form `acp-kernel/pull/<n>`); when an upstream PR is merged, the issue gets the `upstream-merged` label and an SOP comment. Requires `docs/upstream-tracker.md` to exist (skipped otherwise).
+
+Both jobs write to the project via a repository secret **GH_PROJECT_TOKEN** — a fine-grained PAT with the user-level **Projects → Read and write** permission (Project V2 GraphQL mutations need more than the default `GITHUB_TOKEN`). To activate the automation, add the secret under Settings → Secrets and variables → Actions. Without it, the workflow prints a notice and exits 0 (CI stays green; project fields are simply not updated).

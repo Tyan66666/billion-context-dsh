@@ -10,7 +10,7 @@
  * @module billion-context-dsh/tools
  */
 
-import { defineTool, type ToolDefinition, type ToolRunContext } from '@deepseek-ai/dsh-tools'
+import { defineTool, ToolArgsError, type ToolDefinition, type ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { buildStatusReport, defaultCountTokens, searchBlocks, type CompressionCore, type MessageRole, type SearchDoc } from 'acp-kernel'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
@@ -105,6 +105,16 @@ const compressParameters = {
   // intentionally NOT `required: true` — a required property would reject the
   // wrapped shape before `handleCompress` can see it. The tool description
   // still tells the model content is mandatory.
+  //
+  // The items fields are the opposite case: startSeq/endSeq/summary MUST be
+  // `required: true`. Without that, a model call that omits `summary` (only
+  // startSeq/endSeq/topic present) passed schema validation and failed late
+  // inside the kernel with "Summary is empty" — and live sessions showed the
+  // model retrying the identical broken call in a loop. With the fields
+  // required, the same call is rejected at the schema gate with
+  // `missing required property "content[0].summary"`, which tells the model
+  // exactly which field to add (same pattern as decompress's required
+  // blockId / search_context's required query).
   arguments: { type: 'json', description: 'Tolerated wrapped-arguments form (model-generated); unwrapped in handleCompress. Prefer passing content directly.' },
   topic: { type: 'string' as const, description: 'Fallback topic for entries without their own.' },
   content: {
@@ -114,18 +124,20 @@ const compressParameters = {
       type: 'object' as const,
       properties: {
         startSeq: {
+          required: true,
           oneOf: [
             { type: 'integer' as const, description: 'First surface seq of the range.' },
             { type: 'string' as const, description: 'Seq as text; a trailing #callId fragment is ignored.' },
           ],
         },
         endSeq: {
+          required: true,
           oneOf: [
             { type: 'integer' as const, description: 'Inclusive last surface seq of the range.' },
             { type: 'string' as const, description: 'Seq as text; a trailing #callId fragment is ignored.' },
           ],
         },
-        summary: { type: 'string' as const, description: 'Complete technical summary replacing the range; keep paths, decisions, values verbatim. Minimum 50 characters.' },
+        summary: { type: 'string' as const, required: true, description: 'Complete technical summary replacing the range; keep paths, decisions, values verbatim. Minimum 50 characters.' },
         topic: { type: 'string' as const, description: 'Short label (3-5 words) for this range.' },
       },
       additionalProperties: false,
@@ -247,6 +259,35 @@ function unwrapEnvelope<T extends object>(args: T): T {
   return { ...args, ...(inner as object) } as T
 }
 
+/**
+ * Enforce the items-level `required` contract on the EFFECTIVE content, after
+ * the wrapped-arguments envelope has been peeled. The DSH schema gate only
+ * sees the model's top-level arguments object — when the call arrives wrapped
+ * as `{ arguments: { content: [...] } }`, the top-level `content` property is
+ * absent there (it lives inside the envelope), so the gate never checks the
+ * items and a missing `summary`/`startSeq`/`endSeq` sailed through to the
+ * kernel, which fails late with a field-less "Summary is empty" and sent live
+ * sessions into a retry loop (the same failure mode the schema gate fix for
+ * the direct form closed). Running the SAME check on the unwrapped content
+ * closes that window for both forms, and produces the identical
+ * `invalid arguments: missing required property "content[0].summary"` surface
+ * by reusing the host's `ToolArgsError` instead of a hand-rolled format.
+ * An empty/whitespace-only summary counts as missing (the kernel would
+ * reject it anyway — fail early with the field name instead).
+ */
+function validateContentItems(content: NonNullable<CompressArgs['content']>): void {
+  const violations: string[] = []
+  content.forEach((item, index) => {
+    const path = `content[${index}]`
+    if (item.startSeq === undefined) violations.push(`missing required property "${path}.startSeq"`)
+    if (item.endSeq === undefined) violations.push(`missing required property "${path}.endSeq"`)
+    if (typeof item.summary !== 'string' || item.summary.trim().length === 0) {
+      violations.push(`missing required property "${path}.summary"`)
+    }
+  })
+  if (violations.length > 0) throw new ToolArgsError(violations)
+}
+
 /** Resolve seq → kernel ref, then applyCompression and land the transaction. */
 async function handleCompress(env: ToolEnvironment, args: CompressArgs, exec: ToolRunContext): Promise<TextOutput> {
   const agent = requireAgent(exec)
@@ -290,6 +331,9 @@ async function handleCompress(env: ToolEnvironment, args: CompressArgs, exec: To
     }
   }
   args = unwrapped
+  // Items-level required check AFTER the envelope peel (see
+  // validateContentItems for why the schema gate alone cannot do this).
+  validateContentItems(args.content!)
 
   const ranges: Array<
     ResolvedSurfaceRange & {
