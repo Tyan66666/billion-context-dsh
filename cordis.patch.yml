@@ -4,7 +4,7 @@
 # package.json as `dsh.bundle.patch`) becomes a layer of the profile's
 # composition automatically. No manual configuration is needed.
 #
-# Two rows land in the profile's composition root:
+# Three rows land in the profile's composition root:
 #   1. `compaction-basic` disabled — the host's own auto-compaction backend
 #      would otherwise register `ctx.compaction` at the root realm too, and
 #      only one provider per realm may own that service name. (On dsh
@@ -12,9 +12,14 @@
 #      idempotent and keeps the plugin self-sufficient on every supported DSH.)
 #   2. `compaction-acp` — the ACP engine, mounted at the HOST plane, so its
 #      model tools (`compress`, `decompress`, `search_context`, `acp_status`),
-#      the `/acp` command, the advisory nudge, and the guidance section reach
-#      EVERY mode (standard / code / minimal / cordis / custom presets) of the
-#      profile the plugin was installed into.
+#      the Harness `/acp` command, the advisory nudge, and the guidance section
+#      reach EVERY mode (standard / code / minimal / cordis / custom presets)
+#      of the profile the plugin was installed into. Blue lists and executes
+#      `/acp` through its current-session Harness command bridge.
+#   3. `billion-context-dsh-blue` — a capability-free Blue frontend identity.
+#      It enables canonical discovery and compatibility admission without
+#      adding Blue-only UI or requesting session/projection access. On a
+#      non-Blue profile it simply waits for `bluePluginHost`; ACP still runs.
 #
 # No `config` is set on purpose: the context window is auto-detected from the
 # model API (fallback 128000) and the built-in prompt copy is used. Users who
@@ -30,3 +35,5 @@
 - insert:
     - id: compaction-acp
       name: 'billion-context-dsh'
+    - id: billion-context-dsh-blue
+      name: 'billion-context-dsh/blue'

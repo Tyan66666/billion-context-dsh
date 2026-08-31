@@ -64,21 +64,29 @@
 dsh plugin --profile web add billion-context-dsh
 ```
 
-命令内部会装包并把本包的 bundle 补丁（[cordis.patch.yml](cordis.patch.yml)）自动挂进该 profile 的层栈。补丁做了两件事：
+命令内部会装包并把本包的 bundle 补丁（[cordis.patch.yml](cordis.patch.yml)）自动挂进该 profile 的层栈。补丁做了三件事：
 
 - **禁用 host 的 `compaction-basic`**——避免同一 realm 内两个后端同时注册 `ctx.compaction` 冲突（现代 DSH 的 web bundle 已自带该禁用，此行为幂等兜底，任何受支持版本下都成立）；
-- **把 ACP 引擎挂到 host 平面**——四种模型工具（`compress` / `decompress` / `search_context` / `acp_status`）、`/acp` 命令、nudge、ACP 提示词段对该 profile 的**所有模式**（standard / code / minimal / cordis / 自定义预设）生效。窗口自动探测、工具/命令/nudge 默认全开，**无需任何手工配置**。
+- **把 ACP 引擎挂到 host 平面**——四种模型工具（`compress` / `decompress` / `search_context` / `acp_status`）、`/acp` 命令、nudge、ACP 提示词段对该 profile 的**所有模式**（standard / code / minimal / cordis / 自定义预设）生效。窗口自动探测、工具/命令/nudge 默认全开，**无需任何手工配置**；
+- **挂载 capability-free Blue 入口**——Blue 可按 canonical manifest 发现并检查本插件；该入口不新增 Blue UI，也不请求 session 数据。`/acp` 已由 ACP host entry 注册到 Harness command registry，Blue 会通过当前 session 的 Harness command bridge 直接列出和执行它，因此无需再申请只供 Blue-local 命令使用的 `commands` capability。非 Blue profile 没有 `bluePluginHost` 时，这一行只会等待服务，不影响 ACP 引擎。
 
-装完**重启 `dsh`**（bundle 层在启动时组合），新开会话即可用——让模型调用 `acp_status` 或执行 `/acp status` 自证。shipped 预设（standard / code / cordis）内部的 realm 级 `compaction-basic` 自动压缩兜底仍然保留（这些模式里"自动摘要"照旧，ACP 工具与 nudge 并存）；minimal 等不带 compaction realm 的预设直接使用本引擎。
+装完**重启 `dsh`**（bundle 层在启动时组合），新开会话即可用——让模型调用 `acp_status`，或在 Blue 命令栏直接执行 `/acp status` 自证。shipped 预设（standard / code / cordis）内部的 realm 级 `compaction-basic` 自动压缩兜底仍然保留（这些模式里"自动摘要"照旧，ACP 工具与 nudge 并存）；minimal 等不带 compaction realm 的预设直接使用本引擎。
 
 > **与 DSH 版本的兼容性。** 包声明 peer 依赖 `@deepseek-ai/dsh-compaction` 为
-> `^0.1.0-rc.6 || ^0.1.1-rc.1`，同时覆盖 `0.1.0-rc.x` 与 `0.1.1-rc.x` 两条 rc 线
-> （含当前最新 DSH release；从 `0.1.0-rc.6` 到 `0.1.1-rc.2`，seam 的 `src/` 源码
-> 零改动，公开 API 完全一致）。范围写成两个并集子句是**有意为之**：npm
+> `^0.1.0-rc.6 || ^0.1.1-rc.1 || ^0.1.2-alpha.2`。前两个子句保留已有
+> `0.1.0-rc.x` 与 `0.1.1-rc.x` 支持；第三个子句只增加已检查的 Harness
+> `0.1.2-alpha.2` seam。范围写成多个并集子句是**有意为之**：npm
 > （node-semver）的预发布匹配规则要求 range 里存在与候选版本**相同
-> `[major, minor, patch]` 元组**的比较器，单一 `^0.1.0-rc.6` 永远匹配不了
-> `0.1.1-rc.x`（issue #68）——因此旧发布的包在 DSH 0.1.1-rc.x 上装不上，
-> 升级到含本次修复的新版本即可。
+> `[major, minor, patch]` 元组**的比较器（issue #68）。Blue canonical 适配另有更窄的
+> 验证范围：只验证 Blue `0.1.2-alpha.1` + Harness `0.1.2-alpha.2`；此前 issue
+> 中的 Blue `0.1.1-rc.3` + Harness `0.1.1-rc.2` 不属于这次验证结果。
+
+> **Blue 市场边界。** `blue.plugin.json` 让已安装的 Blue host 发现并准入入口，
+> 但不自动把市场条目变成“已验证”。[Billion Context](https://dsh-blue.dev/marketplace/billion-context/)
+> 已以“适配中”状态收录；本适配合并并发布后，作者还需向
+> [`dsh-blue/marketplace`](https://github.com/dsh-blue/marketplace) 提交 PR，更新自己的
+> `registry.json` 条目和 `content/billion-context/{zh,en}.md` 描述。Blue 维护者复核本次
+> conformance 与真实 profile 证据后，再把条目状态改为 `verified`。
 
 **方式二：纯 `npm install`（只装包，需要手写组合行）。**
 
@@ -116,6 +124,9 @@ npm install billion-context-dsh
       name: 'billion-context-dsh'
       config:
         modelContextLimit: 128000   # 可选；省略时自动探测模型真实窗口（回退 128000）
+    # 仅 Blue profile 需要；普通 DSH profile 可省略。
+    - id: billion-context-dsh-blue
+      name: 'billion-context-dsh/blue'
 ```
 
 **（可选）自定义提示词文案 —— `config.prompts`。** 所有模型可见的提示词（普通/紧急 nudge 首句、上下文分解、增长行、批量提示、tier 蒸馏行、范围表、ACP system prompt 段、四个工具描述）默认**直接复用 acp-kernel 的 `renderNudgeText`**——效率提示、上下文分解、压缩规则、批量提示全部来自 kernel 原文，仅范围表换成 surface-seq 版（kernel 用 mNNNNN 引用，我们架构没有 `<acp>` 标签；seq 范围表同样携带 `[tool X% | text Y%]` 组成占比并 oldest-first 排序，与 kernel 展示语义一致）。覆盖任一 nudge 槽位后自动切换到模板渲染。模板支持命名占位符（如 nudge 的 `{pct}`、`{philosophy}`、范围表的 `{surface}`），**构造期校验**：占位符拼写错误会在引擎启动时抛错（fail-fast），而不是把字面 `{pct}` 漏进模型上下文：
@@ -219,13 +230,16 @@ npm test            # node --import tsx --test tests/*.test.ts
 npm run build       # tsup 打包（内联 acp-kernel）+ .d.ts
 ```
 
-`dist/index.js` 自包含，仅外链 `@deepseek-ai/*` 接缝包（由宿主部署提供）。
+`dist/index.js` 自包含，仅外链 `@deepseek-ai/*` 接缝包（由宿主部署提供）。独立的
+`dist/blue.js` 使用精确版本 `@dsh-blue/blue-api@0.1.2-alpha.1` 完成 manifest
+解析和准入，不把 Blue API 复制进插件包。
 
 ## 架构
 
 ```
 src/
 ├── index.ts        # AcpCompactionEngine（CompactionEngine 后端）+ 接线
+├── blue.ts         # capability-free Blue canonical 入口
 ├── messages.ts     # M1: 会话事件 ↔ acp-kernel CoreMessage 投影
 ├── state.ts        # M2: 每会话内核状态
 ├── region.ts       # M5: 持久化区域事务 + 日志重建块账本

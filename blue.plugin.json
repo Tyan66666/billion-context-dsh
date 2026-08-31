@@ -1,0 +1,16 @@
+{
+  "$schema": "https://dsh-blue.dev/schema/blue.plugin.v1.schema.json",
+  "schemaVersion": 1,
+  "id": "billion-context-dsh",
+  "entry": "./blue",
+  "api": "^1.0.0-beta.1",
+  "compatibility": {
+    "blue": ">=0.1.2-alpha.1 <0.1.2",
+    "harness": "0.1.2-alpha.2",
+    "node": "^22.19.0 || >=24.0.0"
+  },
+  "capabilities": {
+    "required": [],
+    "optional": []
+  }
+}

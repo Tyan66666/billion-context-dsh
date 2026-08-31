@@ -11,7 +11,7 @@ mkdir -p ~/.dsh/profiles/web/node_modules
 ln -s /Users/yintianan/GitHub/billion-context-dsh ~/.dsh/profiles/web/node_modules/billion-context-dsh
 ```
 
-依赖说明：`dist/index.js` 内联了 acp-kernel，运行时只外链 `@deepseek-ai/dsh-compaction` 与 `@deepseek-ai/cordis`，二者由项目 `devDependencies` 提供（`billion-context-dsh/node_modules` 已在解析链上）。`@deepseek-ai/dsh-compaction` 的 **peer 范围**为 `^0.1.0-rc.6 || ^0.1.1-rc.1`，同时覆盖 `0.1.0-rc.x` 与 `0.1.1-rc.x` 两条 rc 线（DSH 0.1.1-rc.x 及以后）。范围必须写成并集：node-semver 的预发布匹配要求 range 中带与候选相同 `[major, minor, patch]` 元组的比较器，单一 `^0.1.0-rc.6` 匹配不了 `0.1.1-rc.x`（issue #68）。
+依赖说明：`dist/index.js` 内联了 acp-kernel，运行时只外链 `@deepseek-ai/dsh-compaction` 与 `@deepseek-ai/cordis`，二者由宿主提供。`dist/blue.js` 另依赖精确版本 `@dsh-blue/blue-api@0.1.2-alpha.1`；该 API 要求宿主提供 `@deepseek-ai/cordis@^4.0.2`。`@deepseek-ai/dsh-compaction` 的 **peer 范围**为 `^0.1.0-rc.6 || ^0.1.1-rc.1 || ^0.1.2-alpha.2`：前两项保留已有 RC 支持，最后一项增加本次检查的 Harness alpha seam。Blue canonical 验证只覆盖 Blue `0.1.2-alpha.1` + Harness `0.1.2-alpha.2`；此前 issue 中的 RC 组合不在这次验证范围内。
 
 ### 方式 B：打包安装（发布前验证）
 
@@ -26,7 +26,7 @@ npm install --prefix ~/.dsh/profiles/web ./billion-context-dsh-0.2.1.tgz
 
 包已声明 `dsh.bundle` manifest（`package.json` 的 `dsh.bundle.patch` → 仓库根的
 [../cordis.patch.yml](../cordis.patch.yml)）。DSH 的插件机制（`dsh plugin` 命令与
-插件商店走同一条路径）安装后会把该补丁**自动挂进 profile 的层栈**，补丁包含两行：
+插件商店走同一条路径）安装后会把该补丁**自动挂进 profile 的层栈**，补丁包含三个组合项：
 
 ```yaml
 - id: compaction-basic   # 禁用 host 自动压缩后端，避免同一 realm 双 provider 冲突
@@ -34,6 +34,8 @@ npm install --prefix ~/.dsh/profiles/web ./billion-context-dsh-0.2.1.tgz
 - insert:                # 把 ACP 引擎挂到 host 平面 = 该 profile 全局生效
     - id: compaction-acp
       name: 'billion-context-dsh'
+    - id: billion-context-dsh-blue  # capability-free Blue canonical 入口
+      name: 'billion-context-dsh/blue'
 ```
 
 ```bash
@@ -44,6 +46,14 @@ dsh plugin --profile web add billion-context-dsh
 窗口自动探测默认全开，**无需手写任何组合行**。需要自定义 `config`（`modelContextLimit`
 / `prompts` / nudge 阈值）时，在 profile 的 `cordis.patch.yml` 里写一个**同 id**
 （`compaction-acp`）的行并附 `config:` 即可覆盖 bundle 默认行（见 §2 的例子）。
+
+Blue 入口只负责 canonical 发现和兼容准入：不提供 Blue 专用 UI，也不请求
+`session.read` 或 `session.projections.read`。宿主入口已把 `/acp` 注册到 Harness command
+registry；Blue 通过当前 session 的 Harness command bridge 列出并执行它，所以 canonical
+入口不需要为同一个命令申请 Blue-local `commands` capability。用户可直接执行 `/acp status`
+或使用四个模型工具。Billion Context 已在 Blue 市场以“适配中”状态收录；`blue.plugin.json` 不会自动
+把条目改为“已验证”。本适配发布后，作者还需向 `dsh-blue/marketplace` 提交 PR，更新
+自己的 registry 条目和中英文详情页，状态由 Blue 维护者复核验证证据后翻转。
 
 ## 2. 组合行
 
@@ -83,6 +93,9 @@ dsh plugin --profile web add billion-context-dsh
         #     normal: '上下文使用率 {pct}%。这是建议而非命令——由你决定是否压缩。'
         #   tools:
         #     acpStatus: '报告 ACP 块账本：压缩块数、回收 token、当前上下文压力。'
+    # 纯 npm 安装到 Blue profile 时再加；普通 DSH profile 可省略。
+    - id: billion-context-dsh-blue
+      name: 'billion-context-dsh/blue'
 ```
 
 作用：host 平面注册 `ctx.compaction` + 四个模型工具 + `/acp` 命令 + `agent/pre-step` nudge 监听，所有模式共享一份。
@@ -148,6 +161,7 @@ cp <deepseek-harness>/apps/cli/config/agent-presets/standard/{agent.cordis.yml,p
 | 5. 可搜索 | 调用 `search_context({ query })` | 命中被压缩块内信息 |
 | 6. nudge | 持续对话到出现可压缩堆积。增长路径：某层 pending ≥ 5 万 token 且较上次检测增长 ≥ 2.25 万 token（无百分比下限，中前期就可能触发）；保证线：使用率 ≥ 70%；紧急：≥ 85% | 注入消息提示压缩，带 `seq a..b` 范围表 |
 | 7. 持久性 | 重启后同一会话 | `acp_status` 仍能从日志重建块账本（block ledger 来自 `compaction/summary` 事件） |
+| 8. Blue 准入 | 在 Blue `0.1.2-alpha.1` + Harness `0.1.2-alpha.2` 的隔离 profile 安装 packed 包 | canonical manifest 被发现；declared/executed capability 都为空；Blue 命令栏直接执行 Harness `/acp status`，四个模型工具可用；卸载后 Blue 入口清理 |
 
 ## 5. 快速自检（不依赖真实模型）
 
@@ -156,13 +170,13 @@ cd /Users/yintianan/GitHub/billion-context-dsh
 npm run typecheck && npm test && npm run build
 ```
 
-162 个测试覆盖：seam 挂载、窗口探测、CJK 感知 token 估算、消息投影、压缩事务（事件序列 + surface 遮蔽）、日志重建账本、四工具端到端、nudge 注入/去重/紧急绕过、可配置提示词模板与校验、**影子价格宿主词汇端到端**（真实 TokenMeter + SessionProjectionRegistry 复现 issue #54：claim == 宿主 meter 价、投影 messageTokens 非负、/acp compress resolved 边界、prune 宿主定价）、**T2 蒸馏可用性**（issue #60：nudge tier seqs 首尾直接压成 tier-2 块端到端；每次压缩结果都报告 tier——含 tier 1，无静默降级）。
+测试套件覆盖：seam 挂载、窗口探测、CJK 感知 token 估算、消息投影、压缩事务（事件序列 + surface 遮蔽）、日志重建账本、四工具端到端、nudge 注入/去重/紧急绕过、可配置提示词模板与校验、Blue canonical manifest/组合行，以及**影子价格宿主词汇端到端**（真实 TokenMeter + SessionProjectionRegistry 复现 issue #54：claim == 宿主 meter 价、投影 messageTokens 非负、/acp compress resolved 边界、prune 宿主定价）、**T2 蒸馏可用性**（issue #60：nudge tier seqs 首尾直接压成 tier-2 块端到端；每次压缩结果都报告 tier——含 tier 1，无静默降级）。
 
 ## 6. 回滚
 
 ```bash
 rm ~/.dsh/profiles/web/node_modules/billion-context-dsh   # 或对应 tarball 安装
-# 从 cordis.patch.yml 删除 compaction-acp 插入行；若按 2a 全局方案装的，
+# 从 cordis.patch.yml 删除 compaction-acp 与 billion-context-dsh-blue 插入行；若按 2a 全局方案装的，
 # 还要删除对 compaction-basic 的 disabled: true（恢复默认自动压缩）。
 # 注意：dsh 0.1.0-rc.6+ 上 bundle 自带该 disabled: true，如未显式添加则无需删除。
 # 视热加载/重启策略生效。
