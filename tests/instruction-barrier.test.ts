@@ -31,6 +31,7 @@ import { createCore, type CompressionCore } from 'acp-kernel'
 import { Session } from '@deepseek-ai/dsh-session'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { classifySurfaceEvent, isRealUserTurn } from '../src/messages.ts'
+import { acpCommand } from '../src/commands.ts'
 import { buildCompressibleSeqRanges, newestInstructionSeqsOf, guardedSurfaceSeqsOf } from '../src/region.ts'
 import { makeTools, currentInstructionRowsInSpan, protectedRowRejectionNote, type ToolEnvironment } from '../src/tools.ts'
 import { AcpStateStore } from '../src/state.ts'
@@ -287,4 +288,50 @@ test('PR1: handleCompress REJECTS a manual range covering a current instruction 
     }],
   } as never, exec2)
   assert.doesNotMatch((result2 as { text: string }).text, /rejected|current instruction row/, 'no instruction rows in span — no rejection')
+})
+
+test('PR1: /acp compress rejects a current instruction row exactly like the tool; stale copies still compress', async () => {
+  const env = makeEnv()
+  const session = Session.create('command-gate')
+  appendTurn(session, 1)
+  appendUser(session, longText('q0', 0))            // seq 1
+  appendAssistant(session, longText('a0', 1), 1, 1) // seq 2
+  appendUser(session, longText('q1', 2))            // seq 3
+  appendAssistant(session, longText('a1', 3), 1, 3) // seq 4
+  appendInstruction(session, '.\u0000AGENTS.md', 'v1') // seq 5 — STALE once v2 lands
+  appendInstruction(session, '.\u0000AGENTS.md', 'v2') // seq 6 — CURRENT
+  appendUser(session, longText('q2', 5))            // seq 7
+  appendAssistant(session, longText('a2', 7), 1, 7) // seq 8
+
+  const agent = {
+    id: session.id,
+    session,
+    options: { provider: 'test-provider', model: 'test-model' },
+    ctx: { tokenMeter: undefined },
+  } as never
+  const command = acpCommand(env)
+  const run = (rawInput: string) => command.handler({
+    commandId: 'cmd-test' as never,
+    agent,
+    rawInput,
+    signal: new AbortController().signal,
+  } as never) as Promise<{ kind: string; text: string }>
+
+  const summary = 'login flow, JWT access tokens with 15 minute expiry, refresh tokens in Redis with 30 day TTL, sliding-window rate limiting in src/auth/login.ts.'
+
+  // The human path is gated by the SAME arithmetic as the model tool: a span
+  // covering the CURRENT row (seq 6) is refused before anything durable lands.
+  const rejected = await run(`compress 1 7 ${summary}`)
+  assert.equal(rejected.kind, 'success')
+  assert.match(rejected.text, /rejected/)
+  assert.match(rejected.text, /seq 6/, 'the current row is named')
+  assert.ok(
+    !session.events.some((event) => String((event as { type?: string }).type).startsWith('compaction')),
+    'nothing durable landed — the human command cannot bypass the gate',
+  )
+
+  // A span covering only the STALE copy compresses normally.
+  const staleOnly = await run(`compress 1 5 ${summary}`)
+  assert.equal(staleOnly.kind, 'success')
+  assert.match(staleOnly.text, /Compressed seqs 1\.\.5/, 'a stale-copy span compresses normally')
 })
