@@ -25,6 +25,7 @@ import {
   blockRegistry,
   compactionIdsOfKernelBlocks,
   expandShadowedSeqs,
+  guardedSurfaceSeqsOf,
   rebuildBlockLedger,
   resolveSurfaceRange,
   runCompactionTransaction,
@@ -289,6 +290,26 @@ function validateContentItems(content: NonNullable<CompressArgs['content']>): vo
 }
 
 /** Resolve seq → kernel ref, then applyCompression and land the transaction. */
+/**
+ * Advisory lines for a landed compression that absorbed protected injection
+ * rows (issue #71 review F7, decision: warn — never reject). The range table
+ * never offers current instruction rows, but a hand-built compress range can
+ * still cover one; the compression itself is safe and self-healing (the host
+ * re-injects the current AGENTS.md copy on its next step), yet the model must
+ * see the rebound immediately instead of discovering the re-injected row
+ * later. Pure so tests can pin the wording; `guardedSurfaceSeqsOf` supplies
+ * the protected set.
+ */
+export function protectedRowAdvisories(guarded: ReadonlySet<number>, shadowed: readonly number[]): string[] {
+  const hits = shadowed.filter((seq) => guarded.has(seq))
+  if (hits.length === 0) return []
+  const preview = hits.slice(0, 4).join(', ')
+  const more = hits.length > 4 ? ` +${hits.length - 4} more` : ''
+  return [
+    `    ⚠ absorbs ${hits.length} current instruction row(s) (seq ${preview}${more}) — the host re-injects the current AGENTS.md copy on its next step, so those tokens come back once; avoid compressing current instruction rows unless intended`,
+  ]
+}
+
 async function handleCompress(env: ToolEnvironment, args: CompressArgs, exec: ToolRunContext): Promise<TextOutput> {
   const agent = requireAgent(exec)
   const session = agent.session
@@ -459,6 +480,11 @@ async function handleCompress(env: ToolEnvironment, args: CompressArgs, exec: To
 
   const lines: string[] = []
   let skippedRanges = 0
+  // Current instruction rows the landed blocks must be checked against
+  // (advisory rebound warning — see protectedRowAdvisories). Computed once
+  // before the transactions: the spans below were resolved against this
+  // surface, and no new injection rows appear mid-loop.
+  const guardedSeqs = guardedSurfaceSeqsOf(session)
   for (const range of ranges) {
     const key = `${range.startRef}::${range.endRef}`
     const block = blockByRangeKey.get(key)
@@ -512,6 +538,10 @@ async function handleCompress(env: ToolEnvironment, args: CompressArgs, exec: To
     lines.push(
       `  block ${compactionId.slice(0, 8)}: seqs ${start}..${end}, ${shadowed.length} messages shadowed${tierLabel}${note}`,
     )
+    // F7 decision (warn, never reject): if this span swallowed a current
+    // instruction row, tell the model NOW that the host will re-inject it —
+    // not after the model wonders where the tokens went.
+    for (const advisory of protectedRowAdvisories(guardedSeqs, shadowed)) lines.push(advisory)
   }
 
   const summaryLine = `Compressed ${applied.result.blocksCreated} block(s), ~${applied.result.tokensCompressed} tokens reclaimed.`
