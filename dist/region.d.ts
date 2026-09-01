@@ -196,11 +196,45 @@ export declare function openToolCallIds(session: Session): Set<string>;
  */
 export declare function deferCompressPairHide(session: Session, callId: string, resultSeq: number, onError?: (error: unknown) => void): void;
 /**
+ * Newest AGENTS.md instruction row per scope (source file). The host
+ * re-injects a file's instructions when its CURRENT copy is absent from the
+ * surface (deepseek-harness packages/context/agent-instructions presence
+ * gate, index.ts:137/:163 — presence+identity, not payload diff), so
+ * compressing the newest row of a scope makes that file come straight back,
+ * while compressing a STALE copy of the same file is silent. Live-audited
+ * shape (session-f25e4fad): EVERY injection row — baseline and worktree —
+ * carries `source.changes[].scope` = `"<dir>\u0000<file>"` (root
+ * `.\u0000AGENTS.md`, worktree `worktrees/<name>\u0000AGENTS.md`), which is
+ * stable across config tweaks unlike `baselineIdentity`. Tail-scan the log,
+ * group by scope, keep the last seq of each group. O(events), mirrors
+ * indexWatermarkOf. Rows without `changes[]` (legacy shapes) get their own
+ * group so they can never be treated as superseded.
+ */
+export declare function newestInstructionSeqsOf(session: Session): Set<number>;
+/**
+ * Surface seqs a compression should think twice about absorbing — the
+ * ADVISORY twin of `buildCompressibleSeqRanges`'s protection. The range table
+ * never OFFERS these rows, but nothing stops a hand-built compress range from
+ * covering them, so `handleCompress` checks the landed span against this set
+ * and appends an advisory line when it does (F7 decision: warn, don't
+ * reject — the compression is safe and self-healing, a swallowed current
+ * instruction copy bounces back exactly once). Deliberately NARROW (issue #71
+ * review F4): only CURRENT agent-instructions rows — the audited loop driver.
+ * Engine-authored metadata rows (nudge echo, compress-pair stub) stay
+ * foldable like main, and skill-catalog/policy rows are not warned on.
+ */
+export declare function guardedSurfaceSeqsOf(session: Session): Set<number>;
+/**
  * Compute compressible spans directly from the surface — independent of the
  * kernel's ref map, which can drift after surface replacements in long
  * sessions and hide large tool results from the nudge range table. Skips the
- * recent protected tail, the last user message, and compaction checkpoints;
- * edges are then balanced through resolveSurfaceRange. Ranges are ordered
+ * recent protected tail (last REAL user turn — injected rows never win it,
+ * see isRealUserTurn), the newest AGENTS.md row of every scope, compaction
+ * checkpoints, and ALL host instruction/policy rows (they are barriers that
+ * split segments — compressing a current instruction row makes the host
+ * re-inject it, the loop this PR fixes). Engine-authored metadata rows (nudge
+ * echo, compress-pair stub) fold into the adjacent real segment like main.
+ * Edges are then balanced through resolveSurfaceRange. Ranges are ordered
  * oldest-first (stable across turns — matches the kernel's `oldest first`).
  * UPSTREAM: this self-computation is a labeled workaround for kernel
  * ref-map drift after surface replacements (AGENTS.md rule 11) — drop it and

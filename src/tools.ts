@@ -25,6 +25,7 @@ import {
   blockRegistry,
   compactionIdsOfKernelBlocks,
   expandShadowedSeqs,
+  guardedSurfaceSeqsOf,
   rebuildBlockLedger,
   resolveSurfaceRange,
   runCompactionTransaction,
@@ -288,7 +289,40 @@ function validateContentItems(content: NonNullable<CompressArgs['content']>): vo
   if (violations.length > 0) throw new ToolArgsError(violations)
 }
 
-/** Resolve seq → kernel ref, then applyCompression and land the transaction. */
+/**
+ * Pure gate helpers for the compress tool's CURRENT-instruction-row rejection.
+ *
+ * Decision history (issue #71 review): the first draft only WARNED when a
+ * manual compress range swallowed a current injected row (F7), because the
+ * compression is safe and self-healing. The owner reversed that during PR1
+ * review: compressing a CURRENT row has NO legitimate outcome — the host
+ * re-injects the newest AGENTS.md copy unconditionally the moment it leaves
+ * the surface (presence gate, deepseek-harness
+ * packages/context/agent-instructions/src/index.ts:137/:163), so the tokens
+ * come straight back and the call is pure waste — and a hard reject keeps the
+ * manual path consistent with the system-side GC's iron rule (PR2: never
+ * clear a group's newest row). STALE copies stay compressible: removing them
+ * while the newest stays visible is the actual cleanup and triggers no
+ * re-injection. The range table (buildCompressibleSeqRanges) never offers
+ * these rows, so the gate only fires on hand-built ranges.
+ *
+ * `currentInstructionRowsInSpan` is the overlap probe over the RESOLVED span
+ * (shrink-then-expand may move edges, so the requested span is not enough);
+ * `protectedRowRejectionNote` renders the rejection the model sees — it must
+ * name the seqs and point at the stale-copy alternative so the model can
+ * re-cut instead of retrying the same call. `guardedSurfaceSeqsOf` supplies
+ * the protected set.
+ */
+export function currentInstructionRowsInSpan(guarded: ReadonlySet<number>, start: number, end: number): number[] {
+  return [...guarded].filter((seq) => seq >= start && seq <= end).sort((a, b) => a - b)
+}
+
+export function protectedRowRejectionNote(start: number, end: number, hits: readonly number[]): string {
+  const preview = hits.slice(0, 4).join(', ')
+  const more = hits.length > 4 ? ` +${hits.length - 4} more` : ''
+  return `  seqs ${start}..${end} rejected — the span covers ${hits.length} CURRENT injected instruction row(s) (seq ${preview}${more}); the host re-injects the newest AGENTS.md copy the moment it leaves the surface, so compressing it reclaims nothing — shrink the range to exclude those seq(s) (older/stale copies of the same file are fine to compress)`
+}
+
 async function handleCompress(env: ToolEnvironment, args: CompressArgs, exec: ToolRunContext): Promise<TextOutput> {
   const agent = requireAgent(exec)
   const session = agent.session
@@ -348,6 +382,14 @@ async function handleCompress(env: ToolEnvironment, args: CompressArgs, exec: To
   // Ranges whose whole span was already shadowed by earlier compressions.
   // They land as advisory warnings, never as errors or phantom blocks.
   const alreadyCompressedNotes: string[] = []
+  // Ranges rejected because they cover a CURRENT injected instruction row —
+  // hard reject before the kernel apply (supersedes the F7 warn-only draft,
+  // see protectedRowRejectionNote): the kernel never sees these ranges, so no
+  // phantom block can exist. Computed once here: the surface is stable from
+  // the orphan strip onward, and the deferred compress-pair hide only touches
+  // tool events, never instruction rows.
+  const rejectedNotes: string[] = []
+  const guardedSeqs = guardedSurfaceSeqsOf(session)
   for (const range of args.content!) {
     const startSeq = parseBoundary(range.startSeq, byRef)
     const endSeq = parseBoundary(range.endSeq, byRef)
@@ -374,6 +416,16 @@ async function handleCompress(env: ToolEnvironment, args: CompressArgs, exec: To
       }
       throw error
     }
+    // Hard reject BEFORE the kernel: a span covering a CURRENT injected
+    // instruction row has no legitimate outcome — the host re-injects the
+    // newest copy the moment it leaves the surface (compress → re-inject loop
+    // fuel, issue #71). Stale copies pass: removing them while the newest
+    // stays visible is the real cleanup and triggers no re-injection.
+    const instructionHits = currentInstructionRowsInSpan(guardedSeqs, resolved.start, resolved.end)
+    if (instructionHits.length > 0) {
+      rejectedNotes.push(protectedRowRejectionNote(resolved.start, resolved.end, instructionHits))
+      continue
+    }
     // An edge on an ACTIVE block's checkpoint summary node resolves to the
     // kernel block ref (bN) — the boundary that makes applyCompression distill
     // (tier 2/3) instead of folding the summary as a plain message.
@@ -398,11 +450,13 @@ async function handleCompress(env: ToolEnvironment, args: CompressArgs, exec: To
     })
   }
 
-  // Nothing to do: every requested range was already compressed.
+  // Nothing to do: every requested range was already compressed or rejected.
   if (ranges.length === 0) {
-    const text = ['Compressed 0 block(s), ~0 tokens reclaimed.', ...alreadyCompressedNotes]
+    const text = ['Compressed 0 block(s), ~0 tokens reclaimed.', ...alreadyCompressedNotes, ...rejectedNotes]
     if (alreadyCompressedNotes.length > 0) {
       text.push('  (all requested ranges were already compressed — decompress a block to recover its originals)')
+    } else if (rejectedNotes.length > 0) {
+      text.push('  (nothing compressed — every range covered a current injected instruction row; see the rejections above)')
     }
     return { text: text.join('\n') }
   }
@@ -515,9 +569,15 @@ async function handleCompress(env: ToolEnvironment, args: CompressArgs, exec: To
   }
 
   const summaryLine = `Compressed ${applied.result.blocksCreated} block(s), ~${applied.result.tokensCompressed} tokens reclaimed.`
-  const totalSkipped = skippedRanges + alreadyCompressedNotes.length
+  const totalSkipped = skippedRanges + alreadyCompressedNotes.length + rejectedNotes.length
   const failedLines = applied.result.errors.map((error) => `  ${error}`)
-  const warningLines = [...freeWarnings.map((warning) => `  ${warning}`), ...failedLines, ...alreadyCompressedNotes, ...lines]
+  const warningLines = [
+    ...freeWarnings.map((warning) => `  ${warning}`),
+    ...failedLines,
+    ...alreadyCompressedNotes,
+    ...rejectedNotes,
+    ...lines,
+  ]
   const footer = totalSkipped > 0
     ? `  (${totalSkipped} range(s) skipped or failed — see above)`
     : ''

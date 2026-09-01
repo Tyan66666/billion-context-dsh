@@ -6,13 +6,14 @@
 
 import type { CommandDefinition } from '@deepseek-ai/dsh-commands'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import { resolveEffectiveWindow, type ToolEnvironment } from './tools.ts'
+import { currentInstructionRowsInSpan, protectedRowRejectionNote, resolveEffectiveWindow, type ToolEnvironment } from './tools.ts'
 import { resolveTokenCount } from './nudge.ts'
 import { kernelConfigFor } from './config.ts'
 import {
   blockIdOfKernelRef,
   blockRefForSummarySeq,
   expandShadowedSeqs,
+  guardedSurfaceSeqsOf,
   rebuildBlockLedger,
   resolveSurfaceRange,
   runCompactionTransaction,
@@ -90,6 +91,16 @@ function compressText(env: ToolEnvironment, agent: Agent, args: string[]): strin
   // rather than silently folding the summary as a message.
   if (blockRefForSummarySeq(session, start) !== null || blockRefForSummarySeq(session, end) !== null) {
     return '/acp compress: the range touches a compressed block summary node — distill it with the compress tool (seq-based batch), not /acp compress'
+  }
+  // The same hard reject as the compress tool (src/tools.ts): a CURRENT
+  // injected instruction row cannot be legitimately compressed by ANY caller,
+  // human or model — the host re-injects the newest AGENTS.md copy
+  // unconditionally, so the tokens come straight back and nothing is
+  // reclaimed. Explicit intent does not override that arithmetic; older
+  // copies of the same file stay compressible.
+  const instructionHits = currentInstructionRowsInSpan(guardedSurfaceSeqsOf(session), start, end)
+  if (instructionHits.length > 0) {
+    return protectedRowRejectionNote(start, end, instructionHits)
   }
   // The RESOLVED edges define the claim span, never the raw inputs:
   // resolveSurfaceRange may adjust them to a balanced cut, and a raw edge

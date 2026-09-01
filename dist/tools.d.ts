@@ -40,5 +40,31 @@ export interface ToolEnvironment extends KernelConfigInput {
  * for pressure decisions even when auto-detection had found a larger window).
  */
 export declare function resolveEffectiveWindow(env: ToolEnvironment, agent: Agent): Promise<AcpWindow>;
+/**
+ * Pure gate helpers for the compress tool's CURRENT-instruction-row rejection.
+ *
+ * Decision history (issue #71 review): the first draft only WARNED when a
+ * manual compress range swallowed a current injected row (F7), because the
+ * compression is safe and self-healing. The owner reversed that during PR1
+ * review: compressing a CURRENT row has NO legitimate outcome — the host
+ * re-injects the newest AGENTS.md copy unconditionally the moment it leaves
+ * the surface (presence gate, deepseek-harness
+ * packages/context/agent-instructions/src/index.ts:137/:163), so the tokens
+ * come straight back and the call is pure waste — and a hard reject keeps the
+ * manual path consistent with the system-side GC's iron rule (PR2: never
+ * clear a group's newest row). STALE copies stay compressible: removing them
+ * while the newest stays visible is the actual cleanup and triggers no
+ * re-injection. The range table (buildCompressibleSeqRanges) never offers
+ * these rows, so the gate only fires on hand-built ranges.
+ *
+ * `currentInstructionRowsInSpan` is the overlap probe over the RESOLVED span
+ * (shrink-then-expand may move edges, so the requested span is not enough);
+ * `protectedRowRejectionNote` renders the rejection the model sees — it must
+ * name the seqs and point at the stale-copy alternative so the model can
+ * re-cut instead of retrying the same call. `guardedSurfaceSeqsOf` supplies
+ * the protected set.
+ */
+export declare function currentInstructionRowsInSpan(guarded: ReadonlySet<number>, start: number, end: number): number[];
+export declare function protectedRowRejectionNote(start: number, end: number, hits: readonly number[]): string;
 /** Build the four ACP model tools bound to one engine. */
 export declare function makeTools(env: ToolEnvironment): ToolDefinition[];

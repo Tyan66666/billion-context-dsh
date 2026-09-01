@@ -2774,6 +2774,49 @@ function extractEventText(event) {
       return "";
   }
 }
+function isCheckpointNode(event) {
+  if (event.type !== "user/message") return false;
+  const source = event.data.source;
+  return source?.plugin === "compact";
+}
+var METADATA_PLUGINS = /* @__PURE__ */ new Set([
+  "acp-nudge",
+  // nudge echo (src/nudge.ts)
+  "billion-context-dsh"
+  // compress-pair replacement stub (src/region.ts)
+]);
+var HOST_INSTRUCTION_KINDS = /* @__PURE__ */ new Set([
+  "agent-instructions",
+  // AGENTS.md injection (hook shape: {kind:'agent-instructions', form:'instructions'})
+  "skill-catalog"
+  // skill catalog (form:'catalog')
+]);
+function isAgentInstructionsRow(event) {
+  if (event.type !== "user/message") return false;
+  const source = event.data.source;
+  if (!source) return false;
+  return source.kind === "agent-instructions" || source.kind === "plugin" && source.plugin === "agent-instructions";
+}
+function classifySurfaceEvent(event) {
+  if (isCheckpointNode(event)) return "checkpoint";
+  if (event.type !== "user/message") return "real";
+  const source = event.data.source;
+  if (!source) return "real";
+  const kind = source.kind;
+  if (kind === "user") return "real";
+  if (kind === "plugin") {
+    if (source.plugin !== void 0 && METADATA_PLUGINS.has(source.plugin)) return "metadata";
+    return "instruction";
+  }
+  if (kind !== void 0 && HOST_INSTRUCTION_KINDS.has(kind)) return "instruction";
+  return "real";
+}
+function isRealUserTurn(event) {
+  if (event.type !== "user/message") return false;
+  if (classifySurfaceEvent(event) !== "real") return false;
+  const kind = event.data.source?.kind;
+  return kind !== "subagent-report" && kind !== "subagent-settled";
+}
 
 // src/host-tokens.ts
 import { deriveEventMessage } from "@deepseek-ai/dsh-session";
@@ -3078,11 +3121,6 @@ function isToolEvent(event) {
   const content = event.data.message?.content;
   return Array.isArray(content) && content.some((block) => block?.type === "tool-call");
 }
-function isCheckpointNode(event) {
-  if (event.type !== "user/message") return false;
-  const source = event.data.source;
-  return source?.plugin === "compact";
-}
 function toolCallIdsOfEvent(event) {
   if (event.type !== "assistant/message") return [];
   const content = event.data.message?.content;
@@ -3266,6 +3304,32 @@ function deferCompressPairHide(session, callId, resultSeq, onError) {
     }
   });
 }
+function newestInstructionSeqsOf(session) {
+  const newest = /* @__PURE__ */ new Map();
+  for (let seq = 0; seq < session.events.length; seq += 1) {
+    const event = session.events[seq];
+    if (event === void 0 || !isAgentInstructionsRow(event)) continue;
+    const source = event.data.source;
+    const changes = Array.isArray(source?.changes) ? source.changes : [];
+    const scopes = changes.map((change) => typeof change?.scope === "string" ? change.scope : "").filter((scope) => scope.length > 0);
+    if (scopes.length === 0) {
+      newest.set(`row:${seq}`, seq);
+      continue;
+    }
+    for (const scope of scopes) newest.set(scope, seq);
+  }
+  return new Set(newest.values());
+}
+function guardedSurfaceSeqsOf(session) {
+  const guarded = /* @__PURE__ */ new Set();
+  const newestInstructions = newestInstructionSeqsOf(session);
+  for (const seq of session.surface.nodes) {
+    const event = session.events[seq];
+    if (event === void 0) continue;
+    if (isAgentInstructionsRow(event) && newestInstructions.has(seq)) guarded.add(seq);
+  }
+  return guarded;
+}
 function buildCompressibleSeqRanges(session, opts = {}) {
   stripOrphanedSurfaceToolMessages(session);
   const nodes = session.surface.nodes;
@@ -3276,11 +3340,12 @@ function buildCompressibleSeqRanges(session, opts = {}) {
   }
   for (let index = nodes.length - 1; index >= 0; index -= 1) {
     const event = session.events[nodes[index]];
-    if (event?.type === "user/message" && !isCheckpointNode(event)) {
+    if (event !== void 0 && isRealUserTurn(event)) {
       protectedSeqs.add(nodes[index]);
       break;
     }
   }
+  for (const seq of newestInstructionSeqsOf(session)) protectedSeqs.add(seq);
   const raw = [];
   let cur = null;
   const flush = () => {
@@ -3290,6 +3355,10 @@ function buildCompressibleSeqRanges(session, opts = {}) {
   for (const seq of nodes) {
     const event = session.events[seq];
     if (event === void 0 || protectedSeqs.has(seq) || isCheckpointNode(event)) {
+      flush();
+      continue;
+    }
+    if (classifySurfaceEvent(event) === "instruction") {
       flush();
       continue;
     }
@@ -3971,6 +4040,14 @@ function validateContentItems(content) {
   });
   if (violations.length > 0) throw new ToolArgsError(violations);
 }
+function currentInstructionRowsInSpan(guarded, start, end) {
+  return [...guarded].filter((seq) => seq >= start && seq <= end).sort((a, b) => a - b);
+}
+function protectedRowRejectionNote(start, end, hits) {
+  const preview = hits.slice(0, 4).join(", ");
+  const more = hits.length > 4 ? ` +${hits.length - 4} more` : "";
+  return `  seqs ${start}..${end} rejected \u2014 the span covers ${hits.length} CURRENT injected instruction row(s) (seq ${preview}${more}); the host re-injects the newest AGENTS.md copy the moment it leaves the surface, so compressing it reclaims nothing \u2014 shrink the range to exclude those seq(s) (older/stale copies of the same file are fine to compress)`;
+}
 async function handleCompress(env, args, exec) {
   const agent = requireAgent(exec);
   const session = agent.session;
@@ -3995,6 +4072,8 @@ async function handleCompress(env, args, exec) {
   validateContentItems(args.content);
   const ranges = [];
   const alreadyCompressedNotes = [];
+  const rejectedNotes = [];
+  const guardedSeqs = guardedSurfaceSeqsOf(session);
   for (const range of args.content) {
     const startSeq = parseBoundary2(range.startSeq, byRef);
     const endSeq = parseBoundary2(range.endSeq, byRef);
@@ -4011,6 +4090,11 @@ async function handleCompress(env, args, exec) {
         continue;
       }
       throw error;
+    }
+    const instructionHits = currentInstructionRowsInSpan(guardedSeqs, resolved.start, resolved.end);
+    if (instructionHits.length > 0) {
+      rejectedNotes.push(protectedRowRejectionNote(resolved.start, resolved.end, instructionHits));
+      continue;
     }
     const startBlockRef = blockRefForSummarySeq(session, resolved.start);
     const endBlockRef = blockRefForSummarySeq(session, resolved.end);
@@ -4032,9 +4116,11 @@ async function handleCompress(env, args, exec) {
     });
   }
   if (ranges.length === 0) {
-    const text = ["Compressed 0 block(s), ~0 tokens reclaimed.", ...alreadyCompressedNotes];
+    const text = ["Compressed 0 block(s), ~0 tokens reclaimed.", ...alreadyCompressedNotes, ...rejectedNotes];
     if (alreadyCompressedNotes.length > 0) {
       text.push("  (all requested ranges were already compressed \u2014 decompress a block to recover its originals)");
+    } else if (rejectedNotes.length > 0) {
+      text.push("  (nothing compressed \u2014 every range covered a current injected instruction row; see the rejections above)");
     }
     return { text: text.join("\n") };
   }
@@ -4113,9 +4199,15 @@ async function handleCompress(env, args, exec) {
     );
   }
   const summaryLine = `Compressed ${applied.result.blocksCreated} block(s), ~${applied.result.tokensCompressed} tokens reclaimed.`;
-  const totalSkipped = skippedRanges + alreadyCompressedNotes.length;
+  const totalSkipped = skippedRanges + alreadyCompressedNotes.length + rejectedNotes.length;
   const failedLines = applied.result.errors.map((error) => `  ${error}`);
-  const warningLines = [...freeWarnings.map((warning) => `  ${warning}`), ...failedLines, ...alreadyCompressedNotes, ...lines];
+  const warningLines = [
+    ...freeWarnings.map((warning) => `  ${warning}`),
+    ...failedLines,
+    ...alreadyCompressedNotes,
+    ...rejectedNotes,
+    ...lines
+  ];
   const footer = totalSkipped > 0 ? `  (${totalSkipped} range(s) skipped or failed \u2014 see above)` : "";
   return { text: `${summaryLine}
 ${[...warningLines, footer].filter((line) => line !== "").join("\n")}` };
@@ -4417,6 +4509,10 @@ function compressText(env, agent, args) {
   const { start, end } = resolveSurfaceRange(session, startSeq, endSeq);
   if (blockRefForSummarySeq(session, start) !== null || blockRefForSummarySeq(session, end) !== null) {
     return "/acp compress: the range touches a compressed block summary node \u2014 distill it with the compress tool (seq-based batch), not /acp compress";
+  }
+  const instructionHits = currentInstructionRowsInSpan(guardedSurfaceSeqsOf(session), start, end);
+  if (instructionHits.length > 0) {
+    return protectedRowRejectionNote(start, end, instructionHits);
   }
   const shadowed = shadowedSeqsOf(session, start, end);
   const shadowedTokens = shadowedTokensViaMeter(session, shadowed, agent.ctx);

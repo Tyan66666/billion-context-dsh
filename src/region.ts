@@ -21,7 +21,15 @@ import {
 } from '@deepseek-ai/dsh-compaction'
 import { createAssistantMessage, createUserMessage, type ContentBlock } from '@deepseek-ai/dsh-llm'
 import { defaultCountTokens } from 'acp-kernel'
-import { extractEventText, extractText, toolCallIdOfResultEvent } from './messages.ts'
+import {
+  classifySurfaceEvent,
+  extractEventText,
+  extractText,
+  isAgentInstructionsRow,
+  isCheckpointNode,
+  isRealUserTurn,
+  toolCallIdOfResultEvent,
+} from './messages.ts'
 import { hostPriceEvent } from './host-tokens.ts'
 
 /** One durable ACP block as rebuilt from the session log. */
@@ -471,13 +479,6 @@ function isToolEvent(event: SessionEvent): boolean {
   return Array.isArray(content) && content.some((block) => (block as { type?: unknown })?.type === 'tool-call')
 }
 
-/** Whether a surface user message is a compaction checkpoint node (already compressed). */
-function isCheckpointNode(event: SessionEvent): boolean {
-  if (event.type !== 'user/message') return false
-  const source = (event.data as { source?: { plugin?: string } }).source
-  return source?.plugin === 'compact'
-}
-
 /** Tool-call ids carried by one assistant surface message. */
 function toolCallIdsOfEvent(event: SessionEvent): string[] {
   if (event.type !== 'assistant/message') return []
@@ -758,11 +759,73 @@ export function deferCompressPairHide(
 }
 
 /**
+ * Newest AGENTS.md instruction row per scope (source file). The host
+ * re-injects a file's instructions when its CURRENT copy is absent from the
+ * surface (deepseek-harness packages/context/agent-instructions presence
+ * gate, index.ts:137/:163 — presence+identity, not payload diff), so
+ * compressing the newest row of a scope makes that file come straight back,
+ * while compressing a STALE copy of the same file is silent. Live-audited
+ * shape (session-f25e4fad): EVERY injection row — baseline and worktree —
+ * carries `source.changes[].scope` = `"<dir>\u0000<file>"` (root
+ * `.\u0000AGENTS.md`, worktree `worktrees/<name>\u0000AGENTS.md`), which is
+ * stable across config tweaks unlike `baselineIdentity`. Tail-scan the log,
+ * group by scope, keep the last seq of each group. O(events), mirrors
+ * indexWatermarkOf. Rows without `changes[]` (legacy shapes) get their own
+ * group so they can never be treated as superseded.
+ */
+export function newestInstructionSeqsOf(session: Session): Set<number> {
+  const newest = new Map<string, number>()
+  for (let seq = 0; seq < session.events.length; seq += 1) {
+    const event = session.events[seq]
+    if (event === undefined || !isAgentInstructionsRow(event)) continue
+    const source = (event.data as { source?: { changes?: Array<{ scope?: unknown }> } }).source
+    const changes = Array.isArray(source?.changes) ? source.changes : []
+    const scopes = changes
+      .map((change) => (typeof change?.scope === 'string' ? change.scope : ''))
+      .filter((scope) => scope.length > 0)
+    if (scopes.length === 0) {
+      newest.set(`row:${seq}`, seq)
+      continue
+    }
+    for (const scope of scopes) newest.set(scope, seq)
+  }
+  return new Set(newest.values())
+}
+
+/**
+ * Surface seqs a compression should think twice about absorbing — the
+ * ADVISORY twin of `buildCompressibleSeqRanges`'s protection. The range table
+ * never OFFERS these rows, but nothing stops a hand-built compress range from
+ * covering them, so `handleCompress` checks the landed span against this set
+ * and appends an advisory line when it does (F7 decision: warn, don't
+ * reject — the compression is safe and self-healing, a swallowed current
+ * instruction copy bounces back exactly once). Deliberately NARROW (issue #71
+ * review F4): only CURRENT agent-instructions rows — the audited loop driver.
+ * Engine-authored metadata rows (nudge echo, compress-pair stub) stay
+ * foldable like main, and skill-catalog/policy rows are not warned on.
+ */
+export function guardedSurfaceSeqsOf(session: Session): Set<number> {
+  const guarded = new Set<number>()
+  const newestInstructions = newestInstructionSeqsOf(session)
+  for (const seq of session.surface.nodes) {
+    const event = session.events[seq]
+    if (event === undefined) continue
+    if (isAgentInstructionsRow(event) && newestInstructions.has(seq)) guarded.add(seq)
+  }
+  return guarded
+}
+
+/**
  * Compute compressible spans directly from the surface — independent of the
  * kernel's ref map, which can drift after surface replacements in long
  * sessions and hide large tool results from the nudge range table. Skips the
- * recent protected tail, the last user message, and compaction checkpoints;
- * edges are then balanced through resolveSurfaceRange. Ranges are ordered
+ * recent protected tail (last REAL user turn — injected rows never win it,
+ * see isRealUserTurn), the newest AGENTS.md row of every scope, compaction
+ * checkpoints, and ALL host instruction/policy rows (they are barriers that
+ * split segments — compressing a current instruction row makes the host
+ * re-inject it, the loop this PR fixes). Engine-authored metadata rows (nudge
+ * echo, compress-pair stub) fold into the adjacent real segment like main.
+ * Edges are then balanced through resolveSurfaceRange. Ranges are ordered
  * oldest-first (stable across turns — matches the kernel's `oldest first`).
  * UPSTREAM: this self-computation is a labeled workaround for kernel
  * ref-map drift after surface replacements (AGENTS.md rule 11) — drop it and
@@ -786,11 +849,24 @@ export function buildCompressibleSeqRanges(
   }
   for (let index = nodes.length - 1; index >= 0; index -= 1) {
     const event = session.events[nodes[index]!]
-    if (event?.type === 'user/message' && !isCheckpointNode(event)) {
+    // Only a REAL user turn may win "last real user message" protection. The
+    // scan this replaces protected "the last non-checkpoint user/message",
+    // which on live sessions is frequently an injected AGENTS.md row (the
+    // host appends it in the same enter batch as the user input) — the
+    // actual last user message was left compressible while synthetic output
+    // sat safe (issue #71 PR1).
+    if (event !== undefined && isRealUserTurn(event)) {
       protectedSeqs.add(nodes[index]!)
       break
     }
   }
+  // The newest instruction row of every scope (source file) is never offered
+  // either: the host re-injects the current copy when it disappears from the
+  // surface, so folding it into a block starts the compress → re-inject →
+  // compress loop (belt-and-braces — the instruction barrier below already
+  // keeps every instruction row out of segments; the pin also documents intent
+  // for future range-solving integration).
+  for (const seq of newestInstructionSeqsOf(session)) protectedSeqs.add(seq)
   const raw: Array<{ start: number; end: number; count: number; tokens: number; toolCount: number }> = []
   let cur: { start: number; end: number; count: number; tokens: number; toolCount: number } | null = null
   const flush = (): void => {
@@ -800,6 +876,22 @@ export function buildCompressibleSeqRanges(
   for (const seq of nodes) {
     const event = session.events[seq]
     if (event === undefined || protectedSeqs.has(seq) || isCheckpointNode(event)) {
+      flush()
+      continue
+    }
+    // Host policy rows (AGENTS.md injections in both shapes, skill catalogs,
+    // unknown plugin rows — classifySurfaceEvent 'instruction') are BARRIERS:
+    // flush the open segment and skip the row entirely. Compressing the
+    // CURRENT copy of an instruction file makes the host re-inject it on its
+    // next step — the tokens come straight back, and a model that keeps
+    // compressing them loops forever (live-measured: 20 of 43 compressions in
+    // a long session re-triggered an injection within 7 events; observed
+    // again live in session-8c15904e, seq 8 absorbed by a compress → host
+    // re-injected at seq 53191). Stale copies stay barriers in this PR too;
+    // the system-side GC that removes them lands separately (instruction
+    // hygiene PR2). Engine-authored metadata rows (nudge echo, compress-pair
+    // stub) intentionally fall through and stay foldable like main.
+    if (classifySurfaceEvent(event) === 'instruction') {
       flush()
       continue
     }
