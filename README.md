@@ -199,8 +199,8 @@ DSH 的每个模型请求都派生自其 append-only 会话日志（*surface*）
 
 | 键 | 默认值 | 含义 |
 |---|---|---|
-| `modelContextLimit` | 自动探测（回退 `128000`） | 用于内核压力决策的上下文窗口；显式配置时优先且跳过探测 |
-| `autoModelContextLimit` | `true` | 从模型 API 自动探测真实窗口（`agent.ctx.llm.resolveModelInfo`）；探测失败回退默认值，`/acp` 命令展示窗口来源（模型工具 `acp_status` 不含窗口信息）。探测失败会在宿主日志与 `/acp` 面板提示（`restart to re-probe`）——失败结果同样被缓存，修复网关后需重启或显式设置 `modelContextLimit` 才会重新探测 |
+| `modelContextLimit` | 自动探测（回退 `128000`） | 用于内核压力决策的上下文窗口；显式配置时优先且跳过探测。省略时优先读宿主会话投影 `contextPressure.contextWindow`（按**当前真实路由**披露的新窗口，切模型会话自动跟随，无需重启），无投影时再从模型 API 探测 |
+| `autoModelContextLimit` | `true` | 从模型 API 自动探测真实窗口（`agent.ctx.llm.resolveModelInfo`）；探测失败回退默认值，`/acp` 命令展示窗口来源（模型工具 `acp_status` 不含窗口信息）。省略时窗口先读宿主投影（`windowFor` → `projectedContextWindow`，`src/window.ts`）再走探测；投影与探测在 `autoModelContextLimit: false` 时均跳过。探测失败会在宿主日志与 `/acp` 面板提示（`restart to re-probe`）——失败结果同样被缓存，修复网关后需重启或显式设置 `modelContextLimit` 才会重新探测 |
 | `nudgeMinContextLimitPct` | 内核默认 `0.45` | Nudge 窗口下界（用量占比）——仅作配置校验，增长路径的触发没有百分比下限——与 billion-context-pi 相同的默认值 |
 | `nudgeMaxContextLimitPct` | engine 默认 `0.70`（内核/pi 默认 `0.75`） | 过限线：超过此值则无论增长与否都触发 nudge——刻意低于宿主 compaction-basic 的 80% 自动压缩线，保证强制 nudge 先触发；显式配置优先（`coreOverrides.nudge` 同名键优先级更高，见下） |
 | `nudgeEmergencyThresholdPct` | engine 默认 `0.85`（内核/pi 默认 `0.95`） | 紧急 nudge（绕过每轮去重）——从 `0.95` 下调：95% 时模型已无操作空间且会被 80% 自动压缩线遮蔽；显式配置优先（`coreOverrides.nudge` 同名键优先级更高，见下） |
@@ -233,7 +233,7 @@ src/
 ├── nudge.ts        # M4: 内核压力决策 → 注入的建议式 nudge
 ├── system-prompt.ts# M4: 一次性 ACP 指引段（让 nudge 保持简短）
 ├── config.ts       # 内核配置组装（阈值 + coreOverrides）
-├── window.ts       # 自动上下文窗口探测（LLM 运行时探测，回退 128000）
+├── window.ts       # 自动上下文窗口探测（宿主投影优先，LLM 运行时探测回退，兜底 128000）
 └── commands.ts     # M4: /acp 斜杠命令
 ```
 

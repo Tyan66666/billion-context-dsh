@@ -43,7 +43,7 @@ import { acpCommand } from './commands.ts'
 import { buildNudge } from './nudge.ts'
 import { ACP_SYSTEM_PROMPT_ORDER } from './system-prompt.ts'
 import { renderSystemPrompt, resolvePrompts, type AcpPrompts, type ResolvedPrompts } from './prompts.ts'
-import { DEFAULT_CONTEXT_WINDOW, detectContextWindow, type AcpWindow } from './window.ts'
+import { DEFAULT_CONTEXT_WINDOW, detectContextWindow, projectedContextWindow, type AcpWindow } from './window.ts'
 import { deferCompressPairHide, stripOrphanedSurfaceToolMessages } from './region.ts'
 
 export { AcpStateStore } from './state.ts'
@@ -69,6 +69,7 @@ export { buildNudge, resolveTokenCount, type NudgeEnvironment, type NudgeOutcome
 export {
   DEFAULT_CONTEXT_WINDOW,
   detectContextWindow,
+  projectedContextWindow,
   windowSourceLabel,
   type AcpWindow,
 } from './window.ts'
@@ -96,12 +97,14 @@ export { eventsToCoreMessages, projectEvent, surfaceEventsOf, extractEventText }
 export interface AcpConfig {
   /**
    * The context window used for pressure decisions, in tokens. When omitted,
-   * `autoModelContextLimit` (default true) probes the model's real window via
+   * `autoModelContextLimit` (default true) resolves it automatically: the live
+   * host session projection (`contextPressure.contextWindow`) is preferred,
+   * then the model's real window is probed via
    * `agent.ctx.llm.resolveModelInfo(provider, model)`; an explicit value
-   * always wins and disables the probe.
+   * always wins and disables both.
    */
   readonly modelContextLimit?: number
-  /** Probe the model's real context window from the LLM runtime. Default true. */
+  /** Auto-resolve the real context window: host session projection first, then the LLM runtime probe. Default true. */
   readonly autoModelContextLimit: boolean
   /** Nudge window lower bound (usage fraction; validation only — the growth-driven trigger has no percentage floor). Kernel default 0.45 — same as billion-context-pi. */
   readonly nudgeMinContextLimitPct?: number
@@ -339,10 +342,14 @@ export class AcpCompactionEngine extends CompactionEngine {
 
   /**
    * Resolve the effective context window for an agent. An explicitly
-   * configured `modelContextLimit` always wins (no probe). Otherwise probe the
-   * model's real window via `agent.ctx.llm.resolveModelInfo` (cached per
-   * provider/model route, probe failures cached too) and fall back to
-   * DEFAULT_CONTEXT_WINDOW when auto-detection is disabled or unavailable.
+   * configured `modelContextLimit` always wins (no probe). Otherwise the live
+   * session projection (`contextPressure.contextWindow`) is preferred when it
+   * discloses one — it tracks the session's CURRENT route, so a mid-session
+   * model switch repairs itself without a restart or config (see
+   * projectedContextWindow). Falls back to probing the model's real window
+   * via `agent.ctx.llm.resolveModelInfo` (cached per provider/model route,
+   * probe failures cached too) and finally to DEFAULT_CONTEXT_WINDOW when
+   * auto-detection is disabled or unavailable.
    */
   async windowFor(agent: Agent): Promise<AcpWindow> {
     if (this.config.modelContextLimit !== undefined) {
@@ -351,6 +358,17 @@ export class AcpCompactionEngine extends CompactionEngine {
     const provider = agent.options.provider ?? ''
     const model = agent.options.model ?? ''
     const key = `${provider}\0${model}`
+    // Projection source first: it reflects the live route (agent.options is a
+    // stale snapshot after a model switch), and it is not cached here because
+    // the projection itself refreshes on every request — caching would freeze
+    // the old model's window for the whole process (the false-EMERGENCY trap).
+    // Only consulted when auto detection is enabled (same gate as the probe).
+    if (this.config.autoModelContextLimit) {
+      const projected = projectedContextWindow(agent)
+      if (projected !== null) {
+        return { limit: projected, source: 'projection', provider, model }
+      }
+    }
     const cached = this.windowCache.get(key)
     if (cached !== undefined) return cached
     let window: AcpWindow
