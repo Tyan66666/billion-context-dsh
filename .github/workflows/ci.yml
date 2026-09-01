@@ -36,3 +36,15 @@ jobs:
 
       - name: Build
         run: npm run build
+
+      # `dist/` is committed so git-source installs work without a build step
+      # (pnpm blocks dependency build scripts by default). Rebuild here and
+      # fail if the committed artifacts differ from what the current source
+      # produces — otherwise git installs would silently get stale code.
+      - name: Check committed dist matches the source
+        run: |
+          if [ -n "$(git status --porcelain -- dist)" ]; then
+            echo '::error::dist/ drifted from source — run `npm run build` and commit the fresh artifacts'
+            git status --short -- dist
+            exit 1
+          fi

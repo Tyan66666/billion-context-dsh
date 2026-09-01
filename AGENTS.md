@@ -132,9 +132,11 @@ Pre-flight (ALL must pass): `npm run typecheck && npm test && npm run build`.
 1. Bump version: `npm version <patch|minor|major> --no-git-tag-version` (bug fixes → patch).
 2. Update the `vX.Y.Z` references in `README.md`, `README.en.md`, `docs/README.md`, `docs/index.md` (Beta notice + Release links).
 3. `npm publish`.
-4. Commit `release vX.Y.Z` (package.json + package-lock.json + docs), push.
+4. Commit `release vX.Y.Z` (package.json + package-lock.json + docs + fresh `dist/`), push.
 5. `gh release create vX.Y.Z` with notes listing fixes + live verification data.
 6. GitHub Pages rebuilds automatically (workflow `pages.yml`).
+
+> **`dist/` is committed to the repository** (issue #92): git-source installs (`github:` spec — the form the plugin store shows) ship the repo verbatim, and pnpm ≥10/11 blocks dependency build scripts by default (`allowBuilds`), so the package must install with ZERO build steps and a runnable `dist/` present. Consequences: ① any PR that changes `src/` must rebuild and commit `dist/` — CI fails when the committed artifacts drift from source (`.github/workflows/ci.yml` "Check committed dist matches the source"); ② NEVER add a `prepare`/`preinstall`/`install`/`postinstall` script to package.json — pnpm gates a git-hosted package's `prepare` behind an `allowBuilds` key containing the exact commit hash ([pnpm#12367](https://github.com/pnpm/pnpm/issues/12367)), so its mere presence hard-fails git installs; the contract is guarded by `tests/package-artifacts.test.ts`. Rationale and rejected alternatives: docs/git-source-install-design.md.
 
 > PR merges are **human-only**. The Agent MUST NEVER merge any PR.
 >

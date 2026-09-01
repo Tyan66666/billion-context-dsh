@@ -45,6 +45,20 @@ dsh plugin --profile web add billion-context-dsh
 / `prompts` / nudge 阈值）时，在 profile 的 `cordis.patch.yml` 里写一个**同 id**
 （`compaction-acp`）的行并附 `config:` 即可覆盖 bundle 默认行（见 §2 的例子）。
 
+### 方式 D：git 源安装（`github:` 规格，商店条目展示的形态）
+
+预构建产物 `dist/` 已提交到仓库（与 npm 发布产物一致），所以从 git 源安装是纯文件
+安装——pnpm 11 默认拦截依赖构建脚本（`allowBuilds`），但本包 git 安装**零构建脚本**，
+不受影响：
+
+```bash
+dsh plugin --profile web add github:Tyan66666/billion-context-dsh#v0.2.16
+```
+
+建议带 `#<tag>`，拿到与对应 npm 版本完全一致的产物；不带 ref 则装默认分支的最新构建。
+只有 clone 仓库自行从源码构建才需要放行构建。为什么必须入库预构建产物、为什么不能加
+`prepare` 脚本，见 [git-source-install-design.md](git-source-install-design.md)（issue #92）。
+
 ## 2. 组合行
 
 手动挂载的两种范围，按你想要生效的范围选。**方式 C（bundle/商店安装）用户已默认

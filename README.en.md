@@ -86,6 +86,14 @@ npm install billion-context-dsh
 
 This only installs the package into your project/global store; it does **not** touch any profile — add a composition row as shown below or the engine never mounts.
 
+**Install from the git source (`github:` spec — the form the plugin store shows).** The prebuilt `dist/` artifacts are committed to this repository, so a git-source install also works out of the box — **no build step needed**, and pnpm 11's default build-script blocking (`allowBuilds`) never applies to this package:
+
+```bash
+dsh plugin --profile web add github:Tyan66666/billion-context-dsh#v0.2.16
+```
+
+Prefer a `#<tag>` ref to get artifacts identical to that npm release; without a ref you get the latest default-branch build. Only building the repo yourself (`npm run build`) requires approving build scripts. Background and trade-offs: [docs/git-source-install-design.md](docs/git-source-install-design.md) (issue #92).
+
 ## Scope & customization
 
 Two audiences: ① Path B (plain npm install) users, who must write a composition row; ② Path A users who want custom `config` (the bundle already ships sane defaults — override them with a SAME-ID row).

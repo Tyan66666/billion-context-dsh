@@ -88,6 +88,14 @@ npm install billion-context-dsh
 
 这只把包装进你的项目/全局，**不会**触碰任何 profile——请按下方「两种生效范围与自定义」手写组合行，引擎才会挂载。
 
+**git 源安装（`github:` 规格，插件商店展示的形态）。** 预构建产物 `dist/` 已提交到仓库，从 git 源安装同样开箱即用——**无需任何构建步骤**，pnpm 11 默认拦截构建脚本（`allowBuilds`）的机制对这个包不构成障碍：
+
+```bash
+dsh plugin --profile web add github:Tyan66666/billion-context-dsh#v0.2.16
+```
+
+建议带 `#<tag>` 安装，拿到与对应 npm 版本完全一致的产物；不带 ref 则装默认分支的最新构建。只有 clone 仓库自行从源码构建（`npm run build`）才需要放行构建。背景与方案取舍见 [docs/git-source-install-design.md](docs/git-source-install-design.md)（issue #92）。
+
 ## 两种生效范围与自定义
 
 本节服务于两类人：① 方式二（纯 npm 安装，必须手写组合行）；② 方式一用户想自定义 `config`（bundle 已有默认行为，只需用**同 id** 行覆盖）。
