@@ -24,6 +24,8 @@ The host entry already registers `/acp` in the Harness command registry. Blue pr
 
 `package.json.blue.manifest` points to `./blue.plugin.json`. The manifest selects the public `./blue` export, and both files are included in the packed package. `@dsh-blue/blue-api` is an exact runtime dependency; host-owned `@deepseek-ai/cordis@^4.0.2` remains a peer so the package cannot introduce a second Cordis service instance.
 
+The bundle row is installed in Blue and non-Blue profiles alike. The module must therefore parse on the package's Node 20 baseline before Cordis can wait for `bluePluginHost`. It reads and validates `blue.plugin.json` with `node:fs` inside `apply`, after the injected service is available; a module-scope JSON import attribute would fail during parsing on older Node 20 releases.
+
 The bundle patch mounts two independent entries:
 
 ```yaml
@@ -36,9 +38,20 @@ The bundle patch mounts two independent entries:
 
 The Blue entry injects `bluePluginHost`. In an ordinary DSH profile it waits for that service while the independent `compaction-acp` entry continues to run. A plain `npm install` user adds the second row only when the target profile is Blue.
 
+The identifiers belong to separate host and distribution namespaces:
+
+| Namespace | Value |
+| --- | --- |
+| npm package and canonical manifest id | `billion-context-dsh` |
+| public package export | `billion-context-dsh/blue` |
+| Cordis plugin name and bundle row id | `billion-context-dsh-blue` |
+| Website Marketplace slug | `billion-context` |
+
 ## Compatibility boundary
 
-The canonical manifest targets API `^1.0.0-beta.1`, Blue `>=0.1.2-alpha.1 <0.1.2`, and exactly Harness `0.1.2-alpha.2`. Acceptance must use Blue's packed validator and conformance runner against that exact Harness line.
+The canonical manifest targets API `^1.0.0-beta.1`, Blue `>=0.1.2-alpha.1 <0.1.2`, and exactly Harness `0.1.2-alpha.2`. The API caret is a protocol compatibility promise: compatible v1 API additions remain admissible. The product ranges record actual integration evidence, so Harness stays exact and Blue is capped before `0.1.2`. Acceptance must use Blue's packed validator and conformance runner against that exact Harness line.
+
+The Blue API requires `@deepseek-ai/cordis@^4.0.2`. A fresh install of an older Harness line can resolve its `^4.0.1` declaration to 4.0.2, but a profile whose manifest pins the exact `4.0.1` version must upgrade Cordis or the host and refresh its lockfile before installing this adapter.
 
 This result does not cover Blue `0.1.1-rc.3` with Harness `0.1.1-rc.2`, even though that older pair appeared in the original issue discussion. The ACP engine's peer range may retain separately verified RC seams; that broader install range is not a Blue conformance claim.
 
@@ -51,6 +64,7 @@ A valid canonical manifest proves package discovery shape and enables host admis
 Repository tests guard the manifest identity, empty capability lists, package discovery pointer, public export, packed file list, exact Blue API dependency, Harness peer tuple, and additive bundle row. The release gate additionally requires:
 
 1. project typecheck, tests, and build;
-2. Blue validator success against the packed package;
-3. packed conformance on Harness `0.1.2-alpha.2` with `declared == executed`, no skipped scenarios or failures, and cleanup success;
-4. installation into a dedicated non-production Blue profile, followed by direct `/acp status`, `acp_status` model-tool, and clean-exit smoke checks; the adapter must not duplicate the Harness command as a Blue-local contribution.
+2. Node 20 import of the built Blue entry in a non-Blue environment;
+3. Blue validator success against the packed package;
+4. packed conformance on Harness `0.1.2-alpha.2` with `declared == executed`, no skipped scenarios or failures, and cleanup success;
+5. installation into a dedicated non-production Blue profile, followed by direct `/acp status`, `acp_status` model-tool, and clean-exit smoke checks; the adapter must not duplicate the Harness command as a Blue-local contribution.

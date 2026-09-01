@@ -80,6 +80,11 @@ dsh plugin --profile web add billion-context-dsh
 > `[major, minor, patch]` 元组**的比较器（issue #68）。Blue canonical 适配另有更窄的
 > 验证范围：只验证 Blue `0.1.2-alpha.1` + Harness `0.1.2-alpha.2`；此前 issue
 > 中的 Blue `0.1.1-rc.3` + Harness `0.1.1-rc.2` 不属于这次验证结果。
+>
+> Blue 入口使用的 `@dsh-blue/blue-api@0.1.2-alpha.1` 要求
+> `@deepseek-ai/cordis@^4.0.2`。全新安装会从宿主的 `^4.0.1` 范围解析到兼容版本；
+> 如果旧 profile 的 `package.json` 把 Cordis **精确固定**在 `4.0.1`，请先升级
+> 到 `4.0.2` 或升级宿主并刷新 lockfile，再安装本插件。
 
 > **Blue 市场边界。** `blue.plugin.json` 让已安装的 Blue host 发现并准入入口，
 > 但不自动把市场条目变成“已验证”。[Billion Context](https://dsh-blue.dev/marketplace/billion-context/)

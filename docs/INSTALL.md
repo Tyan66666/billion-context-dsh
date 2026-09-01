@@ -11,7 +11,7 @@ mkdir -p ~/.dsh/profiles/web/node_modules
 ln -s /Users/yintianan/GitHub/billion-context-dsh ~/.dsh/profiles/web/node_modules/billion-context-dsh
 ```
 
-依赖说明：`dist/index.js` 内联了 acp-kernel，运行时只外链 `@deepseek-ai/dsh-compaction` 与 `@deepseek-ai/cordis`，二者由宿主提供。`dist/blue.js` 另依赖精确版本 `@dsh-blue/blue-api@0.1.2-alpha.1`；该 API 要求宿主提供 `@deepseek-ai/cordis@^4.0.2`。`@deepseek-ai/dsh-compaction` 的 **peer 范围**为 `^0.1.0-rc.6 || ^0.1.1-rc.1 || ^0.1.2-alpha.2`：前两项保留已有 RC 支持，最后一项增加本次检查的 Harness alpha seam。Blue canonical 验证只覆盖 Blue `0.1.2-alpha.1` + Harness `0.1.2-alpha.2`；此前 issue 中的 RC 组合不在这次验证范围内。
+依赖说明：`dist/index.js` 内联了 acp-kernel，运行时只外链 `@deepseek-ai/dsh-compaction` 与 `@deepseek-ai/cordis`，二者由宿主提供。`dist/blue.js` 另依赖精确版本 `@dsh-blue/blue-api@0.1.2-alpha.1`；该 API 要求宿主提供 `@deepseek-ai/cordis@^4.0.2`。全新安装会从旧宿主声明的 `^4.0.1` 范围解析到兼容版本；如果已有 profile 的 `package.json` 把 Cordis 精确固定在 `4.0.1`，先升级到 `4.0.2` 或升级宿主并刷新 lockfile，否则严格 peer resolution 会拒绝安装。`@deepseek-ai/dsh-compaction` 的 **peer 范围**为 `^0.1.0-rc.6 || ^0.1.1-rc.1 || ^0.1.2-alpha.2`：前两项保留已有 RC 支持，最后一项增加本次检查的 Harness alpha seam。Blue canonical 验证只覆盖 Blue `0.1.2-alpha.1` + Harness `0.1.2-alpha.2`；此前 issue 中的 RC 组合不在这次验证范围内。
 
 ### 方式 B：打包安装（发布前验证）
 

@@ -80,6 +80,12 @@ Restart `dsh` afterwards (bundle layers are composed at startup), open a new ses
 > `0.1.2-alpha.1` with Harness `0.1.2-alpha.2` is in scope. The Blue
 > `0.1.1-rc.3` with Harness `0.1.1-rc.2` combination discussed earlier in the
 > issue is not evidence for this adapter.
+>
+> The Blue entry's `@dsh-blue/blue-api@0.1.2-alpha.1` dependency requires
+> `@deepseek-ai/cordis@^4.0.2`. A fresh install resolves the host's `^4.0.1`
+> range to a compatible release. If an older profile pins Cordis to the exact
+> `4.0.1` version in `package.json`, upgrade it to `4.0.2` or upgrade the host
+> and refresh the lockfile before installing this plugin.
 
 > **Blue marketplace boundary.** `blue.plugin.json` lets an installed Blue host
 > discover and admit the entry, but it does not automatically make a marketplace

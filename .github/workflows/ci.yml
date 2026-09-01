@@ -36,3 +36,6 @@ jobs:
 
       - name: Build
         run: npm run build
+
+      - name: Smoke-test the Blue entry on Node.js 20
+        run: node --input-type=module --eval "const entry = await import('./dist/blue.js'); if (entry.name !== 'billion-context-dsh-blue') throw new Error('unexpected Blue entry')"

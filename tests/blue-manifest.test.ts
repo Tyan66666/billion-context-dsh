@@ -5,6 +5,8 @@ import { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { CommandRuntime } from '@deepseek-ai/dsh-commands'
 import { Session } from '@deepseek-ai/dsh-session'
+import { validateBluePluginManifestV1 } from '@dsh-blue/blue-api/protocol/v1'
+import { apply as applyBlueAdapter } from '../src/blue.ts'
 import AcpCompactionEngine from '../src/index.ts'
 
 interface PackageManifest {
@@ -25,6 +27,32 @@ interface BlueManifest {
 
 const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as PackageManifest
 const manifest = JSON.parse(readFileSync(new URL('../blue.plugin.json', import.meta.url), 'utf8')) as BlueManifest
+
+test('packaged Blue manifest passes the public protocol validator', () => {
+  const parsed = validateBluePluginManifestV1(manifest)
+  if (!parsed.ok) assert.fail(`Blue manifest validation failed: ${JSON.stringify(parsed.issues)}`)
+  assert.equal(parsed.value.id, 'billion-context-dsh')
+})
+
+test('Blue adapter reads and opens the packaged manifest when its host activates it', () => {
+  let openedId: string | undefined
+  const ctx = {
+    bluePluginHost: {
+      open(_consumer: unknown, openedManifest: BlueManifest) {
+        openedId = openedManifest.id
+        return { ok: true }
+      },
+    },
+    logger: {
+      warn(message: string) {
+        assert.fail(`Blue admission unexpectedly warned: ${message}`)
+      },
+    },
+  } as unknown as Parameters<typeof applyBlueAdapter>[0]
+
+  applyBlueAdapter(ctx)
+  assert.equal(openedId, 'billion-context-dsh')
+})
 
 test('Blue canonical identity targets only the verified alpha compatibility line', () => {
   assert.equal(manifest.id, 'billion-context-dsh')

@@ -10,7 +10,7 @@ import { defineConfig } from 'tsup'
 //
 // Blue's validator requires the public entry to retain a literal `const name`.
 // Bundling turns that declaration into `var`, so the small Blue entry is only
-// transpiled; its JSON import resolves to the manifest beside dist/ at runtime.
+// transpiled. It reads the manifest beside dist/ only when Blue activates it.
 export default defineConfig([
   {
     entry: ['src/index.ts'],
@@ -30,10 +30,5 @@ export default defineConfig([
     sourcemap: true,
     clean: false,
     bundle: false,
-    esbuildOptions(options) {
-      // The Blue manifest already requires Node 22.19+; keep the runtime JSON
-      // attribute even though the ACP entry still targets the Node 20 baseline.
-      options.supported = { 'import-attributes': true }
-    },
   },
 ])
