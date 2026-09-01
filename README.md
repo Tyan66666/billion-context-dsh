@@ -233,7 +233,7 @@ src/
 ├── nudge.ts        # M4: 内核压力决策 → 注入的建议式 nudge
 ├── system-prompt.ts# M4: 一次性 ACP 指引段（让 nudge 保持简短）
 ├── config.ts       # 内核配置组装（阈值 + coreOverrides）
-├── window.ts       # 自动上下文窗口探测（LLM 运行时探测，回退 128000）
+├── window.ts       # 自动上下文窗口探测（宿主投影优先，LLM 运行时探测回退，兜底 128000）
 └── commands.ts     # M4: /acp 斜杠命令
 ```
 

@@ -21,7 +21,12 @@ export interface AcpWindow {
   readonly limit: number
   /** Where the limit came from. */
   readonly source: 'explicit' | 'auto' | 'projection' | 'default'
-  /** Route the auto window was resolved for (auto source only). */
+  /**
+   * Route the window was resolved for. 'auto' reports the probed route;
+   * 'projection' returns also set it, mirroring agent.options — which can be
+   * stale after a mid-session model switch (inert today: windowSourceLabel
+   * never reads these fields for the projection source).
+   */
   readonly provider?: string
   readonly model?: string
   /**

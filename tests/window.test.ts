@@ -226,3 +226,29 @@ test('window: autoModelContextLimit false skips the probe', async () => {
   })
   assert.equal(calls, 0, 'no probe when auto detection is disabled')
 })
+
+test('window: autoModelContextLimit false skips the projection too (even when it discloses a window)', async () => {
+  // The projection sits behind the SAME auto-detection gate as the probe: with
+  // autoModelContextLimit disabled the effective window must be the default,
+  // never a projection value — otherwise the operator's explicit choice to
+  // disable auto-detection would still be overridden by live projections, and
+  // removing the gate in windowFor would pass every other test silently.
+  let calls = 0
+  const ctx = new Context()
+  ctx.provide('sessionProjections', {
+    snapshot: () => ({ values: { contextPressure: { contextWindow: 1000000 } } }),
+  })
+  ctx.provide('llm', {
+    resolveModelInfo: async () => { calls += 1; return { context: { contextWindow: 1000000 } } },
+  })
+  const engine = new AcpCompactionEngine(new Context(), { autoModelContextLimit: false })
+  const agent = fakeAgent(ctx)
+  const window = await engine.windowFor(agent)
+  assert.deepEqual(window, {
+    limit: DEFAULT_CONTEXT_WINDOW,
+    source: 'default',
+    provider: 'test-provider',
+    model: 'test-model',
+  })
+  assert.equal(calls, 0, 'the probe is skipped as well')
+})

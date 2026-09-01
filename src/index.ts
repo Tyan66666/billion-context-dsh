@@ -97,12 +97,14 @@ export { eventsToCoreMessages, projectEvent, surfaceEventsOf, extractEventText }
 export interface AcpConfig {
   /**
    * The context window used for pressure decisions, in tokens. When omitted,
-   * `autoModelContextLimit` (default true) probes the model's real window via
+   * `autoModelContextLimit` (default true) resolves it automatically: the live
+   * host session projection (`contextPressure.contextWindow`) is preferred,
+   * then the model's real window is probed via
    * `agent.ctx.llm.resolveModelInfo(provider, model)`; an explicit value
-   * always wins and disables the probe.
+   * always wins and disables both.
    */
   readonly modelContextLimit?: number
-  /** Probe the model's real context window from the LLM runtime. Default true. */
+  /** Auto-resolve the real context window: host session projection first, then the LLM runtime probe. Default true. */
   readonly autoModelContextLimit: boolean
   /** Nudge window lower bound (usage fraction; validation only — the growth-driven trigger has no percentage floor). Kernel default 0.45 — same as billion-context-pi. */
   readonly nudgeMinContextLimitPct?: number

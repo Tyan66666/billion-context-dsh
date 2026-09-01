@@ -32,7 +32,7 @@ src/
 ├── prompts.ts      # M4: configurable prompt templates + render/validate (config.prompts)
 ├── config.ts       # kernel config assembly (thresholds + coreOverrides)
 ├── host-tokens.ts  # shadow-price pricing: host-vocabulary mirror (estimateHostContent/estimateHostMessage/hostPriceEvent) + shadowedTokensViaMeter (ctx.tokenMeter.measure preferred, mirror fallback) — rule 12
-├── window.ts       # auto context-window detection (LLM runtime probe, fallback 128000)
+├── window.ts       # auto context-window detection (session projection first, LLM runtime probe fallback, default 128000)
 └── commands.ts     # M4: /acp slash command
 ```
 
