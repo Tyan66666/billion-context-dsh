@@ -41,6 +41,15 @@ jobs:
       # (pnpm blocks dependency build scripts by default). Rebuild here and
       # fail if the committed artifacts differ from what the current source
       # produces — otherwise git installs would silently get stale code.
+      #
+      # This comparison assumes deterministic builds across platforms: the
+      # committed dist/ is built locally (macOS) while CI rebuilds on
+      # ubuntu-latest. It holds because the toolchain is lockfile-pinned
+      # (typescript / tsup / esbuild, acp-kernel 0.0.29 inlined) and the
+      # sourcemap carries relative paths only. If a future toolchain change
+      # introduces platform-dependent bytes or CRLF output, this check will
+      # false-positive — treat that as a build-determinism regression to
+      # investigate, not as stale artifacts.
       - name: Check committed dist matches the source
         run: |
           if [ -n "$(git status --porcelain -- dist)" ]; then

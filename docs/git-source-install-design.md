@@ -1,7 +1,7 @@
 # 设计说明:git 源安装为什么必须带预构建产物(dist 入库)
 
 > 关联 issue:[#92 git 源安装失败:仓库未提供 dist 预构建产物,且 pnpm 默认拦截构建脚本(allowBuilds)](https://github.com/Tyan66666/billion-context-dsh/issues/92)
-> 状态:v0.2.16 之后引入,本文记录决策依据,防止未来被"清理"回去。
+> 状态:v0.2.17 起随 dist 入库生效,本文记录决策依据,防止未来被"清理"回去。
 
 ## 问题
 

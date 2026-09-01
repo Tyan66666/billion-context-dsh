@@ -52,7 +52,7 @@ dsh plugin --profile web add billion-context-dsh
 不受影响：
 
 ```bash
-dsh plugin --profile web add github:Tyan66666/billion-context-dsh#v0.2.16
+dsh plugin --profile web add github:Tyan66666/billion-context-dsh#v0.2.17
 ```
 
 建议带 `#<tag>`，拿到与对应 npm 版本完全一致的产物；不带 ref 则装默认分支的最新构建。
