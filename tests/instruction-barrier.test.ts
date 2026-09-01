@@ -14,8 +14,11 @@
  *   leaving the REAL last user message compressible (src/region.ts).
  * - newestInstructionSeqsOf groups rows per scope (source.changes[].scope =
  *   one file), so only the CURRENT copy of each file is guarded.
- * - protectedRowAdvisories warns when a manual compress swallows a current
- *   row (review F7 decision: warn, never reject).
+ * - handleCompress HARD-REJECTS a manual range that covers a current row
+ *   (supersedes the F7 warn-only draft — the owner reversed it during PR1
+ *   review: compressing a current row has no legitimate outcome, the host
+ *   re-injects unconditionally). Stale copies stay compressible — that is
+ *   the actual cleanup, and it triggers no re-injection.
  *
  * Fixtures use the REAL host injection shape audited from live session logs:
  * source { kind: 'agent-instructions', form: 'instructions', baseline,
@@ -29,7 +32,7 @@ import { Session } from '@deepseek-ai/dsh-session'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { classifySurfaceEvent, isRealUserTurn } from '../src/messages.ts'
 import { buildCompressibleSeqRanges, newestInstructionSeqsOf, guardedSurfaceSeqsOf } from '../src/region.ts'
-import { makeTools, protectedRowAdvisories, type ToolEnvironment } from '../src/tools.ts'
+import { makeTools, currentInstructionRowsInSpan, protectedRowRejectionNote, type ToolEnvironment } from '../src/tools.ts'
 import { AcpStateStore } from '../src/state.ts'
 import { appendTurn, appendUser, appendAssistant, appendToolCall, appendToolResult, buildTextSession, longText } from './helpers.ts'
 
@@ -191,21 +194,24 @@ test('PR1: guardedSurfaceSeqsOf keeps only CURRENT agent-instructions rows', () 
   assert.ok(!guarded.has(catalog), 'non-agent-instructions policy rows stay outside the advisory set (F4 narrowing)')
 })
 
-test('PR1: protectedRowAdvisories is empty without overlap and names the absorbed rows', () => {
+test('PR1: current-instruction-row gate — pure helpers pin the rejection', () => {
   const guarded = new Set([5, 6])
-  assert.deepEqual(protectedRowAdvisories(guarded, [1, 2, 3]), [], 'no overlap — no warning')
-  assert.deepEqual(protectedRowAdvisories(new Set(), [5]), [], 'empty guarded set — no warning')
+  assert.deepEqual(currentInstructionRowsInSpan(guarded, 1, 3), [], 'no overlap — no rejection')
+  assert.deepEqual(currentInstructionRowsInSpan(new Set(), 5, 9), [], 'empty guarded set — no rejection')
+  assert.deepEqual(currentInstructionRowsInSpan(guarded, 1, 5), [5], 'boundary-inclusive hit')
+  assert.deepEqual(currentInstructionRowsInSpan(new Set([7, 5]), 1, 9), [5, 7], 'hits come back sorted')
 
-  const one = protectedRowAdvisories(guarded, [1, 5])
-  assert.equal(one.length, 1)
-  assert.match(one[0]!, /absorbs 1 current instruction row\(s\) \(seq 5\)/)
-  assert.match(one[0]!, /re-injects the current AGENTS\.md copy/)
+  const one = protectedRowRejectionNote(1, 6, [5])
+  assert.match(one, /seqs 1\.\.6 rejected/)
+  assert.match(one, /1 CURRENT injected instruction row\(s\) \(seq 5\)/)
+  assert.match(one, /re-injects the newest AGENTS\.md copy/)
+  assert.match(one, /stale copies/, 'the model is pointed at the stale-copy escape')
 
-  const many = protectedRowAdvisories(new Set([5, 6, 7, 8, 9]), [5, 6, 7, 8, 9])
-  assert.match(many[0]!, /absorbs 5 current instruction row\(s\) \(seq 5, 6, 7, 8 \+1 more\)/)
+  const many = protectedRowRejectionNote(1, 9, [5, 6, 7, 8, 9])
+  assert.match(many, /5 CURRENT injected instruction row\(s\) \(seq 5, 6, 7, 8 \+1 more\)/)
 })
 
-test('PR1: handleCompress warns when a manual range swallows a current instruction row; silent otherwise', async () => {
+test('PR1: handleCompress REJECTS a manual range covering a current instruction row; stale copies still compress', async () => {
   const env = makeEnv()
   const session = Session.create('wiring')
   appendTurn(session, 1)
@@ -213,12 +219,13 @@ test('PR1: handleCompress warns when a manual range swallows a current instructi
   appendAssistant(session, longText('a0', 1), 1, 1) // seq 2
   appendUser(session, longText('q1', 2))            // seq 3
   appendAssistant(session, longText('a1', 3), 1, 3) // seq 4
-  appendInstruction(session, '.\u0000AGENTS.md', 'v1') // seq 5 — newest of its scope
-  appendUser(session, longText('q2', 4))            // seq 6 — range edge
-  appendUser(session, longText('q3', 5))
-  appendAssistant(session, longText('a3', 7), 1, 7)
-  appendUser(session, longText('q4', 8))
-  appendAssistant(session, longText('a4', 9), 1, 9)
+  appendInstruction(session, '.\u0000AGENTS.md', 'v1') // seq 5 — STALE once v2 lands
+  appendInstruction(session, '.\u0000AGENTS.md', 'v2') // seq 6 — CURRENT
+  appendUser(session, longText('q2', 5))            // seq 7
+  appendUser(session, longText('q3', 6))
+  appendAssistant(session, longText('a3', 8), 1, 8)
+  appendUser(session, longText('q4', 9))
+  appendAssistant(session, longText('a4', 10), 1, 10)
 
   const compress = makeTools(env).find((definition) => definition.name === 'compress')
   assert.ok(compress, 'compress tool registered')
@@ -229,18 +236,31 @@ test('PR1: handleCompress warns when a manual range swallows a current instructi
     ctx: { tokenMeter: undefined },
   } as never
   const exec = { callId: 'call-acp', name: 'compress', arguments: {}, signal: new AbortController().signal, agent } as never
-  const result = await compress.execute({
-    content: [{
-      startSeq: 1,
-      endSeq: 6,
-      summary: 'Authentication system: JWT access tokens with 15 minute expiry, refresh tokens in Redis with 30 day TTL, login flow in src/auth/login.ts with sliding-window rate limiting at 10 requests per minute.',
-    }],
-  } as never, exec)
-  const text = (result as { text: string }).text
-  assert.match(text, /Compressed 1 block/)
-  assert.match(text, /absorbs 1 current instruction row\(s\) \(seq 5\)/, 'the swallowed current row must be named in the result')
+  const summary = 'Authentication system: JWT access tokens with 15 minute expiry, refresh tokens in Redis with 30 day TTL, login flow in src/auth/login.ts with sliding-window rate limiting at 10 requests per minute.'
 
-  // Negative: a range with no instruction rows produces no warning.
+  // A span covering the CURRENT row (seq 6) is rejected before the kernel
+  // sees it: nothing lands, the seq is named, and the stale-copy escape is
+  // offered so the model can re-cut instead of retrying the same call.
+  const result = await compress.execute({ content: [{ startSeq: 1, endSeq: 7, summary }] } as never, exec)
+  const text = (result as { text: string }).text
+  assert.match(text, /Compressed 0 block/)
+  assert.match(text, /seqs \d+\.\.\d+ rejected/)
+  assert.match(text, /seq 6/, 'the current row is named')
+  assert.ok(
+    !session.events.some((event) => String((event as { type?: string }).type).startsWith('compaction')),
+    'nothing durable landed — the kernel never saw the rejected range',
+  )
+
+  // A span covering only the STALE copy of the same file (seq 5, superseded
+  // by v2 at seq 6) compresses normally: removing it while the newest stays
+  // visible is the real cleanup and triggers no re-injection.
+  const staleOnly = await compress.execute({ content: [{ startSeq: 1, endSeq: 5, summary }] } as never, exec)
+  const staleText = (staleOnly as { text: string }).text
+  assert.match(staleText, /Compressed 1 block/)
+  assert.doesNotMatch(staleText, /rejected|current instruction row/)
+
+  // Negative: a plain session without any instruction rows — the gate never
+  // fires (guards against false positives from the gate itself).
   const plain = Session.create('wiring-plain')
   appendTurn(plain, 1)
   for (let index = 0; index < 12; index += 1) {
@@ -263,8 +283,8 @@ test('PR1: handleCompress warns when a manual range swallows a current instructi
     content: [{
       startSeq: 1,
       endSeq: 5,
-      summary: 'Authentication system: JWT access tokens with 15 minute expiry, refresh tokens in Redis with 30 day TTL, login flow in src/auth/login.ts with sliding-window rate limiting at 10 requests per minute.',
+      summary,
     }],
   } as never, exec2)
-  assert.doesNotMatch((result2 as { text: string }).text, /current instruction row/, 'no instruction rows in span — no advisory')
+  assert.doesNotMatch((result2 as { text: string }).text, /rejected|current instruction row/, 'no instruction rows in span — no rejection')
 })
