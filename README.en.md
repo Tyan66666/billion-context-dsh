@@ -61,22 +61,41 @@ Click install in DSH's plugin store, or run:
 dsh plugin --profile web add billion-context-dsh
 ```
 
-The command installs the package and automatically layers this package's bundle patch ([cordis.patch.yml](cordis.patch.yml)) into the profile's composition. The patch does two things:
+The command installs the package and automatically layers this package's bundle patch ([cordis.patch.yml](cordis.patch.yml)) into the profile's composition. The patch does three things:
 
 - **Disables the host `compaction-basic`** — so two backends do not both register `ctx.compaction` in the same realm (modern DSH web bundles already ship this disable; the row is an idempotent safety net that holds on every supported DSH);
-- **Mounts the ACP engine at the HOST plane** — the four model tools (`compress` / `decompress` / `search_context` / `acp_status`), the `/acp` command, the advisory nudge, and the ACP guidance section reach **EVERY mode** of the profile (standard / code / minimal / cordis / custom presets). Window auto-detection and the tools/command/nudge defaults are all on — **no manual configuration needed**.
+- **Mounts the ACP engine at the HOST plane** — the four model tools (`compress` / `decompress` / `search_context` / `acp_status`), the `/acp` command, the advisory nudge, and the ACP guidance section reach **EVERY mode** of the profile (standard / code / minimal / cordis / custom presets). Window auto-detection and the tools/command/nudge defaults are all on — **no manual configuration needed**;
+- **Mounts a capability-free Blue entry** — Blue can discover and admit the plugin through its canonical manifest. This entry adds no Blue UI and requests no session data. The ACP host entry already registers `/acp` in the Harness command registry, which Blue lists and executes through its current-session Harness command bridge; the Blue-local `commands` capability is therefore unnecessary. On a non-Blue profile the row only waits for `bluePluginHost`; the ACP engine continues to run.
 
-Restart `dsh` afterwards (bundle layers are composed at startup), open a new session, and verify: ask the model to call `acp_status`, or run `/acp status`. Shipped presets (standard / code / cordis) keep their realm-local `compaction-basic` fallback (automatic pressure compression still runs there; the ACP tools and nudge coexist); minimal and presets without a compaction realm use this engine directly.
+Restart `dsh` afterwards (bundle layers are composed at startup), open a new session, and verify by asking the model to call `acp_status` or by running `/acp status` directly in Blue's command bar. Shipped presets (standard / code / cordis) keep their realm-local `compaction-basic` fallback (automatic pressure compression still runs there; the ACP tools and nudge coexist); minimal and presets without a compaction realm use this engine directly.
 
 > **DSH version compatibility.** The package declares the peer range
-> `^0.1.0-rc.6 || ^0.1.1-rc.1` for `@deepseek-ai/dsh-compaction`, covering both the
-> `0.1.0-rc.x` and `0.1.1-rc.x` release lines (including the current DSH release;
-> the seam's `src/` is unchanged from `0.1.0-rc.6` to `0.1.1-rc.2`, so the public
-> API is identical). The range is two `||` clauses **on purpose**: npm
+> `^0.1.0-rc.6 || ^0.1.1-rc.1 || ^0.1.2-alpha.2` for
+> `@deepseek-ai/dsh-compaction`. The first two clauses preserve existing
+> `0.1.0-rc.x` and `0.1.1-rc.x` support; the third admits only the inspected
+> Harness `0.1.2-alpha.2` seam. The separate clauses are **on purpose**: npm
 > (node-semver) only lets a prerelease version satisfy a range that carries a
-> comparator on the SAME `[major, minor, patch]` tuple as the candidate, so a lone
-> `^0.1.0-rc.6` can never match `0.1.1-rc.x` (issue #68) — older releases fail to
-> install on DSH 0.1.1-rc.x; upgrade to a release containing this fix.
+> comparator on the SAME `[major, minor, patch]` tuple as the candidate (issue
+> #68). The Blue canonical adapter has a narrower conformance claim: only Blue
+> `0.1.2-alpha.1` with Harness `0.1.2-alpha.2` is in scope. The Blue
+> `0.1.1-rc.3` with Harness `0.1.1-rc.2` combination discussed earlier in the
+> issue is not evidence for this adapter.
+>
+> The Blue entry's `@dsh-blue/blue-api@0.1.2-alpha.1` dependency requires
+> `@deepseek-ai/cordis@^4.0.2`. A fresh install resolves the host's `^4.0.1`
+> range to a compatible release. If an older profile pins Cordis to the exact
+> `4.0.1` version in `package.json`, upgrade it to `4.0.2` or upgrade the host
+> and refresh the lockfile before installing this plugin.
+
+> **Blue marketplace boundary.** `blue.plugin.json` lets an installed Blue host
+> discover and admit the entry, but it does not automatically make a marketplace
+> listing verified. [Billion Context](https://dsh-blue.dev/en/marketplace/billion-context/)
+> is already listed as Adapting. After this adapter is merged and released, the
+> author still needs to open a PR against
+> [`dsh-blue/marketplace`](https://github.com/dsh-blue/marketplace) to update the
+> plugin's `registry.json` entry and `content/billion-context/{zh,en}.md`
+> description. A Blue maintainer then changes the status to `verified` after
+> reviewing the conformance and real-profile evidence.
 
 **Path B: plain `npm install` (package only — a composition row is required).**
 
@@ -116,6 +135,9 @@ Two audiences: ① Path B (plain npm install) users, who must write a compositio
       name: 'billion-context-dsh'
       config:
         modelContextLimit: 128000   # optional; omit to auto-detect the model's real window (fallback 128000)
+    # Needed only by Blue profiles; ordinary DSH profiles may omit it.
+    - id: billion-context-dsh-blue
+      name: 'billion-context-dsh/blue'
 ```
 
 **(Optional) Custom prompt copy — `config.prompts`.** Every model-visible prompt (normal/emergency nudge opener, context breakdown, growth line, batch tip, tier line, range table, the ACP system-prompt section, the four tool descriptions) defaults to **acp-kernel's own `renderNudgeText`** — the efficiency note, context breakdown, compression rules, and batch tip all come from the kernel verbatim; only the range table is swapped for the surface-seq version (the kernel uses mNNNNN refs, and DSH has no `<acp>` tags; the seq range table likewise carries a `[tool X% | text Y%]` composition share and oldest-first ordering, matching the kernel's display semantics). Overriding any nudge slot switches to template rendering. Templates support named placeholders (e.g. `{pct}` and `{philosophy}` for nudges, `{surface}` for the range table) and are **validated at construction**: a misspelled placeholder fails engine startup (fail-fast) instead of leaking a literal `{pct}` into the model context:
@@ -219,13 +241,14 @@ npm test            # node --import tsx --test tests/*.test.ts
 npm run build       # tsup bundle (inlines acp-kernel) + .d.ts
 ```
 
-`dist/index.js` is self-contained except for the `@deepseek-ai/*` seam packages, which the hosting deployment provides.
+`dist/index.js` is self-contained except for the `@deepseek-ai/*` seam packages, which the hosting deployment provides. The separate `dist/blue.js` entry uses the exact `@dsh-blue/blue-api@0.1.2-alpha.1` package for manifest parsing and admission instead of copying the Blue API into this package.
 
 ## Architecture
 
 ```
 src/
 ├── index.ts        # AcpCompactionEngine (CompactionEngine backend) + wiring
+├── blue.ts         # capability-free Blue canonical entry
 ├── messages.ts     # M1: session events ↔ acp-kernel CoreMessage projection
 ├── state.ts        # M2: per-session kernel state
 ├── region.ts       # M5: durable region transaction + log-rebuilt block ledger

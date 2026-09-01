@@ -55,3 +55,11 @@ test('bundle patch mounts the engine globally with zero config', () => {
 		'the bundle row must carry NO config (users override with a same-id row)',
 	)
 })
+
+test('bundle patch mounts the capability-free Blue frontend entry', () => {
+	const insert = topLevelRows.find(({ line }) => line === '- insert:')
+	assert.ok(insert, 'patch must contain a top-level `- insert:` list')
+	const block = lines.slice(insert.index + 1).map((line) => line.trimStart())
+	assert.ok(block.includes('- id: billion-context-dsh-blue'), 'the insert list must mount the Blue frontend row')
+	assert.ok(block.includes("name: 'billion-context-dsh/blue'"), 'the Blue row must use the public `./blue` export')
+})

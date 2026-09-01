@@ -23,7 +23,7 @@ const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url),
 
 const peerRange = pkg.peerDependencies['@deepseek-ai/dsh-compaction']
 
-test('peer range accepts every published dsh-compaction rc line the seam shares', () => {
+test('peer range accepts every verified dsh-compaction line the seam shares', () => {
 	// Every version ever published on the 0.1.0 → 0.1.1 seam line must install.
 	// (The DSH release diffs for rc.7 → rc.8 → 0.1.1-rc.1 → 0.1.1-rc.2 touch
 	// only package.json + README — src/ is unchanged.)
@@ -42,6 +42,14 @@ test('peer range accepts every published dsh-compaction rc line the seam shares'
 	for (const v of ['0.1.1-rc.3', '0.1.1-rc.9', '0.1.1-rc.99']) {
 		assert.equal(semver.satisfies(v, peerRange), true, `${v} must satisfy ${peerRange} (same-line rc)`)
 	}
+	// Blue 0.1.2-alpha.1 is verified against Harness 0.1.2-alpha.2. The
+	// dsh-compaction declaration diff against 0.1.1-rc.2 is empty, so this
+	// tuple is anchored at the verified alpha.2 floor. As with the existing
+	// RC clauses, the caret deliberately keeps later versions on that tuple
+	// installable; Blue's manifest remains pinned to the exact verified line.
+	for (const v of ['0.1.2-alpha.2', '0.1.2-alpha.3', '0.1.2']) {
+		assert.equal(semver.satisfies(v, peerRange), true, `${v} must satisfy ${peerRange} (verified alpha line)`)
+	}
 })
 
 test('peer range keeps rejecting older and next-minor versions', () => {
@@ -49,10 +57,9 @@ test('peer range keeps rejecting older and next-minor versions', () => {
 	for (const v of ['0.0.1-rc.5', '0.1.0-rc.2', '0.1.0-rc.5']) {
 		assert.equal(semver.satisfies(v, peerRange), false, `${v} must NOT satisfy ${peerRange}`)
 	}
-	// Next lines: 0.1.2-rc.x (the soonest future seam bump), a jump to 0.1.3,
-	// and 0.2.x are all deliberate, later decisions — never silently allowed.
-	// They each need their own tuple clause when the seam gets there.
-	for (const v of ['0.1.2-rc.1', '0.1.3-rc.1', '0.2.0-rc.1', '0.2.0', '0.2.1']) {
+	// Versions before the verified alpha.2 floor and later tuples remain
+	// deliberate decisions; neither is admitted by the alpha.2 clause.
+	for (const v of ['0.1.2-alpha.1', '0.1.3-alpha.1', '0.1.3-rc.1', '0.2.0-rc.1', '0.2.0', '0.2.1']) {
 		assert.equal(semver.satisfies(v, peerRange), false, `${v} must NOT satisfy ${peerRange}`)
 	}
 })

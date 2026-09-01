@@ -21,16 +21,25 @@
 		".": {
 			"types": "./dist/index.d.ts",
 			"import": "./dist/index.js"
-		}
+		},
+		"./blue": {
+			"types": "./dist/blue.d.ts",
+			"import": "./dist/blue.js"
+		},
+		"./blue.plugin.json": "./blue.plugin.json"
 	},
 	"files": [
 		"dist",
+		"blue.plugin.json",
 		"cordis.patch.yml",
 		"README.md",
 		"README.en.md",
 		"LICENSE"
 	],
 	"sideEffects": false,
+	"blue": {
+		"manifest": "./blue.plugin.json"
+	},
 	"dsh": {
 		"bundle": {
 			"patch": "./cordis.patch.yml"
@@ -46,12 +55,15 @@
 		"test": "node --import tsx --test tests/*.test.ts tests/kernel-upstream/*.test.ts"
 	},
 	"peerDependencies": {
-		"@deepseek-ai/cordis": "^4.0.1",
-		"@deepseek-ai/dsh-compaction": "^0.1.0-rc.6 || ^0.1.1-rc.1"
+		"@deepseek-ai/cordis": "^4.0.2",
+		"@deepseek-ai/dsh-compaction": "^0.1.0-rc.6 || ^0.1.1-rc.1 || ^0.1.2-alpha.2"
+	},
+	"dependencies": {
+		"@dsh-blue/blue-api": "0.1.2-alpha.1"
 	},
 	"devDependencies": {
 		"acp-kernel": "0.0.29",
-		"@deepseek-ai/cordis": "4.0.1",
+		"@deepseek-ai/cordis": "4.0.2",
 		"@deepseek-ai/dsh-agent": "0.1.0-rc.6",
 		"@deepseek-ai/dsh-commands": "0.1.0-rc.6",
 		"@deepseek-ai/dsh-compaction": "0.1.0-rc.6",
