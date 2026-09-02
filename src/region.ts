@@ -25,6 +25,19 @@ import { extractEventText, extractText, toolCallIdOfResultEvent } from './messag
 import { hostPriceEvent } from './host-tokens.ts'
 import { eventAtOf, sessionEventsOf } from './session-events.ts'
 
+/**
+ * A surface sequence number as the INSTALLED `dsh-session` sees it. On the
+ * alpha line dsh-session brands these as `SessionSeq` (a branded `number`,
+ * see dsh-session types.d.ts); on the rc.6 baseline they are plain `number`.
+ * Deriving the element type from `Session['surface']` keeps this module
+ * type-correct against BOTH without naming the alpha-only brand — which does
+ * not exist on rc.6, so naming it would break the rc.6 baseline typecheck.
+ * `as SurfaceSeq` below is the single admission point: a plain `number` that a
+ * caller (model ref, ledger field) produces is admitted as a surface seq only
+ * at the exact write/index site that the installed dsh-session brands.
+ */
+type SurfaceSeq = Session['surface']['nodes'][number]
+
 /** One durable ACP block as rebuilt from the session log. */
 export interface AcpBlockLedgerEntry {
   /** The compaction transaction id (stable block identity). */
@@ -207,8 +220,8 @@ export function resolveSurfaceRange(
   if (start > end) {
     throw new Error(`billion-context-dsh: reversed range ${start}..${end}`)
   }
-  let requestedStartIdx = nodes.indexOf(start)
-  let requestedEndIdx = nodes.indexOf(end)
+  let requestedStartIdx = nodes.indexOf(start as SurfaceSeq)
+  let requestedEndIdx = nodes.indexOf(end as SurfaceSeq)
   let recovered = false
   if (requestedStartIdx < 0 || requestedEndIdx < 0) {
     const stale = recoverStaleRange(session, start, end)
@@ -226,8 +239,8 @@ export function resolveSurfaceRange(
     start = stale.start
     end = stale.end
     recovered = true
-    requestedStartIdx = nodes.indexOf(start)
-    requestedEndIdx = nodes.indexOf(end)
+    requestedStartIdx = nodes.indexOf(start as SurfaceSeq)
+    requestedEndIdx = nodes.indexOf(end as SurfaceSeq)
     if (requestedStartIdx < 0 || requestedEndIdx < 0) {
       // Unreachable in practice (recovery returns live nodes), but never let
       // a negative index reach the balancing passes.
@@ -300,8 +313,8 @@ export function resolveSurfaceRange(
 /** The surface seqs shadowed by the inclusive positional span. */
 export function shadowedSeqsOf(session: Session, start: number, end: number): number[] {
   const nodes = session.surface.nodes
-  const startIdx = nodes.indexOf(start)
-  const endIdx = nodes.indexOf(end)
+  const startIdx = nodes.indexOf(start as SurfaceSeq)
+  const endIdx = nodes.indexOf(end as SurfaceSeq)
   return nodes.slice(startIdx, endIdx + 1)
 }
 
@@ -394,8 +407,8 @@ export function runCompactionTransaction(
     source: compactCheckpointSource(compactionId),
   })
   seqs.push(session.append('user/message', message, {
-    surfaceOp: { op: 'replace', start: input.start, end: input.end },
-    sourceEventSeqs: [...input.shadowedSeqs],
+    surfaceOp: { op: 'replace', start: input.start as SurfaceSeq, end: input.end as SurfaceSeq },
+    sourceEventSeqs: [...input.shadowedSeqs] as SurfaceSeq[],
   }).seq)
 
   seqs.push(session.append('compaction/end', { compactionId, turn }).seq)
@@ -534,8 +547,8 @@ function hideSurfaceSeqs(
     if (event !== undefined) shadowedTokenCount += priceEvent(event)
   }
   session.append('compaction/prune', {
-    shadowedRange: { start, end },
-    shadowedSeqs: [...seqs],
+    shadowedRange: { start: start as SurfaceSeq, end: end as SurfaceSeq },
+    shadowedSeqs: [...seqs] as SurfaceSeq[],
     shadowedTokenCount,
   })
   if (text !== undefined) {
@@ -543,8 +556,8 @@ function hideSurfaceSeqs(
       content: [{ type: 'text', text }],
       source: { kind: 'plugin', plugin: 'billion-context-dsh' },
     }), {
-      surfaceOp: { op: 'replace', start, end },
-      sourceEventSeqs: [...seqs],
+      surfaceOp: { op: 'replace', start: start as SurfaceSeq, end: end as SurfaceSeq },
+      sourceEventSeqs: [...seqs] as SurfaceSeq[],
     })
     return
   }
@@ -553,8 +566,8 @@ function hideSurfaceSeqs(
     step: 0,
     message: createAssistantMessage({ content: [], source: { provider, model } }),
   }, {
-    surfaceOp: { op: 'replace', start, end },
-    sourceEventSeqs: [...seqs],
+    surfaceOp: { op: 'replace', start: start as SurfaceSeq, end: end as SurfaceSeq },
+    sourceEventSeqs: [...seqs] as SurfaceSeq[],
   })
 }
 
@@ -594,8 +607,8 @@ export function hideCompressToolPair(session: Session, callId: string, resultSeq
   }
   if (resolvedResultSeq === null) return false
   const nodes = session.surface.nodes
-  const startIdx = nodes.indexOf(callSeq)
-  const endIdx = nodes.indexOf(resolvedResultSeq)
+  const startIdx = nodes.indexOf(callSeq as SurfaceSeq)
+  const endIdx = nodes.indexOf(resolvedResultSeq as SurfaceSeq)
   // Only hide an actually adjacent pair; never shadow unrelated messages that
   // happen to sit between a stale call and result.
   if (startIdx < 0 || endIdx < 0 || endIdx - startIdx !== 1) return false
