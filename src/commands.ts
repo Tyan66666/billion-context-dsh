@@ -20,12 +20,13 @@ import {
 } from './region.ts'
 import { allLogMessages, eventsToCoreMessages, extractEventText, surfaceEventsOf } from './messages.ts'
 import { shadowedTokensViaMeter } from './host-tokens.ts'
+import { eventAtOf, sessionEventsOf } from './session-events.ts'
 import { defaultConfig } from 'acp-kernel'
 import { windowSourceLabel } from './window.ts'
 
 async function statusText(env: ToolEnvironment, agent: Agent): Promise<string> {
   const session = agent.session
-  const ledger = rebuildBlockLedger(session.events)
+  const ledger = rebuildBlockLedger(sessionEventsOf(session))
   const totalTokens = ledger.reduce((sum, block) => sum + block.shadowedTokenCount, 0)
   // Full log for the kernel (so block anchors survive — same input as the
   // nudge path); the measured token count stays a SURFACE measurement.
@@ -117,14 +118,14 @@ function decompressText(_env: ToolEnvironment, agent: Agent, args: string[]): st
   // Accept the kernel block ref (`bN`) the model tool acp_status shows, as
   // well as the compaction-id prefix (same dual-id resolution as the tool).
   const blockId = blockIdOfKernelRef(session, args[0]!)
-  const ledger = rebuildBlockLedger(session.events)
+  const ledger = rebuildBlockLedger(sessionEventsOf(session))
   const block = blockId === null
     ? ledger.find((entry) => entry.blockId.startsWith(args[0]!))
     : ledger.find((entry) => entry.blockId === blockId)
   if (block === undefined) return `block "${args[0]}" not found (see /acp status)`
   // Tier-2/3 blocks shadow parent checkpoint nodes: expand to the originals.
   const parts = expandShadowedSeqs(session, block.blockId)
-    .map((seq) => extractEventText(session.events[seq]!))
+    .map((seq) => extractEventText(eventAtOf(session, seq)!))
     .filter((text) => text.length > 0)
   return `Block ${block.blockId} — ${block.summary}\n\n${parts.join('\n\n') || '(no recoverable content)'}`
 }

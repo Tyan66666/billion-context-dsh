@@ -21,6 +21,7 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import { AcpStateStore } from './state.ts'
 import { allLogMessages, eventsToCoreMessages, surfaceEventsOf } from './messages.ts'
 import { buildCompressibleSeqRanges, findOpenTurn, summarySeqOfKernelBlock, surfaceSummary } from './region.ts'
+import { sessionEventsOf } from './session-events.ts'
 import { kernelConfigFor, type KernelConfigInput } from './config.ts'
 import { DEFAULT_RESOLVED, renderTemplate, type ResolvedPrompts } from './prompts.ts'
 
@@ -142,7 +143,7 @@ export function buildNudge(
   if (nudge === undefined || !nudge.shouldInject) return null
   const emergency = nudge.breakdown?.emergencyOverride === 1
 
-  const turnNumber = findOpenTurn(session.events) ?? 0
+  const turnNumber = findOpenTurn(sessionEventsOf(session)) ?? 0
   const alreadyShown = !emergency && lastNudgeTurn.get(session.id) === turnNumber
   if (alreadyShown) return null
   lastNudgeTurn.set(session.id, turnNumber)

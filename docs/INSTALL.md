@@ -11,7 +11,7 @@ mkdir -p ~/.dsh/profiles/web/node_modules
 ln -s /Users/yintianan/GitHub/billion-context-dsh ~/.dsh/profiles/web/node_modules/billion-context-dsh
 ```
 
-依赖说明：`dist/index.js` 内联了 acp-kernel，运行时只外链 `@deepseek-ai/dsh-compaction` 与 `@deepseek-ai/cordis`，二者由项目 `devDependencies` 提供（`billion-context-dsh/node_modules` 已在解析链上）。`@deepseek-ai/dsh-compaction` 的 **peer 范围**为 `^0.1.0-rc.6 || ^0.1.1-rc.1`，同时覆盖 `0.1.0-rc.x` 与 `0.1.1-rc.x` 两条 rc 线（DSH 0.1.1-rc.x 及以后）。范围必须写成并集：node-semver 的预发布匹配要求 range 中带与候选相同 `[major, minor, patch]` 元组的比较器，单一 `^0.1.0-rc.6` 匹配不了 `0.1.1-rc.x`（issue #68）。
+依赖说明：`dist/index.js` 内联了 acp-kernel，运行时把四个 seam 包 `@deepseek-ai/dsh-compaction`、`@deepseek-ai/dsh-session`、`@deepseek-ai/dsh-llm`、`@deepseek-ai/dsh-tools` 作为**外部依赖**（由 `devDependencies` 提供并同时声明为 `peerDependencies`，`billion-context-dsh/node_modules` 已在解析链上）；`@deepseek-ai/cordis` 同为 peer。这四个 seam 包共享同一个 **peer 范围** `^0.1.0-rc.6 || ^0.1.1-rc.1 || ^0.1.2-alpha.4`，同时覆盖 `0.1.0-rc.x` 与 `0.1.1-rc.x` 两条 rc 线以及 `0.1.2-alpha.x` 线（DSH 0.1.2-alpha.x 及以后）。范围必须写成并集：node-semver 的预发布匹配要求 range 中带与候选相同 `[major, minor, patch]` 元组的比较器，单一 `^0.1.0-rc.6` 匹配不了 `0.1.1-rc.x`（issue #68），也匹配不了 `0.1.2-alpha.x`。四个包一并声明为 peer（而非只声明 `dsh-compaction`），是为了让安装在 pnpm 的集成/封存布局下仍能把它们解析到**宿主自己的副本**，而不是某个与宿主不一致的陈旧嵌套副本。
 
 ### 方式 B：打包安装（发布前验证）
 

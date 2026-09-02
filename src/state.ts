@@ -20,6 +20,7 @@
 import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
 import { createInitialState, type CompressionBlock, type CompressionState } from 'acp-kernel'
 import { rebuildBlockLedger } from './region.ts'
+import { sessionEventsOf } from './session-events.ts'
 
 /** Rebuild kernel `CompressionBlock`s from the durable ledger (no kernel run needed). */
 function rebuildKernelBlocks(events: readonly SessionEvent[]): CompressionBlock[] {
@@ -105,9 +106,10 @@ export class AcpStateStore {
     const existing = this.states.get(id)
     if (existing !== undefined) return existing
     const state = createInitialState()
-    if (session.events.some((event) => event.type === 'compaction/summary')) {
-      state.blocks = rebuildKernelBlocks(session.events)
-      state.nextBlockId = nextBlockIdAfter(session.events)
+    const events = sessionEventsOf(session)
+    if (events.some((event) => event.type === 'compaction/summary')) {
+      state.blocks = rebuildKernelBlocks(events)
+      state.nextBlockId = nextBlockIdAfter(events)
     }
     this.states.set(id, state)
     return state

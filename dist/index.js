@@ -2645,6 +2645,18 @@ import {
 } from "@deepseek-ai/dsh-compaction";
 import { createAssistantMessage, createUserMessage } from "@deepseek-ai/dsh-llm";
 
+// src/session-events.ts
+function sessionEventsOf(session) {
+  const snapshot = session.snapshotEvents?.();
+  if (snapshot !== void 0) return snapshot;
+  return session.events;
+}
+function eventAtOf(session, seq) {
+  const eventAt = session.eventAt;
+  if (typeof eventAt === "function") return eventAt.call(session, seq);
+  return session.events[seq];
+}
+
 // src/messages.ts
 function extractText(content) {
   if (typeof content === "string") return content;
@@ -2757,10 +2769,10 @@ function eventsToCoreMessages(events, toolNames) {
   return out;
 }
 function surfaceEventsOf(session) {
-  return session.surface.nodes.map((seq) => session.events[seq]).filter((event) => event !== void 0);
+  return session.surface.nodes.map((seq) => eventAtOf(session, seq)).filter((event) => event !== void 0);
 }
 function allLogMessages(session) {
-  return eventsToCoreMessages(session.events);
+  return eventsToCoreMessages(sessionEventsOf(session));
 }
 function extractEventText(event) {
   switch (event.type) {
@@ -2826,7 +2838,7 @@ function hostPriceEvent(event) {
 function shadowedHostTokens(session, seqs) {
   let total = 0;
   for (const seq of seqs) {
-    const event = session.events[seq];
+    const event = eventAtOf(session, seq);
     if (event !== void 0) total += hostPriceEvent(event);
   }
   return total;
@@ -2873,7 +2885,7 @@ function assertNoActiveCompaction(events) {
   }
 }
 function hasPlainRef(session, seq) {
-  const event = session.events[seq];
+  const event = eventAtOf(session, seq);
   if (event === void 0) return false;
   switch (event.type) {
     case "user/message":
@@ -2906,14 +2918,14 @@ var AlreadyCompressedRangeError = class extends Error {
   coveringBlockIds;
 };
 function recoverStaleRange(session, start, end) {
-  if (session.events[start] === void 0 || session.events[end] === void 0) {
-    const failedEdge = session.events[start] === void 0 ? start : end;
+  if (eventAtOf(session, start) === void 0 || eventAtOf(session, end) === void 0) {
+    const failedEdge = eventAtOf(session, start) === void 0 ? start : end;
     return { kind: "unresolvable", failedEdge };
   }
   const liveInside = session.surface.nodes.filter((seq) => seq >= start && seq <= end).sort((a, b) => a - b);
-  const plain = liveInside.filter((seq) => !isCheckpointNode(session.events[seq]));
+  const plain = liveInside.filter((seq) => !isCheckpointNode(eventAtOf(session, seq)));
   if (plain.length === 0) {
-    const coveringBlockIds = rebuildBlockLedger(session.events).filter((entry) => entry.shadowedSeqs.some((seq) => seq >= start && seq <= end)).map((entry) => entry.blockId);
+    const coveringBlockIds = rebuildBlockLedger(sessionEventsOf(session)).filter((entry) => entry.shadowedSeqs.some((seq) => seq >= start && seq <= end)).map((entry) => entry.blockId);
     return { kind: "already-compressed", coveringBlockIds };
   }
   return { kind: "ok", start: plain[0], end: plain[plain.length - 1] };
@@ -2996,8 +3008,8 @@ function readCompactionSummary(event) {
   return event.data;
 }
 function runCompactionTransaction(session, input) {
-  assertNoActiveCompaction(session.events);
-  const turn = findOpenTurn(session.events);
+  assertNoActiveCompaction(sessionEventsOf(session));
+  const turn = findOpenTurn(sessionEventsOf(session));
   const compactionId = CompactionId(randomUUID());
   const seqs = [];
   seqs.push(session.append("compaction/start", { compactionId, turn }).seq);
@@ -3111,7 +3123,7 @@ function hideSurfaceSeqs(session, seqs, provider, model, text, priceEvent = host
   const end = seqs[seqs.length - 1];
   let shadowedTokenCount = 0;
   for (const seq of seqs) {
-    const event = session.events[seq];
+    const event = eventAtOf(session, seq);
     if (event !== void 0) shadowedTokenCount += priceEvent(event);
   }
   session.append("compaction/prune", {
@@ -3130,7 +3142,7 @@ function hideSurfaceSeqs(session, seqs, provider, model, text, priceEvent = host
     return;
   }
   session.append("assistant/message", {
-    turn: findOpenTurn(session.events) ?? 0,
+    turn: findOpenTurn(sessionEventsOf(session)) ?? 0,
     step: 0,
     message: createAssistantMessage({ content: [], source: { provider, model } })
   }, {
@@ -3140,7 +3152,8 @@ function hideSurfaceSeqs(session, seqs, provider, model, text, priceEvent = host
 }
 function hideCompressToolPair(session, callId, resultSeq) {
   let callSeq = null;
-  for (const event of session.events) {
+  const events = sessionEventsOf(session);
+  for (const event of events) {
     if (event.type !== "assistant/message") continue;
     if (toolCallIdsOfEvent(event).includes(callId)) {
       callSeq = event.seq;
@@ -3148,11 +3161,11 @@ function hideCompressToolPair(session, callId, resultSeq) {
     }
   }
   if (callSeq === null) return false;
-  const callNodeIds = toolCallIdsOfEvent(session.events[callSeq]);
+  const callNodeIds = toolCallIdsOfEvent(events[callSeq]);
   if (callNodeIds.length !== 1 || callNodeIds[0] !== callId) return false;
   let resolvedResultSeq = resultSeq ?? null;
   if (resolvedResultSeq === null) {
-    for (const event of session.events) {
+    for (const event of events) {
       if (event.type === "tool/result" && toolCallIdOfResultEvent(event) === callId) {
         resolvedResultSeq = event.seq;
         break;
@@ -3164,8 +3177,8 @@ function hideCompressToolPair(session, callId, resultSeq) {
   const startIdx = nodes.indexOf(callSeq);
   const endIdx = nodes.indexOf(resolvedResultSeq);
   if (startIdx < 0 || endIdx < 0 || endIdx - startIdx !== 1) return false;
-  const { provider, model } = assistantProviderModel(session.events[callSeq]);
-  const resultEvent = session.events[resolvedResultSeq];
+  const { provider, model } = assistantProviderModel(events[callSeq]);
+  const resultEvent = events[resolvedResultSeq];
   const resultText = resultEvent === void 0 ? "" : extractEventText(resultEvent);
   hideSurfaceSeqs(session, [callSeq, resolvedResultSeq], provider, model, resultText.trim().length > 0 ? resultText : void 0);
   return true;
@@ -3178,7 +3191,7 @@ function stripOrphanedSurfaceToolMessages(session, inFlightCallIds = /* @__PURE_
   const brokenResults = /* @__PURE__ */ new Map();
   for (let index = 0; index < nodes.length; index += 1) {
     const seq = nodes[index];
-    const event = session.events[seq];
+    const event = eventAtOf(session, seq);
     if (event === void 0) continue;
     if (event.type === "assistant/message") {
       const ids = toolCallIdsOfEvent(event);
@@ -3200,7 +3213,7 @@ function stripOrphanedSurfaceToolMessages(session, inFlightCallIds = /* @__PURE_
       if (callNodeIds !== void 0) {
         adjacent = true;
         for (let mid = call.index + 1; mid < index; mid += 1) {
-          const midEvent = session.events[nodes[mid]];
+          const midEvent = eventAtOf(session, nodes[mid]);
           if (midEvent === void 0 || midEvent.type !== "tool/result") {
             adjacent = false;
             break;
@@ -3218,7 +3231,7 @@ function stripOrphanedSurfaceToolMessages(session, inFlightCallIds = /* @__PURE_
   }
   const brokenIdsByCallSeq = /* @__PURE__ */ new Map();
   for (const [resultSeq, callSeq] of brokenResults) {
-    const id = toolCallIdOfResultEvent(session.events[resultSeq]);
+    const id = toolCallIdOfResultEvent(eventAtOf(session, resultSeq));
     if (id !== null) {
       const list = brokenIdsByCallSeq.get(callSeq) ?? [];
       list.push(id);
@@ -3235,7 +3248,7 @@ function stripOrphanedSurfaceToolMessages(session, inFlightCallIds = /* @__PURE_
   const hidden = [...hiddenSet].sort((a, b) => a - b);
   let count = 0;
   for (const seq of hidden) {
-    const event = session.events[seq];
+    const event = eventAtOf(session, seq);
     if (event === void 0) continue;
     const { provider, model } = assistantProviderModel(event);
     hideSurfaceSeqs(session, [seq], provider, model);
@@ -3246,7 +3259,7 @@ function stripOrphanedSurfaceToolMessages(session, inFlightCallIds = /* @__PURE_
 function openToolCallIds(session) {
   const open = /* @__PURE__ */ new Set();
   for (const seq of session.surface.nodes) {
-    const event = session.events[seq];
+    const event = eventAtOf(session, seq);
     if (event === void 0) continue;
     if (event.type === "assistant/message") {
       for (const id of toolCallIdsOfEvent(event)) open.add(id);
@@ -3275,7 +3288,7 @@ function buildCompressibleSeqRanges(session, opts = {}) {
     for (const seq of nodes.slice(-preserve)) protectedSeqs.add(seq);
   }
   for (let index = nodes.length - 1; index >= 0; index -= 1) {
-    const event = session.events[nodes[index]];
+    const event = eventAtOf(session, nodes[index]);
     if (event?.type === "user/message" && !isCheckpointNode(event)) {
       protectedSeqs.add(nodes[index]);
       break;
@@ -3288,7 +3301,7 @@ function buildCompressibleSeqRanges(session, opts = {}) {
     cur = null;
   };
   for (const seq of nodes) {
-    const event = session.events[seq];
+    const event = eventAtOf(session, seq);
     if (event === void 0 || protectedSeqs.has(seq) || isCheckpointNode(event)) {
       flush();
       continue;
@@ -3335,7 +3348,7 @@ function surfaceSummary(session) {
   return `${nodes.length} nodes, seqs ${first}..${last}`;
 }
 function blockRegistry(session) {
-  const ledger = rebuildBlockLedger(session.events);
+  const ledger = rebuildBlockLedger(sessionEventsOf(session));
   const kernelIdOf = /* @__PURE__ */ new Map();
   const raw = [];
   let next = 1;
@@ -3369,7 +3382,7 @@ function blockRegistry(session) {
   }));
 }
 function blockRefForSummarySeq(session, seq) {
-  const event = session.events[seq];
+  const event = eventAtOf(session, seq);
   if (event?.type !== "user/message") return null;
   const source = event.data.source;
   if (source?.plugin !== "compact" || source.compactionId === void 0) return null;
@@ -3399,7 +3412,7 @@ function checkpointBlockIdOf(events, seq) {
   return source.compactionId;
 }
 function expandShadowedSeqs(session, blockId) {
-  const ledger = rebuildBlockLedger(session.events);
+  const ledger = rebuildBlockLedger(sessionEventsOf(session));
   const byId = new Map(ledger.map((entry) => [entry.blockId, entry]));
   const root = byId.get(blockId);
   if (root === void 0) return [];
@@ -3409,7 +3422,7 @@ function expandShadowedSeqs(session, blockId) {
     if (seen.has(entry.blockId)) return;
     seen.add(entry.blockId);
     for (const seq of entry.shadowedSeqs) {
-      const childId = checkpointBlockIdOf(session.events, seq);
+      const childId = checkpointBlockIdOf(sessionEventsOf(session), seq);
       const child = childId === null ? void 0 : byId.get(childId);
       if (child !== void 0) visit(child);
       else out.push(seq);
@@ -3486,9 +3499,10 @@ var AcpStateStore = class {
     const existing = this.states.get(id);
     if (existing !== void 0) return existing;
     const state = createInitialState();
-    if (session.events.some((event) => event.type === "compaction/summary")) {
-      state.blocks = rebuildKernelBlocks(session.events);
-      state.nextBlockId = nextBlockIdAfter(session.events);
+    const events = sessionEventsOf(session);
+    if (events.some((event) => event.type === "compaction/summary")) {
+      state.blocks = rebuildKernelBlocks(events);
+      state.nextBlockId = nextBlockIdAfter(events);
     }
     this.states.set(id, state);
     return state;
@@ -3707,7 +3721,7 @@ function buildNudge(agent, env, lastNudgeTurn) {
   const nudge = turn.nudge;
   if (nudge === void 0 || !nudge.shouldInject) return null;
   const emergency = nudge.breakdown?.emergencyOverride === 1;
-  const turnNumber = findOpenTurn(session.events) ?? 0;
+  const turnNumber = findOpenTurn(sessionEventsOf(session)) ?? 0;
   const alreadyShown = !emergency && lastNudgeTurn.get(session.id) === turnNumber;
   if (alreadyShown) return null;
   lastNudgeTurn.set(session.id, turnNumber);
@@ -4126,7 +4140,7 @@ var decompressParameters = {
 function resolveBlockId(session, arg) {
   const byKernelRef = blockIdOfKernelRef(session, arg);
   if (byKernelRef !== null) return byKernelRef;
-  const ledger = rebuildBlockLedger(session.events);
+  const ledger = rebuildBlockLedger(sessionEventsOf(session));
   const byPrefix = ledger.find((entry) => entry.blockId.startsWith(arg));
   return byPrefix?.blockId ?? null;
 }
@@ -4137,14 +4151,14 @@ function handleDecompress(_env, rawArgs, exec) {
   if (blockId === null) {
     return { text: `decompress: block "${args.blockId}" not found (see acp_status for the block list)` };
   }
-  const ledger = rebuildBlockLedger(session.events);
+  const ledger = rebuildBlockLedger(sessionEventsOf(session));
   const block = ledger.find((entry) => entry.blockId === blockId);
   if (block === void 0) {
     return { text: `decompress: block "${args.blockId}" not found (see acp_status for the block list)` };
   }
   const parts = [];
   for (const seq of expandShadowedSeqs(session, block.blockId)) {
-    const event = session.events[seq];
+    const event = eventAtOf(session, seq);
     const text = event === void 0 ? "" : extractEventText(event);
     if (text.length > 0) parts.push(`[seq ${seq}] ${text}`);
   }
@@ -4172,7 +4186,7 @@ function roleOfEvent(event) {
   }
 }
 function buildSearchDocs(session) {
-  const ledger = rebuildBlockLedger(session.events);
+  const ledger = rebuildBlockLedger(sessionEventsOf(session));
   const docs = [];
   const claimed = /* @__PURE__ */ new Set();
   for (const block of ledger) {
@@ -4188,7 +4202,7 @@ function buildSearchDocs(session) {
     for (const seq of expandShadowedSeqs(session, block.blockId)) {
       if (claimed.has(seq)) continue;
       claimed.add(seq);
-      const event = session.events[seq];
+      const event = eventAtOf(session, seq);
       if (event === void 0) continue;
       const role = roleOfEvent(event);
       const text = extractEventText(event);
@@ -4367,7 +4381,7 @@ async function detectContextWindow(agent, provider, model) {
 // src/commands.ts
 async function statusText(env, agent) {
   const session = agent.session;
-  const ledger = rebuildBlockLedger(session.events);
+  const ledger = rebuildBlockLedger(sessionEventsOf(session));
   const totalTokens = ledger.reduce((sum, block) => sum + block.shadowedTokenCount, 0);
   const coreMessages = allLogMessages(session);
   const surfaceMessages = eventsToCoreMessages(surfaceEventsOf(session));
@@ -4435,10 +4449,10 @@ function decompressText(_env, agent, args) {
   if (args.length < 1) return "/acp decompress <blockId>";
   const session = agent.session;
   const blockId = blockIdOfKernelRef(session, args[0]);
-  const ledger = rebuildBlockLedger(session.events);
+  const ledger = rebuildBlockLedger(sessionEventsOf(session));
   const block = blockId === null ? ledger.find((entry) => entry.blockId.startsWith(args[0])) : ledger.find((entry) => entry.blockId === blockId);
   if (block === void 0) return `block "${args[0]}" not found (see /acp status)`;
-  const parts = expandShadowedSeqs(session, block.blockId).map((seq) => extractEventText(session.events[seq])).filter((text) => text.length > 0);
+  const parts = expandShadowedSeqs(session, block.blockId).map((seq) => extractEventText(eventAtOf(session, seq))).filter((text) => text.length > 0);
   return `Block ${block.blockId} \u2014 ${block.summary}
 
 ${parts.join("\n\n") || "(no recoverable content)"}`;

@@ -68,15 +68,24 @@ The command installs the package and automatically layers this package's bundle 
 
 Restart `dsh` afterwards (bundle layers are composed at startup), open a new session, and verify: ask the model to call `acp_status`, or run `/acp status`. Shipped presets (standard / code / cordis) keep their realm-local `compaction-basic` fallback (automatic pressure compression still runs there; the ACP tools and nudge coexist); minimal and presets without a compaction realm use this engine directly.
 
-> **DSH version compatibility.** The package declares the peer range
-> `^0.1.0-rc.6 || ^0.1.1-rc.1` for `@deepseek-ai/dsh-compaction`, covering both the
-> `0.1.0-rc.x` and `0.1.1-rc.x` release lines (including the current DSH release;
-> the seam's `src/` is unchanged from `0.1.0-rc.6` to `0.1.1-rc.2`, so the public
-> API is identical). The range is two `||` clauses **on purpose**: npm
+> **DSH version compatibility.** The package declares all four runtime seam
+> packages (`dsh-compaction` / `dsh-session` / `dsh-llm` / `dsh-tools`) as peer
+> dependencies, sharing the range
+> `^0.1.0-rc.6 || ^0.1.1-rc.1 || ^0.1.2-alpha.4`,
+> covering the `0.1.0-rc.x` and `0.1.1-rc.x` release lines (including the current
+> DSH release; the seam's `src/` is unchanged from `0.1.0-rc.6` to `0.1.1-rc.2`, so the public
+> API is identical) and the `0.1.2-alpha.x` line (which removed the
+> `Session.events` getter in favour of `snapshotEvents()` / `eventAt()`; this
+> engine feature-detects both shapes, so one build runs on either seam). The
+> range is multiple `||` clauses **on purpose**: npm
 > (node-semver) only lets a prerelease version satisfy a range that carries a
 > comparator on the SAME `[major, minor, patch]` tuple as the candidate, so a lone
-> `^0.1.0-rc.6` can never match `0.1.1-rc.x` (issue #68) — older releases fail to
-> install on DSH 0.1.1-rc.x; upgrade to a release containing this fix.
+> `^0.1.0-rc.6` can never match `0.1.1-rc.x` (issue #68) or `0.1.2-alpha.x` —
+> older releases fail to install on DSH 0.1.1-rc.x / 0.1.2-alpha.x; upgrade to a
+> release containing this fix. Declaring all four seam packages as peers (not
+> just `dsh-compaction`) ensures that, even under pnpm's
+> hoisted/linked layout, installations resolve them to the **host's own** copy
+> rather than a stale nested copy inconsistent with the host.
 
 **Path B: plain `npm install` (package only — a composition row is required).**
 
