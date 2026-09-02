@@ -20,8 +20,13 @@ export interface AcpWindow {
   /** Effective context window in tokens. */
   readonly limit: number
   /** Where the limit came from. */
-  readonly source: 'explicit' | 'auto' | 'default'
-  /** Route the auto window was resolved for (auto source only). */
+  readonly source: 'explicit' | 'auto' | 'projection' | 'default'
+  /**
+   * Route the window was resolved for. 'auto' reports the probed route;
+   * 'projection' returns also set it, mirroring agent.options — which can be
+   * stale after a mid-session model switch (inert today: windowSourceLabel
+   * never reads these fields for the projection source).
+   */
   readonly provider?: string
   readonly model?: string
   /**
@@ -37,6 +42,9 @@ export interface AcpWindow {
 /** Human label for an AcpWindow's source (used by /acp status). */
 export function windowSourceLabel(window: AcpWindow): string {
   if (window.source === 'explicit') return 'configured'
+  if (window.source === 'projection') {
+    return `session projection current route (auto-refreshes on model switch)`
+  }
   if (window.source === 'auto') {
     return `auto-detected from ${window.provider ?? '?'}/${window.model ?? '?'}`
   }
@@ -51,6 +59,30 @@ interface LlmProbe {
     model: string,
     signal?: AbortSignal,
   ) => Promise<{ context?: { contextWindow?: number } }>
+}
+
+/** The minimal sessionProjections surface the projection source needs. */
+interface ProjectionProbe {
+  snapshot?: (session: unknown) => {
+    values?: { contextPressure?: { contextWindow?: number } }
+  }
+}
+
+/**
+ * Read the live context window from the host session projection
+ * (`contextPressure.contextWindow` — the newest recorded route capacity).
+ * This tracks the session's CURRENT route: after a mid-session model switch
+ * `agent.options.provider/model` stays a stale snapshot, so probing THAT route
+ * yields the previous model's window (a 1M-window session read as ~96K →
+ * false EMERGENCY nudges at 300%+ usage). The projection is refreshed by the
+ * host on every request, so it follows the real model without any config.
+ * Returns null when the host exposes no projection or disclosed no window.
+ */
+export function projectedContextWindow(agent: Agent): number | null {
+  const projections = agent.ctx?.get?.('sessionProjections') as ProjectionProbe | undefined
+  const window = projections?.snapshot?.(agent.session)?.values?.contextPressure?.contextWindow
+  if (typeof window === 'number' && Number.isInteger(window) && window > 0) return window
+  return null
 }
 
 /**

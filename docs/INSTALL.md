@@ -55,6 +55,20 @@ registry；Blue 通过当前 session 的 Harness command bridge 列出并执行�
 把条目改为“已验证”。本适配发布后，作者还需向 `dsh-blue/marketplace` 提交 PR，更新
 自己的 registry 条目和中英文详情页，状态由 Blue 维护者复核验证证据后翻转。
 
+### 方式 D：git 源安装（`github:` 规格，商店条目展示的形态）
+
+预构建产物 `dist/` 已提交到仓库（与 npm 发布产物一致），所以从 git 源安装是纯文件
+安装——pnpm 11 默认拦截依赖构建脚本（`allowBuilds`），但本包 git 安装**零构建脚本**，
+不受影响：
+
+```bash
+dsh plugin --profile web add github:Tyan66666/billion-context-dsh#v0.2.17
+```
+
+建议带 `#<tag>`，拿到与对应 npm 版本完全一致的产物；不带 ref 则装默认分支的最新构建。
+只有 clone 仓库自行从源码构建才需要放行构建。为什么必须入库预构建产物、为什么不能加
+`prepare` 脚本，见 [git-source-install-design.md](git-source-install-design.md)（issue #92）。
+
 ## 2. 组合行
 
 手动挂载的两种范围，按你想要生效的范围选。**方式 C（bundle/商店安装）用户已默认
