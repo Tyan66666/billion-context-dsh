@@ -36,6 +36,7 @@ import {
 } from './region.ts'
 import { allLogMessages, buildToolCallIndex, eventsToCoreMessages, extractEventText, surfaceEventsOf } from './messages.ts'
 import { shadowedTokensViaMeter } from './host-tokens.ts'
+import { eventAtOf, sessionEventsOf } from './session-events.ts'
 import { DEFAULT_RESOLVED, type ResolvedPrompts } from './prompts.ts'
 
 export interface ToolEnvironment extends KernelConfigInput {
@@ -540,7 +541,7 @@ interface DecompressArgs {
 function resolveBlockId(session: Session, arg: string): string | null {
   const byKernelRef = blockIdOfKernelRef(session, arg)
   if (byKernelRef !== null) return byKernelRef
-  const ledger = rebuildBlockLedger(session.events)
+  const ledger = rebuildBlockLedger(sessionEventsOf(session))
   const byPrefix = ledger.find((entry) => entry.blockId.startsWith(arg))
   return byPrefix?.blockId ?? null
 }
@@ -552,7 +553,7 @@ function handleDecompress(_env: ToolEnvironment, rawArgs: DecompressArgs, exec: 
   if (blockId === null) {
     return { text: `decompress: block "${args.blockId}" not found (see acp_status for the block list)` }
   }
-  const ledger = rebuildBlockLedger(session.events)
+  const ledger = rebuildBlockLedger(sessionEventsOf(session))
   const block = ledger.find((entry) => entry.blockId === blockId)
   if (block === undefined) {
     return { text: `decompress: block "${args.blockId}" not found (see acp_status for the block list)` }
@@ -560,7 +561,7 @@ function handleDecompress(_env: ToolEnvironment, rawArgs: DecompressArgs, exec: 
   const parts: string[] = []
   // Tier-2/3 blocks shadow parent checkpoint nodes: expand to the originals.
   for (const seq of expandShadowedSeqs(session, block.blockId)) {
-    const event = session.events[seq]
+    const event = eventAtOf(session, seq)
     const text = event === undefined ? '' : extractEventText(event)
     if (text.length > 0) parts.push(`[seq ${seq}] ${text}`)
   }
@@ -598,7 +599,7 @@ function roleOfEvent(event: SessionEvent): MessageRole | null {
  * pi's owner map — decompress on that block recovers the original).
  */
 function buildSearchDocs(session: Session): SearchDoc[] {
-  const ledger = rebuildBlockLedger(session.events)
+  const ledger = rebuildBlockLedger(sessionEventsOf(session))
   const docs: SearchDoc[] = []
   const claimed = new Set<number>()
   for (const block of ledger) {
@@ -614,7 +615,7 @@ function buildSearchDocs(session: Session): SearchDoc[] {
     for (const seq of expandShadowedSeqs(session, block.blockId)) {
       if (claimed.has(seq)) continue
       claimed.add(seq)
-      const event = session.events[seq]
+      const event = eventAtOf(session, seq)
       if (event === undefined) continue
       const role = roleOfEvent(event)
       const text = extractEventText(event)

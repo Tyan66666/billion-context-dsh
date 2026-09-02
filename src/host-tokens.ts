@@ -19,6 +19,7 @@
 
 import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
 import { deriveEventMessage } from '@deepseek-ai/dsh-session'
+import { eventAtOf } from './session-events.ts'
 
 /** Fixed text-density heuristic used by the host meter until exact tokenization. */
 const CHARS_PER_TOKEN = 4
@@ -106,7 +107,7 @@ export function hostPriceEvent(event: SessionEvent): number {
 export function shadowedHostTokens(session: Session, seqs: readonly number[]): number {
   let total = 0
   for (const seq of seqs) {
-    const event = session.events[seq]
+    const event = eventAtOf(session, seq)
     if (event !== undefined) total += hostPriceEvent(event)
   }
   return total

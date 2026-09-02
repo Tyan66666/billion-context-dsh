@@ -10,8 +10,12 @@ import semver from 'semver'
 // `^0.1.0-rc.6` (tuple 0.1.0) can never match `0.1.1-rc.2` (tuple 0.1.1), so
 // the plugin failed to install on DSH releases that bumped the seam to
 // 0.1.1-rc.x even though the public API did not change. The fix is the
-// explicit two-clause range below; this test pins the real npm behavior so a
+// explicit multi-clause range below; this test pins the real npm behavior so a
 // future tightening of the range turns red here.
+//
+// DSH 0.1.2-alpha removed the public `Session.events` getter (replaced by
+// `snapshotEvents()` / `eventAt()`); the engine now feature-detects both
+// shapes, and the `^0.1.2-alpha.4` clause admits the whole 0.1.2 alpha seam.
 //
 // The versions below come from `npm view @deepseek-ai/dsh-compaction
 // versions` (the full published list, plus 0.1.1 and 0.2.x as the
@@ -42,6 +46,11 @@ test('peer range accepts every published dsh-compaction rc line the seam shares'
 	for (const v of ['0.1.1-rc.3', '0.1.1-rc.9', '0.1.1-rc.99']) {
 		assert.equal(semver.satisfies(v, peerRange), true, `${v} must satisfy ${peerRange} (same-line rc)`)
 	}
+	// The 0.1.2 alpha seam (current DSH runtime, `Session.events` removed): the
+	// published 0.1.2-alpha.4 and any same-tuple-prerelease successor install.
+	for (const v of ['0.1.2-alpha.4', '0.1.2-alpha.5', '0.1.2-rc.1']) {
+		assert.equal(semver.satisfies(v, peerRange), true, `${v} must satisfy ${peerRange} (0.1.2 seam)`)
+	}
 })
 
 test('peer range keeps rejecting older and next-minor versions', () => {
@@ -49,10 +58,10 @@ test('peer range keeps rejecting older and next-minor versions', () => {
 	for (const v of ['0.0.1-rc.5', '0.1.0-rc.2', '0.1.0-rc.5']) {
 		assert.equal(semver.satisfies(v, peerRange), false, `${v} must NOT satisfy ${peerRange}`)
 	}
-	// Next lines: 0.1.2-rc.x (the soonest future seam bump), a jump to 0.1.3,
-	// and 0.2.x are all deliberate, later decisions — never silently allowed.
-	// They each need their own tuple clause when the seam gets there.
-	for (const v of ['0.1.2-rc.1', '0.1.3-rc.1', '0.2.0-rc.1', '0.2.0', '0.2.1']) {
+	// Next lines: a jump to 0.1.3, and 0.2.x are all deliberate, later
+	// decisions — never silently allowed. (0.1.2-rc.x is allowed above: it is
+	// the same tuple as the admitted 0.1.2-alpha seam.)
+	for (const v of ['0.1.3-rc.1', '0.2.0-rc.1', '0.2.0', '0.2.1']) {
 		assert.equal(semver.satisfies(v, peerRange), false, `${v} must NOT satisfy ${peerRange}`)
 	}
 })

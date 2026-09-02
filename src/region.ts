@@ -23,6 +23,7 @@ import { createAssistantMessage, createUserMessage, type ContentBlock } from '@d
 import { defaultCountTokens } from 'acp-kernel'
 import { extractEventText, extractText, toolCallIdOfResultEvent } from './messages.ts'
 import { hostPriceEvent } from './host-tokens.ts'
+import { eventAtOf, sessionEventsOf } from './session-events.ts'
 
 /** One durable ACP block as rebuilt from the session log. */
 export interface AcpBlockLedgerEntry {
@@ -82,7 +83,7 @@ export function assertNoActiveCompaction(events: readonly SessionEvent[]): void 
  * them to the nearest clean cut.
  */
 function hasPlainRef(session: Session, seq: number): boolean {
-  const event = session.events[seq]
+  const event = eventAtOf(session, seq)
   if (event === undefined) return false
   switch (event.type) {
     case 'user/message':
@@ -150,16 +151,16 @@ type StaleRangeRecovery =
  *     checkpoint seq directly.
  */
 function recoverStaleRange(session: Session, start: number, end: number): StaleRangeRecovery {
-  if (session.events[start] === undefined || session.events[end] === undefined) {
-    const failedEdge = session.events[start] === undefined ? start : end
+  if (eventAtOf(session, start) === undefined || eventAtOf(session, end) === undefined) {
+    const failedEdge = eventAtOf(session, start) === undefined ? start : end
     return { kind: 'unresolvable', failedEdge }
   }
   const liveInside = session.surface.nodes
     .filter((seq) => seq >= start && seq <= end)
     .sort((a, b) => a - b)
-  const plain = liveInside.filter((seq) => !isCheckpointNode(session.events[seq]!))
+  const plain = liveInside.filter((seq) => !isCheckpointNode(eventAtOf(session, seq)!))
   if (plain.length === 0) {
-    const coveringBlockIds = rebuildBlockLedger(session.events)
+    const coveringBlockIds = rebuildBlockLedger(sessionEventsOf(session))
       .filter((entry) => entry.shadowedSeqs.some((seq) => seq >= start && seq <= end))
       .map((entry) => entry.blockId)
     return { kind: 'already-compressed', coveringBlockIds }
@@ -364,8 +365,8 @@ export function runCompactionTransaction(
   session: Session,
   input: CompactionTransactionInput,
 ): { compactionId: string; seqs: number[] } {
-  assertNoActiveCompaction(session.events)
-  const turn = findOpenTurn(session.events)
+  assertNoActiveCompaction(sessionEventsOf(session))
+  const turn = findOpenTurn(sessionEventsOf(session))
   const compactionId = CompactionId(randomUUID())
   const seqs: number[] = []
 
@@ -526,7 +527,7 @@ function hideSurfaceSeqs(
   const end = seqs[seqs.length - 1]!
   let shadowedTokenCount = 0
   for (const seq of seqs) {
-    const event = session.events[seq]
+    const event = eventAtOf(session, seq)
     // The prune claim MUST speak the host's token vocabulary (rule 12): the
     // default `hostPriceEvent` is the exact mirror of the host estimator.
     // NEVER defaultCountTokens — that overdraws the meter on CJK (#54).
@@ -548,7 +549,7 @@ function hideSurfaceSeqs(
     return
   }
   session.append('assistant/message', {
-    turn: findOpenTurn(session.events) ?? 0,
+    turn: findOpenTurn(sessionEventsOf(session)) ?? 0,
     step: 0,
     message: createAssistantMessage({ content: [], source: { provider, model } }),
   }, {
@@ -568,7 +569,8 @@ function hideSurfaceSeqs(
  */
 export function hideCompressToolPair(session: Session, callId: string, resultSeq?: number): boolean {
   let callSeq: number | null = null
-  for (const event of session.events) {
+  const events = sessionEventsOf(session)
+  for (const event of events) {
     if (event.type !== 'assistant/message') continue
     if (toolCallIdsOfEvent(event).includes(callId)) {
       callSeq = event.seq
@@ -579,11 +581,11 @@ export function hideCompressToolPair(session: Session, callId: string, resultSeq
   // Only hide a node that carries EXACTLY the compress call. Hiding a
   // multi-call node replaces the whole assistant message, which would orphan
   // the sibling calls' results (their call ids vanish with the node).
-  const callNodeIds = toolCallIdsOfEvent(session.events[callSeq]!)
+  const callNodeIds = toolCallIdsOfEvent(events[callSeq]!)
   if (callNodeIds.length !== 1 || callNodeIds[0] !== callId) return false
   let resolvedResultSeq = resultSeq ?? null
   if (resolvedResultSeq === null) {
-    for (const event of session.events) {
+    for (const event of events) {
       if (event.type === 'tool/result' && toolCallIdOfResultEvent(event) === callId) {
         resolvedResultSeq = event.seq
         break
@@ -597,8 +599,8 @@ export function hideCompressToolPair(session: Session, callId: string, resultSeq
   // Only hide an actually adjacent pair; never shadow unrelated messages that
   // happen to sit between a stale call and result.
   if (startIdx < 0 || endIdx < 0 || endIdx - startIdx !== 1) return false
-  const { provider, model } = assistantProviderModel(session.events[callSeq]!)
-  const resultEvent = session.events[resolvedResultSeq]
+  const { provider, model } = assistantProviderModel(events[callSeq]!)
+  const resultEvent = events[resolvedResultSeq]
   const resultText = resultEvent === undefined ? '' : extractEventText(resultEvent)
   hideSurfaceSeqs(session, [callSeq, resolvedResultSeq], provider, model, resultText.trim().length > 0 ? resultText : undefined)
   return true
@@ -632,7 +634,7 @@ export function stripOrphanedSurfaceToolMessages(
   const brokenResults = new Map<number, number>()
   for (let index = 0; index < nodes.length; index += 1) {
     const seq = nodes[index]!
-    const event = session.events[seq]
+    const event = eventAtOf(session, seq)
     if (event === undefined) continue
     if (event.type === 'assistant/message') {
       const ids = toolCallIdsOfEvent(event)
@@ -658,7 +660,7 @@ export function stripOrphanedSurfaceToolMessages(
       if (callNodeIds !== undefined) {
         adjacent = true
         for (let mid = call.index + 1; mid < index; mid += 1) {
-          const midEvent = session.events[nodes[mid]!]
+          const midEvent = eventAtOf(session, nodes[mid]!)
           if (midEvent === undefined || midEvent.type !== 'tool/result') {
             adjacent = false
             break
@@ -677,7 +679,7 @@ export function stripOrphanedSurfaceToolMessages(
   // call node seq -> ids of that node whose result is broken (non-adjacent).
   const brokenIdsByCallSeq = new Map<number, string[]>()
   for (const [resultSeq, callSeq] of brokenResults) {
-    const id = toolCallIdOfResultEvent(session.events[resultSeq]!)
+    const id = toolCallIdOfResultEvent(eventAtOf(session, resultSeq)!)
     if (id !== null) {
       const list = brokenIdsByCallSeq.get(callSeq) ?? []
       list.push(id)
@@ -700,7 +702,7 @@ export function stripOrphanedSurfaceToolMessages(
   const hidden = [...hiddenSet].sort((a, b) => a - b)
   let count = 0
   for (const seq of hidden) {
-    const event = session.events[seq]
+    const event = eventAtOf(session, seq)
     if (event === undefined) continue
     const { provider, model } = assistantProviderModel(event)
     hideSurfaceSeqs(session, [seq], provider, model)
@@ -720,7 +722,7 @@ export function stripOrphanedSurfaceToolMessages(
 export function openToolCallIds(session: Session): Set<string> {
   const open = new Set<string>()
   for (const seq of session.surface.nodes) {
-    const event = session.events[seq]
+    const event = eventAtOf(session, seq)
     if (event === undefined) continue
     if (event.type === 'assistant/message') {
       for (const id of toolCallIdsOfEvent(event)) open.add(id)
@@ -785,7 +787,7 @@ export function buildCompressibleSeqRanges(
     for (const seq of nodes.slice(-preserve)) protectedSeqs.add(seq)
   }
   for (let index = nodes.length - 1; index >= 0; index -= 1) {
-    const event = session.events[nodes[index]!]
+    const event = eventAtOf(session, nodes[index]!)
     if (event?.type === 'user/message' && !isCheckpointNode(event)) {
       protectedSeqs.add(nodes[index]!)
       break
@@ -798,7 +800,7 @@ export function buildCompressibleSeqRanges(
     cur = null
   }
   for (const seq of nodes) {
-    const event = session.events[seq]
+    const event = eventAtOf(session, seq)
     if (event === undefined || protectedSeqs.has(seq) || isCheckpointNode(event)) {
       flush()
       continue
@@ -888,7 +890,7 @@ export interface AcpBlockRegistryEntry {
  * until a later block lists it as a parent.
  */
 export function blockRegistry(session: Session): AcpBlockRegistryEntry[] {
-  const ledger = rebuildBlockLedger(session.events)
+  const ledger = rebuildBlockLedger(sessionEventsOf(session))
   const kernelIdOf = new Map<string, string>()
   const raw: AcpBlockRegistryEntry[] = []
   let next = 1
@@ -931,7 +933,7 @@ export function blockRegistry(session: Session): AcpBlockRegistryEntry[] {
  * anything else (plain messages, non-checkpoint nodes).
  */
 export function blockRefForSummarySeq(session: Session, seq: number): string | null {
-  const event = session.events[seq]
+  const event = eventAtOf(session, seq)
   if (event?.type !== 'user/message') return null
   const source = (event.data as { source?: { plugin?: string; compactionId?: string } }).source
   if (source?.plugin !== 'compact' || source.compactionId === undefined) return null
@@ -985,7 +987,7 @@ function checkpointBlockIdOf(events: readonly SessionEvent[], seq: number): stri
  * seqs. Cycle-safe (a block can never be its own ancestor).
  */
 export function expandShadowedSeqs(session: Session, blockId: string): number[] {
-  const ledger = rebuildBlockLedger(session.events)
+  const ledger = rebuildBlockLedger(sessionEventsOf(session))
   const byId = new Map(ledger.map((entry) => [entry.blockId, entry]))
   const root = byId.get(blockId)
   if (root === undefined) return []
@@ -995,7 +997,7 @@ export function expandShadowedSeqs(session: Session, blockId: string): number[] 
     if (seen.has(entry.blockId)) return
     seen.add(entry.blockId)
     for (const seq of entry.shadowedSeqs) {
-      const childId = checkpointBlockIdOf(session.events, seq)
+      const childId = checkpointBlockIdOf(sessionEventsOf(session), seq)
       const child = childId === null ? undefined : byId.get(childId)
       if (child !== undefined) visit(child)
       else out.push(seq)

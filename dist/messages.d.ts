@@ -11,7 +11,7 @@
  * @module billion-context-pi-dsh/messages
  */
 import type { CoreMessage } from 'acp-kernel';
-import type { SessionEvent } from '@deepseek-ai/dsh-session';
+import type { Session, SessionEvent } from '@deepseek-ai/dsh-session';
 /**
  * Extract plain text from a DSH content block array or string.
  *
@@ -54,7 +54,7 @@ export declare function projectEvent(event: SessionEvent, toolNames?: ReadonlyMa
 /** Project a session's message events into CoreMessage[] in log order. */
 export declare function eventsToCoreMessages(events: readonly SessionEvent[], toolNames?: ReadonlyMap<string, string>): CoreMessage[];
 /** The surface-visible message events of a session, in model-visible order. */
-export declare function surfaceEventsOf(session: import('@deepseek-ai/dsh-session').Session): SessionEvent[];
+export declare function surfaceEventsOf(session: Session): SessionEvent[];
 /**
  * ALL message-type events in log order — the visible surface PLUS everything
  * shadowed by compression. The ACP kernel deactivates any block whose consumed
