@@ -74,7 +74,19 @@ export function findOpenTurn(events: readonly SessionEvent[]): number | null {
   return open
 }
 
-/** Reject a second concurrent compaction for the same session. */
+/**
+ * Reject a second concurrent compaction for the same session.
+ *
+ * Compaction is synchronous and a session is single-writer, so a
+ * `compaction/start` with NO matching `compaction/end` in the durable log can
+ * only be a stale leftover from a prior run that died mid-write (a hard kill,
+ * not a caught throw — every caught throw is paired with a compensating
+ * `compaction/end` in runCompactionTransaction). Such a leftover must NOT
+ * permanently block every later compress call: this treats it as stale,
+ * surfaces it once, and lets a new compaction proceed. The old "already
+ * active" throw only fired when a genuine concurrent compaction existed,
+ * which the synchronous single-writer premise makes impossible.
+ */
 export function assertNoActiveCompaction(events: readonly SessionEvent[]): void {
   let active = false
   for (const event of events) {
@@ -82,7 +94,7 @@ export function assertNoActiveCompaction(events: readonly SessionEvent[]): void 
     else if (event.type === 'compaction/end') active = false
   }
   if (active) {
-    throw new Error('billion-context-dsh: another compaction is already active for this session')
+    console.warn('billion-context-dsh: clearing stale compaction flag — found a compaction/start with no matching compaction/end')
   }
 }
 
@@ -383,35 +395,71 @@ export function runCompactionTransaction(
   const compactionId = CompactionId(randomUUID())
   const seqs: number[] = []
 
-  seqs.push(session.append('compaction/start', { compactionId, turn }).seq)
-  seqs.push(session.append('compaction/summary', {
-    compactionId,
-    summary: input.summary,
-    shadowedRange: { start: input.start, end: input.end },
-    shadowedSeqs: [...input.shadowedSeqs],
-    shadowedTokenCount: input.shadowedTokenCount,
-    provider: input.provider,
-    model: input.model,
-    tier: input.tier ?? 1,
-    ...(input.kernelBlockId === undefined ? {} : { kernelBlockId: input.kernelBlockId }),
-    ...(input.topic === undefined ? {} : { topic: input.topic }),
-    ...(input.parentBlockIds === undefined || input.parentBlockIds.length === 0
-      ? {}
-      : { parentBlockIds: [...input.parentBlockIds] }),
-    ...(input.directMessageIds === undefined ? {} : { directMessageIds: [...input.directMessageIds] }),
-    ...(input.effectiveMessageIds === undefined ? {} : { effectiveMessageIds: [...input.effectiveMessageIds] }),
-  } as CompactionSummaryData & AcpCompactionSummaryFields).seq)
+  // Fail fast on an unresolvable range BEFORE writing any durable event. If we
+  // let the host's surfaceOp replace throw below, we would first have recorded
+  // compaction/start and compaction/summary and then leave a dangling start
+  // (poisoning every later compress call) plus an orphan summary in the ledger.
+  // Validating the edges up front keeps a bad range a clean, zero-write no-op.
+  if (input.start > input.end) {
+    throw new Error(`billion-context-dsh: reversed range ${input.start}..${input.end}`)
+  }
+  if (eventAtOf(session, input.start) === undefined || eventAtOf(session, input.end) === undefined) {
+    const failedEdge = eventAtOf(session, input.start) === undefined ? input.start : input.end
+    throw new Error(
+      `billion-context-dsh: seq ${input.start}..${input.end} not in the current surface — `
+      + `edge seq ${failedEdge} is not in this session's log. `
+      + 'Surface seqs are sparse message nodes (only user/message, assistant/message, '
+      + 'tool/result events); consult acp_status for the current surface range',
+    )
+  }
 
-  const message = createUserMessage({
-    content: input.summary,
-    source: compactCheckpointSource(compactionId),
-  })
-  seqs.push(session.append('user/message', message, {
-    surfaceOp: { op: 'replace', start: input.start as SurfaceSeq, end: input.end as SurfaceSeq },
-    sourceEventSeqs: [...input.shadowedSeqs] as SurfaceSeq[],
-  }).seq)
+  try {
+    seqs.push(session.append('compaction/start', { compactionId, turn }).seq)
+    seqs.push(session.append('compaction/summary', {
+      compactionId,
+      summary: input.summary,
+      shadowedRange: { start: input.start, end: input.end },
+      shadowedSeqs: [...input.shadowedSeqs],
+      shadowedTokenCount: input.shadowedTokenCount,
+      provider: input.provider,
+      model: input.model,
+      tier: input.tier ?? 1,
+      ...(input.kernelBlockId === undefined ? {} : { kernelBlockId: input.kernelBlockId }),
+      ...(input.topic === undefined ? {} : { topic: input.topic }),
+      ...(input.parentBlockIds === undefined || input.parentBlockIds.length === 0
+        ? {}
+        : { parentBlockIds: [...input.parentBlockIds] }),
+      ...(input.directMessageIds === undefined ? {} : { directMessageIds: [...input.directMessageIds] }),
+      ...(input.effectiveMessageIds === undefined ? {} : { effectiveMessageIds: [...input.effectiveMessageIds] }),
+    } as CompactionSummaryData & AcpCompactionSummaryFields).seq)
 
-  seqs.push(session.append('compaction/end', { compactionId, turn }).seq)
+    const message = createUserMessage({
+      content: input.summary,
+      source: compactCheckpointSource(compactionId),
+    })
+    seqs.push(session.append('user/message', message, {
+      surfaceOp: { op: 'replace', start: input.start as SurfaceSeq, end: input.end as SurfaceSeq },
+      sourceEventSeqs: [...input.shadowedSeqs] as SurfaceSeq[],
+    }).seq)
+
+    seqs.push(session.append('compaction/end', { compactionId, turn }).seq)
+  } catch (error) {
+    // Backstop: if any append AFTER compaction/start throws (the host rejects
+    // the surfaceOp replace for a reason we did not pre-validate, the summary
+    // serialization fails, …), write a compensating compaction/end so the
+    // durable log never holds a dangling start that would block every later
+    // compress call. A leftover compaction/summary with no applied replace is
+    // surfaced as an orphan ledger block, which is preferable to a hard
+    // permanent block.
+    try {
+      session.append('compaction/end', { compactionId, turn })
+    } catch (compensateError) {
+      // The durable log may now hold a dangling compaction/start; the next
+      // assertNoActiveCompaction call heals it. Never mask the original error.
+      console.warn('billion-context-dsh: failed to write a compensating compaction/end', compensateError)
+    }
+    throw error
+  }
   return { compactionId, seqs }
 }
 

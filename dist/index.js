@@ -2881,7 +2881,7 @@ function assertNoActiveCompaction(events) {
     else if (event.type === "compaction/end") active = false;
   }
   if (active) {
-    throw new Error("billion-context-dsh: another compaction is already active for this session");
+    console.warn("billion-context-dsh: clearing stale compaction flag \u2014 found a compaction/start with no matching compaction/end");
   }
 }
 function hasPlainRef(session, seq) {
@@ -3012,31 +3012,49 @@ function runCompactionTransaction(session, input) {
   const turn = findOpenTurn(sessionEventsOf(session));
   const compactionId = CompactionId(randomUUID());
   const seqs = [];
-  seqs.push(session.append("compaction/start", { compactionId, turn }).seq);
-  seqs.push(session.append("compaction/summary", {
-    compactionId,
-    summary: input.summary,
-    shadowedRange: { start: input.start, end: input.end },
-    shadowedSeqs: [...input.shadowedSeqs],
-    shadowedTokenCount: input.shadowedTokenCount,
-    provider: input.provider,
-    model: input.model,
-    tier: input.tier ?? 1,
-    ...input.kernelBlockId === void 0 ? {} : { kernelBlockId: input.kernelBlockId },
-    ...input.topic === void 0 ? {} : { topic: input.topic },
-    ...input.parentBlockIds === void 0 || input.parentBlockIds.length === 0 ? {} : { parentBlockIds: [...input.parentBlockIds] },
-    ...input.directMessageIds === void 0 ? {} : { directMessageIds: [...input.directMessageIds] },
-    ...input.effectiveMessageIds === void 0 ? {} : { effectiveMessageIds: [...input.effectiveMessageIds] }
-  }).seq);
-  const message = createUserMessage({
-    content: input.summary,
-    source: compactCheckpointSource(compactionId)
-  });
-  seqs.push(session.append("user/message", message, {
-    surfaceOp: { op: "replace", start: input.start, end: input.end },
-    sourceEventSeqs: [...input.shadowedSeqs]
-  }).seq);
-  seqs.push(session.append("compaction/end", { compactionId, turn }).seq);
+  if (input.start > input.end) {
+    throw new Error(`billion-context-dsh: reversed range ${input.start}..${input.end}`);
+  }
+  if (eventAtOf(session, input.start) === void 0 || eventAtOf(session, input.end) === void 0) {
+    const failedEdge = eventAtOf(session, input.start) === void 0 ? input.start : input.end;
+    throw new Error(
+      `billion-context-dsh: seq ${input.start}..${input.end} not in the current surface \u2014 edge seq ${failedEdge} is not in this session's log. Surface seqs are sparse message nodes (only user/message, assistant/message, tool/result events); consult acp_status for the current surface range`
+    );
+  }
+  try {
+    seqs.push(session.append("compaction/start", { compactionId, turn }).seq);
+    seqs.push(session.append("compaction/summary", {
+      compactionId,
+      summary: input.summary,
+      shadowedRange: { start: input.start, end: input.end },
+      shadowedSeqs: [...input.shadowedSeqs],
+      shadowedTokenCount: input.shadowedTokenCount,
+      provider: input.provider,
+      model: input.model,
+      tier: input.tier ?? 1,
+      ...input.kernelBlockId === void 0 ? {} : { kernelBlockId: input.kernelBlockId },
+      ...input.topic === void 0 ? {} : { topic: input.topic },
+      ...input.parentBlockIds === void 0 || input.parentBlockIds.length === 0 ? {} : { parentBlockIds: [...input.parentBlockIds] },
+      ...input.directMessageIds === void 0 ? {} : { directMessageIds: [...input.directMessageIds] },
+      ...input.effectiveMessageIds === void 0 ? {} : { effectiveMessageIds: [...input.effectiveMessageIds] }
+    }).seq);
+    const message = createUserMessage({
+      content: input.summary,
+      source: compactCheckpointSource(compactionId)
+    });
+    seqs.push(session.append("user/message", message, {
+      surfaceOp: { op: "replace", start: input.start, end: input.end },
+      sourceEventSeqs: [...input.shadowedSeqs]
+    }).seq);
+    seqs.push(session.append("compaction/end", { compactionId, turn }).seq);
+  } catch (error) {
+    try {
+      session.append("compaction/end", { compactionId, turn });
+    } catch (compensateError) {
+      console.warn("billion-context-dsh: failed to write a compensating compaction/end", compensateError);
+    }
+    throw error;
+  }
   return { compactionId, seqs };
 }
 function summarySeqOfCompaction(events, compactionId) {
