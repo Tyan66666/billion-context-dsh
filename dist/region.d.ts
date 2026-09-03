@@ -39,7 +39,19 @@ export interface AcpBlockLedgerEntry {
 }
 /** The open turn number, or null when the log ends between turns. */
 export declare function findOpenTurn(events: readonly SessionEvent[]): number | null;
-/** Reject a second concurrent compaction for the same session. */
+/**
+ * Reject a second concurrent compaction for the same session.
+ *
+ * Compaction is synchronous and a session is single-writer, so a
+ * `compaction/start` with NO matching `compaction/end` in the durable log can
+ * only be a stale leftover from a prior run that died mid-write (a hard kill,
+ * not a caught throw — every caught throw is paired with a compensating
+ * `compaction/end` in runCompactionTransaction). Such a leftover must NOT
+ * permanently block every later compress call: this treats it as stale,
+ * surfaces it once, and lets a new compaction proceed. The old "already
+ * active" throw only fired when a genuine concurrent compaction existed,
+ * which the synchronous single-writer premise makes impossible.
+ */
 export declare function assertNoActiveCompaction(events: readonly SessionEvent[]): void;
 /**
  * A requested range whose EVERY live message was already shadowed by one or

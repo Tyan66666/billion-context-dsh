@@ -289,10 +289,67 @@ test('M5: recovery never folds block checkpoint nodes (distillation stays explic
   assert.deepEqual(resolveSurfaceRange(gapped, 3, 9), { start: 6, end: 7, recovered: true })
 })
 
-test('M5: a second active compaction is rejected', () => {
+test('M5: a stale dangling compaction/start self-heals instead of poisoning the session', () => {
   const session = buildTextSession(4)
+  // A compaction/start with no matching compaction/end in the durable log can
+  // only be a leftover from a run that died mid-write; it must not permanently
+  // block every later compress call.
   session.append('compaction/start', { compactionId: 'c1', turn: 1 })
-  assert.throws(() => assertNoActiveCompaction(session.events), /already active/)
+  const warns: string[] = []
+  const realWarn = console.warn
+  console.warn = (message: unknown, ...rest: unknown[]) => { warns.push(String(message)) }
+  try {
+    assert.doesNotThrow(() => assertNoActiveCompaction(session.events))
+  } finally {
+    console.warn = realWarn
+  }
+  assert.ok(
+    warns.some((message) => message.includes('clearing stale compaction flag')),
+    'surfaces the heal with a warning instead of throwing',
+  )
+})
+
+test('M5: runCompactionTransaction fails fast on a range that is not in the surface (zero events written)', () => {
+  const session = buildTextSession(4)
+  const before = session.events.length
+  assert.throws(
+    () => runCompactionTransaction(session, {
+      start: 99,
+      end: 100,
+      shadowedSeqs: [99, 100],
+      summary: [{ type: 'text', text: 'A summary of a range that is not on this surface.' }],
+      shadowedTokenCount: 0,
+      provider: 'test-provider',
+      model: 'test-model',
+    }),
+    /not in the current surface/,
+  )
+  // The failure is detected BEFORE any durable event is written, so a bad
+  // range never leaves a dangling compaction/start or an orphan summary.
+  assert.equal(session.events.length, before, 'no durable event was written')
+})
+
+test('M5: a failed compaction transaction writes a compensating compaction/end before rethrowing', () => {
+  const session = buildTextSession(8)
+  runCompactionTransaction(session, {
+    start: 1, end: 4, shadowedSeqs: [1, 2, 3, 4],
+    summary: [{ type: 'text', text: 'A summary of the range.' }],
+    shadowedTokenCount: 123, provider: 'test-provider', model: 'test-model',
+  })
+  // Compress the SAME span again: the host's surfaceOp replace now rejects it
+  // ("start seq N not found in surface"), which is exactly the live failure
+  // that used to leave a dangling compaction/start behind.
+  assert.throws(
+    () => runCompactionTransaction(session, {
+      start: 1, end: 4, shadowedSeqs: [1, 2, 3, 4],
+      summary: [{ type: 'text', text: 'A summary of the range.' }],
+      shadowedTokenCount: 123, provider: 'test-provider', model: 'test-model',
+    }),
+    /surface replace/,
+  )
+  // The transaction appended compaction/start then compaction/summary, and the
+  // catch block added a compensating compaction/end — never a dangling start.
+  assert.equal(session.events[session.events.length - 1]!.type, 'compaction/end')
 })
 
 test('M5: tool-call ranges are auto-adjusted to balanced edges', () => {
