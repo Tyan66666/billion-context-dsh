@@ -35,12 +35,18 @@ async function statusText(env: ToolEnvironment, agent: Agent): Promise<string> {
   const estimated = resolveTokenCount(agent, surfaceMessages)
   const window = await resolveEffectiveWindow(env, agent)
   const limit = window.limit
+  // The window line reveals the output-reservation subtraction: the displayed
+  // limit is the SUSTAINABLE input budget the percentage above is measured
+  // against, and the raw window stays visible so an operator can see both.
+  const windowLine = window.rawLimit !== undefined && window.outputReserved !== undefined
+    ? `  context window: ${limit} (raw ${window.rawLimit} − ${window.outputReserved} output reservation; ${windowSourceLabel(window)})`
+    : `  context window: ${limit} (${windowSourceLabel(window)})`
   const lines = [
     `ACP status — session ${session.id}`,
     `  blocks: ${ledger.length}`,
     `  tokens compressed: ${totalTokens}`,
     `  estimated context: ${estimated} / ${limit} (${Math.round((estimated / limit) * 100)}%)`,
-    `  context window: ${limit} (${windowSourceLabel(window)})`,
+    windowLine,
   ]
   // A failed probe falls back to the 128K default AND is cached for the
   // process lifetime — the /acp panel must say so explicitly, or the operator

@@ -128,6 +128,8 @@ export declare class AcpCompactionEngine extends CompactionEngine {
     private readonly compressCallIdsToHide;
     /** Per provider/model route the resolved window (probe failures cached too). */
     private readonly windowCache;
+    /** Per route the adapter's per-request output cap (the output reservation); null = undisclosed. */
+    private readonly outputReservationCache;
     constructor(ctx: Context, config?: Partial<AcpConfig>);
     /**
      * Resolve the effective context window for an agent. An explicitly
@@ -138,9 +140,31 @@ export declare class AcpCompactionEngine extends CompactionEngine {
      * projectedContextWindow). Falls back to probing the model's real window
      * via `agent.ctx.llm.resolveModelInfo` (cached per provider/model route,
      * probe failures cached too) and finally to DEFAULT_CONTEXT_WINDOW when
-     * auto-detection is disabled or unavailable.
+     * auto-detection is disabled or unavailable. On the auto-detected paths the
+     * adapter's per-request output cap is then SUBTRACTED from the window
+     * (applyReservation): every downstream usage computation must run against
+     * the SUSTAINABLE input budget (window minus output reservation), not the
+     * raw window — a 96K window with a 16K cap carries at most 80K of input,
+     * so the raw denominator understates usage by cap/window (≈17% there, and
+     * far worse on short-window models). An explicit limit keeps the operator's
+     * exact value (they own the denominator); a failed probe keeps the raw
+     * fallback.
      */
     windowFor(agent: Agent): Promise<AcpWindow>;
+    /**
+     * The adapter's per-request output cap for a route, from one
+     * probeModelWindow call (a local catalog lookup — no request is sent),
+     * cached per route like the window itself.
+     */
+    private outputCapFor;
+    /**
+     * Subtract the output reservation from a resolved window: `limit` becomes
+     * the SUSTAINABLE input budget (`rawLimit - outputReserved`) that every
+     * downstream usage computation (nudge tiers, truncate, growth) measures
+     * against. No-op when the cap is unknown or not smaller than the window
+     * (degenerate config) — the raw-window behavior is preserved.
+     */
+    private applyReservation;
     /** ACP is model-driven: automatic pressure policy never summarizes by itself. */
     compactIfNeeded(_agent: CompactionAgentContext, _trigger: CompactionTrigger, signal: AbortSignal): Promise<CompactionResult | null>;
     /** Explicit idle-session compaction: ACP leaves the decision to the model. */
