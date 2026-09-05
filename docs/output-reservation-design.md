@@ -1,59 +1,52 @@
-# Output-reservation subtraction (window − defaultMaxTokens)
+# 输出预留扣减（window − defaultMaxTokens）
 
-## Problem
+## 问题
 
-Every usage computation in the plugin divides the session's estimated tokens
-by the model's RAW context window (`usage = tokenCount / window.limit`). But
-providers reserve the adapter's per-request output cap (`defaultMaxTokens` on
-the resolved model info — the output cap applied when callers omit one) at the
-END of the window on every request. Input beyond `window − cap` is rejected or
-truncated mid-answer, so the raw window is not the budget a session can
-sustain.
+插件里的所有用量计算都是「估算 token 数 ÷ 模型原始上下文窗口」
+（`usage = tokenCount / window.limit`）。但每个提供商都会在窗口的**尾部**
+预留适配器每次请求的输出上限（解析后的模型信息里的 `defaultMaxTokens` ——
+调用方未显式指定 maxTokens 时生效的输出上限）。超出 `window − cap` 的输入
+会被拒绝或在中途截断，所以原始窗口并不是会话可持续使用的预算。
 
-## Why short windows were distorted the most
+## 为什么小窗口模型失真最严重
 
-The error is `cap / window`. On a 96K window with a 16K cap that is ≈16.7%:
-the old 85% line (81.6K) plus the 16K output overflowed the window entirely
-(97.6K > 96K), and the 95% line (91.2K) overflowed by 11K. On a short-window
-model the SAME absolute cap is a much larger fraction of the window (a 16K cap
-on a 32K window is 50%), so short-context models were the most distorted —
-their nudge/truncate lines sat far beyond what the provider would ever accept.
+误差是 `cap / window`。96K 窗口 + 16K 上限时约 16.7%：旧的 85% 线（81.6K）
+加上 16K 输出会完全撑爆窗口（97.6K > 96K）；95% 线（91.2K）也超了 11K。
+窗口越小的模型，同样的绝对上限占窗口的比例越大（32K 窗口上 16K 上限就是
+50%），所以小上下文模型失真最严重——它们的 nudge / truncate 线落在提供商
+永远不会接受的区间之外。
 
-## Fix (single seam)
+## 修复（单点缝合）
 
-`probeModelWindow()` in `src/window.ts` makes ONE `resolveModelInfo` call and
-returns `{ contextWindow, outputReservation }` (`detectContextWindow` is now a
-thin wrapper around it). `AcpCompactionEngine.windowFor()` in `src/index.ts`
-applies the subtraction in exactly one place, `applyReservation()`:
+`src/window.ts` 的 `probeModelWindow()` 只做**一次** `resolveModelInfo` 调用，
+返回 `{ contextWindow, outputReservation }`（`detectContextWindow` 现在是它的
+薄封装）。`src/index.ts` 的 `AcpCompactionEngine.windowFor()` 在唯一一处
+`applyReservation()` 里扣减：
 
-- **auto path** — window + cap come from the same probe; a failed probe keeps
-  the raw 128K fallback AND drops the cap (the probe disclosed nothing).
-- **projection path** — window from the live projection (the projection schema
-  carries no cap); cap from the same cached model probe. After a mid-session
-  model switch `agent.options` names the PREVIOUS route, so the cap is
-  best-available, not the live route's.
-- **explicit `modelContextLimit`** — never probed, never subtracted: the
-  operator's value is the denominator, full stop.
-- **`autoModelContextLimit: false` / cap ≥ window (degenerate)** — raw
-  behavior preserved.
+- **auto 路径** — 窗口与上限来自同一次探测；探测失败时保留原始 128K 兜底，
+  同时**丢弃上限**（探测没给出任何信息）。
+- **projection 路径** — 窗口来自实时投影（投影 schema 不携带上限）；上限来自
+  同一个按路由缓存的模型探测。会话中途切换模型后 `agent.options` 指向的是
+  **旧**路由，所以上限是「尽力可得」值，不是当前路由的。
+- **显式 `modelContextLimit`** — 从不探测、从不扣减：操作者的值就是分母，
+  到此为止。
+- **`autoModelContextLimit: false` / 上限 ≥ 窗口（退化）** — 保持原始行为。
 
-The result carries `rawLimit` and `outputReserved`, so `/acp status` shows
-`context window: 79616 (raw 96000 − 16384 output reservation; auto)` instead
-of hiding the arithmetic.
+结果携带 `rawLimit` 与 `outputReserved`，因此 `/acp status` 显示
+`context window: 79616 (raw 96000 − 16384 output reservation; auto)`，
+而不是把算术藏起来。
 
-## Inheritance
+## 继承
 
-Every downstream consumer already receives `window.limit` as
-`modelContextLimit` (nudge tiers via `agent/pre-step`, the kernel config for
-`compress` / `acp_status`, truncate, growth) — subtracting once at the seam
-fixes all of them with no per-site changes.
+所有下游消费者都已经把 `window.limit` 当 `modelContextLimit` 接收（nudge
+分层经 `agent/pre-step`、`compress` / `acp_status` 的 kernel 配置、truncate、
+growth）——在缝合处扣减一次，所有站点一次性修正，无需逐点改动。
 
-## Verification
+## 验证
 
-`tests/window.test.ts`: one-probe shape (96000 + 16384 in a single call),
-undisclosed/failing/missing probes → nulls, auto-path subtraction
-(96000 − 16384 = 79616 with `rawLimit`/`outputReserved`), projection-path
-subtraction + cap caching (one probe per route), no-cap no-op, degenerate
-cap ≥ window, explicit never subtracted (and never probed). All pre-existing
-window tests keep their original expectations (explicit never probes;
-probe-failed `deepEqual` unchanged; `autoModelContextLimit: false` untouched).
+`tests/window.test.ts`：单次探测形状（96000 + 16384 一次调用取回）、
+未披露/失败/缺失的探测 → null、auto 路径扣减（96000 − 16384 = 79616，
+带 `rawLimit`/`outputReserved`）、projection 路径扣减 + 上限缓存
+（每条路由一次探测）、无上限 no-op、上限 ≥ 窗口的退化情形、显式值从不
+扣减（也从不探测）。所有既有窗口测试保持原期望（显式值不探测；探测失败的
+`deepEqual` 不变；`autoModelContextLimit: false` 不动）。
