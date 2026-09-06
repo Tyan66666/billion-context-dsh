@@ -4383,17 +4383,23 @@ function projectedContextWindow(agent) {
   if (typeof window === "number" && Number.isInteger(window) && window > 0) return window;
   return null;
 }
-async function detectContextWindow(agent, provider, model) {
+async function probeModelWindow(agent, provider, model) {
   const llm = agent.ctx?.get?.("llm");
-  if (llm?.resolveModelInfo === void 0) return null;
+  if (llm?.resolveModelInfo === void 0) return { contextWindow: null, outputReservation: null };
   try {
     const info = await llm.resolveModelInfo(provider, model);
     const window = info?.context?.contextWindow;
-    if (typeof window === "number" && Number.isInteger(window) && window > 0) return window;
-    return null;
+    const cap = info?.defaultMaxTokens;
+    return {
+      contextWindow: typeof window === "number" && Number.isInteger(window) && window > 0 ? window : null,
+      outputReservation: typeof cap === "number" && Number.isInteger(cap) && cap > 0 ? cap : null
+    };
   } catch {
-    return null;
+    return { contextWindow: null, outputReservation: null };
   }
+}
+async function detectContextWindow(agent, provider, model) {
+  return (await probeModelWindow(agent, provider, model)).contextWindow;
 }
 
 // src/commands.ts
@@ -4406,12 +4412,13 @@ async function statusText(env, agent) {
   const estimated = resolveTokenCount(agent, surfaceMessages);
   const window = await resolveEffectiveWindow(env, agent);
   const limit = window.limit;
+  const windowLine = window.rawLimit !== void 0 && window.outputReserved !== void 0 ? `  context window: ${limit} (raw ${window.rawLimit} \u2212 ${window.outputReserved} output reservation; ${windowSourceLabel(window)})` : `  context window: ${limit} (${windowSourceLabel(window)})`;
   const lines = [
     `ACP status \u2014 session ${session.id}`,
     `  blocks: ${ledger.length}`,
     `  tokens compressed: ${totalTokens}`,
     `  estimated context: ${estimated} / ${limit} (${Math.round(estimated / limit * 100)}%)`,
-    `  context window: ${limit} (${windowSourceLabel(window)})`
+    windowLine
   ];
   if (window.probeFailed === true) {
     lines.push(`  \u26A0 window auto-detection failed \u2014 using the ${limit} fallback (restart to re-probe, or set modelContextLimit explicitly)`);
@@ -4540,6 +4547,8 @@ var AcpCompactionEngine = class extends CompactionEngine {
   compressCallIdsToHide = /* @__PURE__ */ new Set();
   /** Per provider/model route the resolved window (probe failures cached too). */
   windowCache = /* @__PURE__ */ new Map();
+  /** Per route the adapter's per-request output cap (the output reservation); null = undisclosed. */
+  outputReservationCache = /* @__PURE__ */ new Map();
   constructor(ctx, config = {}) {
     super(ctx);
     this.config = resolveAcpConfig(config);
@@ -4648,7 +4657,15 @@ var AcpCompactionEngine = class extends CompactionEngine {
    * projectedContextWindow). Falls back to probing the model's real window
    * via `agent.ctx.llm.resolveModelInfo` (cached per provider/model route,
    * probe failures cached too) and finally to DEFAULT_CONTEXT_WINDOW when
-   * auto-detection is disabled or unavailable.
+   * auto-detection is disabled or unavailable. On the auto-detected paths the
+   * adapter's per-request output cap is then SUBTRACTED from the window
+   * (applyReservation): every downstream usage computation must run against
+   * the SUSTAINABLE input budget (window minus output reservation), not the
+   * raw window — a 96K window with a 16K cap carries at most 80K of input,
+   * so the raw denominator understates usage by cap/window (≈17% there, and
+   * far worse on short-window models). An explicit limit keeps the operator's
+   * exact value (they own the denominator); a failed probe keeps the raw
+   * fallback.
    */
   async windowFor(agent) {
     if (this.config.modelContextLimit !== void 0) {
@@ -4660,27 +4677,57 @@ var AcpCompactionEngine = class extends CompactionEngine {
     if (this.config.autoModelContextLimit) {
       const projected = projectedContextWindow(agent);
       if (projected !== null) {
-        return { limit: projected, source: "projection", provider, model };
+        const cap2 = await this.outputCapFor(agent, provider, model);
+        return this.applyReservation({ limit: projected, source: "projection", provider, model }, cap2);
       }
     }
     const cached = this.windowCache.get(key);
     if (cached !== void 0) return cached;
     let window;
+    let cap = null;
     if (!this.config.autoModelContextLimit) {
       window = { limit: DEFAULT_CONTEXT_WINDOW, source: "default", provider, model };
     } else {
-      const detected = await detectContextWindow(agent, provider, model);
-      if (detected === null) {
+      const probe = await probeModelWindow(agent, provider, model);
+      cap = probe.outputReservation;
+      if (probe.contextWindow === null) {
         this.ctx.logger.warn(
           `billion-context-dsh: context-window auto-detection failed for ${provider}/${model} \u2014 using the ${DEFAULT_CONTEXT_WINDOW} fallback (restart to re-probe, or set modelContextLimit explicitly)`
         );
         window = { limit: DEFAULT_CONTEXT_WINDOW, source: "default", provider, model, probeFailed: true };
+        cap = null;
       } else {
-        window = { limit: detected, source: "auto", provider, model };
+        window = { limit: probe.contextWindow, source: "auto", provider, model };
       }
     }
+    window = this.applyReservation(window, cap);
     this.windowCache.set(key, window);
     return window;
+  }
+  /**
+   * The adapter's per-request output cap for a route, from one
+   * probeModelWindow call (a local catalog lookup — no request is sent),
+   * cached per route like the window itself.
+   */
+  async outputCapFor(agent, provider, model) {
+    if (provider === "" || model === "") return null;
+    const key = `${provider}\0${model}`;
+    const known = this.outputReservationCache.get(key);
+    if (known !== void 0) return known;
+    const cap = (await probeModelWindow(agent, provider, model)).outputReservation;
+    this.outputReservationCache.set(key, cap);
+    return cap;
+  }
+  /**
+   * Subtract the output reservation from a resolved window: `limit` becomes
+   * the SUSTAINABLE input budget (`rawLimit - outputReserved`) that every
+   * downstream usage computation (nudge tiers, truncate, growth) measures
+   * against. No-op when the cap is unknown or not smaller than the window
+   * (degenerate config) — the raw-window behavior is preserved.
+   */
+  applyReservation(window, cap) {
+    if (cap === null || cap >= window.limit) return window;
+    return { ...window, rawLimit: window.limit, outputReserved: cap, limit: window.limit - cap };
   }
   /** ACP is model-driven: automatic pressure policy never summarizes by itself. */
   async compactIfNeeded(_agent, _trigger, signal) {

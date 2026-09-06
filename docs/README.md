@@ -30,7 +30,7 @@ src/
 ├── system-prompt.ts# M4: one-time ACP guidance section
 ├── config.ts       # kernel config assembly (thresholds + coreOverrides)
 ├── host-tokens.ts  # shadow-price pricing: host-vocabulary mirror + shadowedTokensViaMeter (meter preferred, mirror fallback) — rule 12
-├── window.ts       # auto context-window detection (LLM runtime probe, fallback 128000)
+├── window.ts       # auto context-window detection (session projection first, LLM runtime probe fallback, default 128000) + output-reservation probe (defaultMaxTokens, subtracted in windowFor)
 └── commands.ts     # M4: /acp slash command
 ```
 
