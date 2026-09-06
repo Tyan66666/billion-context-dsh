@@ -19,6 +19,7 @@
 
 import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
 import { createInitialState, type CompressionBlock, type CompressionState } from 'acp-kernel'
+import { DEFAULT_SESSION_CACHE_LIMIT, LruMap } from './lru.ts'
 import { rebuildBlockLedger } from './region.ts'
 import { sessionEventsOf } from './session-events.ts'
 
@@ -97,8 +98,32 @@ function nextBlockIdAfter(events: readonly SessionEvent[]): number {
   return max + 1
 }
 
+/** The next kernel run id after the rehydrated blocks (or the initial 1). */
+function nextRunIdAfter(blocks: readonly CompressionBlock[]): number {
+  let max = 0
+  for (const block of blocks) {
+    const num = Number(block.runId.slice(1))
+    if (Number.isInteger(num)) max = Math.max(max, num)
+  }
+  return max + 1
+}
+
 export class AcpStateStore {
-  private readonly states = new Map<string, CompressionState>()
+  /**
+   * Live kernel states, capped by an LRU policy (issue #113): once the cap is
+   * reached the coldest session's state is dropped, and its next access
+   * rehydrates through stateFor's log-rebuild path below. Rehydration is
+   * deterministic — bN ids are recorded in the durable event or synthesised
+   * in ledger order, and run ids continue after the rehydrated max — so block
+   * identity survives eviction exactly as it survives a restart. Kernel
+   * fields that reset on eviction (tokenSnapshot, nudge cadence, stats
+   * counters) all self-heal on the session's next turn.
+   */
+  private readonly states: LruMap<string, CompressionState>
+
+  constructor(limit: number = DEFAULT_SESSION_CACHE_LIMIT) {
+    this.states = new LruMap(limit)
+  }
 
   /** Kernel state for one session, initialised on first access. */
   stateFor(session: Session): CompressionState {
@@ -110,6 +135,7 @@ export class AcpStateStore {
     if (events.some((event) => event.type === 'compaction/summary')) {
       state.blocks = rebuildKernelBlocks(events)
       state.nextBlockId = nextBlockIdAfter(events)
+      state.nextRunId = nextRunIdAfter(state.blocks)
     }
     this.states.set(id, state)
     return state
