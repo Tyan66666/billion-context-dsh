@@ -12,8 +12,11 @@ import { existsSync, readFileSync, statSync } from 'node:fs'
 // cannot silently re-break git installs.
 //
 // Freshness (the committed dist actually matching the current source) is
-// enforced separately by the CI build step (`git status --porcelain -- dist`),
-// which rebuilding cannot express inside a unit test.
+// maintained by the dist-bot (`.github/workflows/dist-bot.yml`: rebuild and
+// push fresh artifacts to main after every merge that can change the build
+// output) and backstopped by the CI check (`git status --porcelain -- dist`,
+// run daily on a schedule and on the bot's own commits — see ci.yml) —
+// neither is expressible inside a unit test.
 
 const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as {
 	main: string
