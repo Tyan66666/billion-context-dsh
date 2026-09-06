@@ -85,8 +85,8 @@ export function appendMultiToolCall(session: Session, text: string, callIds: rea
 }
 
 /** A session with `count` alternating user/assistant text messages inside one open turn. */
-export function buildTextSession(count: number): Session {
-  const session = Session.create('test-session')
+export function buildTextSession(count: number, id: string = 'test-session'): Session {
+  const session = Session.create(id)
   appendTurn(session, 1)
   for (let index = 0; index < count; index += 1) {
     if (index % 2 === 0) appendUser(session, longText('msg', index))
