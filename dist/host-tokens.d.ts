@@ -11,20 +11,10 @@
  * display currency, NEVER event currency).
  *
  * This module prices claims in the host's vocabulary: it prefers the live
- * meter's own per-node FIXED-HEURISTIC prices (`ctx.tokenMeter.measure(session)`
- * nodes' `heuristicTokens` — the same basis the projection ledger accumulates
- * appends with, so the claim is exact by construction) and falls back to an
+ * meter's own per-node prices (`ctx.tokenMeter.measure(session).nodes` —
+ * exact by construction, follows host estimator changes automatically, the
+ * same path the host's own `compaction-basic` uses) and falls back to an
  * exact mirror of the host's estimator when the meter is unreachable.
- *
- * Two vocabularies share the meter's node since DSH 0.1.2: `tokens` carries
- * the measured route's request pressure (image occurrences re-priced with the
- * route's declared visual tokens) while `heuristicTokens` keeps the fixed
- * flat-4 heuristic the ledger prices appends with. The claim MUST read
- * `heuristicTokens`: a routed `tokens` claim overstates the replaced range
- * against its own ledger accumulation and folds `messageTokens` negative —
- * the same session-bricking schema rejection as #54, through the image-route
- * channel (issue #103). Older hosts (0.1.0/0.1.1 lines) expose a single
- * `tokens` field that IS the fixed heuristic, so the fallback reads it.
  */
 import type { Session, SessionEvent } from '@deepseek-ai/dsh-session';
 /** The host's model-visible content block union (structural, mirror-side only). */
@@ -71,17 +61,8 @@ export declare function hostPriceEvent(event: SessionEvent): number;
 export declare function shadowedHostTokens(session: Session, seqs: readonly number[]): number;
 /**
  * Claim price for `seqs` in the host's vocabulary. Prefers the live meter's
- * own per-node FIXED-HEURISTIC prices when `ctx.tokenMeter` is reachable and
- * covers every shadowed seq (exact by construction — the ledger's
- * `foldSurfaceProjection` accumulates appends with the same fixed heuristic,
- * so the claim and the ledger stay in agreement; follows host estimator
- * changes automatically). `node.heuristicTokens` is that basis since DSH 0.1.2;
- * `node.tokens` there is the measured route's REQUEST pressure (image
- * occurrences carry the route's visual price via `priceSurface`) and MUST NOT
- * be claimed — reading it overstates the claim and folds the host projection
- * negative on image-containing ranges (issue #103, the image-route channel of
- * the #54 brick). Older meters expose a single `tokens` field that IS the
- * fixed heuristic, so `heuristicTokens ?? tokens` covers both shapes. ANY
+ * own per-node prices when `ctx.tokenMeter` is reachable and covers every
+ * shadowed seq (exact by construction, follows host estimator changes); ANY
  * failure — meter absent, `measure` throwing (e.g. a step-less log), or a seq
  * missing from the measurement — falls back to the exact mirror. Never returns
  * a `defaultCountTokens` price (rule 12).

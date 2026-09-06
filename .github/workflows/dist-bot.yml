@@ -1,0 +1,69 @@
+name: Dist Bot
+
+# `dist/` is committed so git-source installs work without a build step
+# (pnpm blocks dependency build scripts by default — issue #92). This bot
+# keeps main's dist fresh WITHOUT touching contributor branches: after every
+# merge that can change the build output, it rebuilds and, if the artifacts
+# differ, pushes one dist commit directly to main. PR branches never carry
+# dist, so contributors never pull bot commits and never resolve dist
+# conflicts.
+#
+# Pushing to the protected main needs the `DIST_BOT_TOKEN` secret — the
+# maintainer's fine-grained PAT (Contents: read/write on this repo). Main's
+# branch protection has `enforce_admins` disabled, so this admin credential
+# may push directly; the default GITHUB_TOKEN cannot, and humans still land
+# everything via PRs.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'tsup.config.ts'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: dist-bot-main
+  cancel-in-progress: true
+
+jobs:
+  sync-dist:
+    # Belt-and-braces loop guard: the dist/ paths filter already keeps this
+    # workflow from re-triggering on the bot's own dist commit.
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The default GITHUB_TOKEN cannot push to the protected main; the
+          # maintainer's PAT can (enforce_admins is disabled on main).
+          token: ${{ secrets.DIST_BOT_TOKEN }}
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Commit fresh dist to main
+        run: |
+          if [ -z "$(git status --porcelain -- dist)" ]; then
+            echo 'dist/ already matches the source — nothing to commit.'
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A dist
+          git commit -m "(chore) refresh dist/ after merge ${{ github.sha }} (dist-bot)"
+          git push

@@ -4,7 +4,7 @@ import {
   ManualCompactionError
 } from "@deepseek-ai/dsh-compaction";
 
-// ../../node_modules/acp-kernel/dist/index.js
+// node_modules/acp-kernel/dist/index.js
 import { createRequire } from "module";
 var REF_WIDTH = 5;
 var MIN_INDEX = 1;
@@ -2847,7 +2847,7 @@ function shadowedTokensViaMeter(session, seqs, ctx) {
   try {
     const meter = ctx?.get?.("tokenMeter");
     if (meter?.measure !== void 0) {
-      const bySeq = new Map(meter.measure(session).nodes.map((node) => [node.seq, node.heuristicTokens ?? node.tokens]));
+      const bySeq = new Map(meter.measure(session).nodes.map((node) => [node.seq, node.tokens]));
       let total = 0;
       let missing = false;
       for (const seq of seqs) {
