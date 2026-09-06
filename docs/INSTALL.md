@@ -90,6 +90,12 @@ dsh plugin --profile web add github:Tyan66666/billion-context-dsh#v0.2.19
         # 你定义。分母配小（如百万窗口模型配 128K）会让使用率虚高 8 倍、
         # nudge 过频。growth 触发阈值（50000）不随此值变化。
         modelContextLimit: 128000
+        # （可选）一句话选择 nudge 的激进程度：preserve / relaxed / balanced /
+        # efficient / aggressive。只填充你未显式设置的三个 nudge 阈值
+        # （优先级 显式值 > preset > engine 默认；未知名称构造期报错）。
+        # balanced == 插件开箱阈值（选它等于不改）。详见 README「预设」与
+        # docs/presets-design.md。
+        # preset: efficient
         # （可选）自定义提示词文案：按槽位覆盖 nudge / 范围表 / system prompt /
         # 工具描述，模板 + 命名占位符，构造期校验（拼写错误启动即抛）。未配置时
         # 用内置默认文案（逐字节不变）。槽位与占位符清单见

@@ -45,9 +45,18 @@ import { ACP_SYSTEM_PROMPT_ORDER } from './system-prompt.ts'
 import { renderSystemPrompt, resolvePrompts, type AcpPrompts, type ResolvedPrompts } from './prompts.ts'
 import { DEFAULT_CONTEXT_WINDOW, probeModelWindow, projectedContextWindow, type AcpWindow } from './window.ts'
 import { deferCompressPairHide, stripOrphanedSurfaceToolMessages } from './region.ts'
+import { PRESETS, PRESET_NAMES, isPresetName, resolvePreset, type NudgePreset, type PresetName } from './presets.ts'
 
 export { AcpStateStore } from './state.ts'
 export { kernelConfigFor, type KernelConfigInput } from './config.ts'
+export {
+  PRESETS,
+  PRESET_NAMES,
+  isPresetName,
+  resolvePreset,
+  type NudgePreset,
+  type PresetName,
+} from './presets.ts'
 export { ACP_SYSTEM_PROMPT, ACP_SYSTEM_PROMPT_ORDER } from './system-prompt.ts'
 export {
   DEFAULT_PROMPTS,
@@ -125,6 +134,16 @@ export interface AcpConfig {
    */
   readonly nudgeEmergencyThresholdPct?: number
   /**
+   * Named bundle for the three nudge thresholds — how eagerly the model is
+   * asked to compress, in one word. One of 'preserve' | 'relaxed' | 'balanced'
+   * | 'efficient' | 'aggressive' (see src/presets.ts). It fills ONLY the nudge
+   * thresholds you did not set explicitly, so precedence is explicit value >
+   * preset > engine default and a partial override on top of a preset still
+   * wins. An unknown name fails engine construction (fail-fast). No effect on
+   * any other knob (`modelContextLimit`, `autoNudge`, prompts, coreOverrides).
+   */
+  readonly preset?: PresetName
+  /**
    * Any other acp-kernel Config override (billion-context-pi's `coreOverrides`
    * escape hatch). Merge order per section: kernel defaults → the engine pct
    * knobs above → these keys land LAST, so a same-name key here wins.
@@ -169,7 +188,23 @@ const DEFAULT_CONFIG: AcpConfig = {
 }
 
 export function resolveAcpConfig(config: Partial<AcpConfig> = {}): AcpConfig {
-  return { ...DEFAULT_CONFIG, ...config }
+  const base = { ...DEFAULT_CONFIG, ...config }
+  if (base.preset === undefined) return base
+  // Fail fast on an unknown preset name (same contract as prompt-template
+  // validation): a typo must break construction, never silently fall back to
+  // the engine defaults.
+  const preset = resolvePreset(base.preset)
+  // Precedence: explicit value > preset > engine default. Read the caller's
+  // EXPLICIT choices from `config`, not from `base` — base already merged
+  // DEFAULT_CONFIG, so `base.X ?? preset.X` would let the engine default (e.g.
+  // max 0.70) mask the preset. `config.X ?? preset.X` keeps an explicit value
+  // while letting the preset fill anything the caller left unset.
+  return {
+    ...base,
+    nudgeMinContextLimitPct: config.nudgeMinContextLimitPct ?? preset.nudgeMinContextLimitPct,
+    nudgeMaxContextLimitPct: config.nudgeMaxContextLimitPct ?? preset.nudgeMaxContextLimitPct,
+    nudgeEmergencyThresholdPct: config.nudgeEmergencyThresholdPct ?? preset.nudgeEmergencyThresholdPct,
+  }
 }
 
 /**
@@ -222,6 +257,10 @@ export class AcpCompactionEngine extends CompactionEngine {
       nudgeMaxContextLimitPct: this.config.nudgeMaxContextLimitPct,
       nudgeEmergencyThresholdPct: this.config.nudgeEmergencyThresholdPct,
       coreOverrides: this.config.coreOverrides,
+      // Display-only: which named preset produced the thresholds above (if any),
+      // so /acp status can name it. The resolved pct values above are what the
+      // kernel actually reads — this field never feeds kernelConfigFor.
+      preset: this.config.preset,
       windowFor: (agent) => this.windowFor(agent),
       prompts: this.prompts,
       compressCallIdsToHide: this.compressCallIdsToHide,

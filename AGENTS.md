@@ -30,6 +30,7 @@ src/
 ├── nudge.ts        # M4: kernel renderNudgeText (default) + seq-range-table adaptation; template path on prompts override
 ├── system-prompt.ts# M4: one-time ACP guidance section
 ├── prompts.ts      # M4: configurable prompt templates + render/validate (config.prompts)
+├── presets.ts      # named nudge-threshold tiers (config.preset): five levels resolved into the nudge*Pct knobs; explicit value > preset > default
 ├── config.ts       # kernel config assembly (thresholds + coreOverrides)
 ├── host-tokens.ts  # shadow-price pricing: host-vocabulary mirror (estimateHostContent/estimateHostMessage/hostPriceEvent) + shadowedTokensViaMeter (ctx.tokenMeter.measure preferred, mirror fallback) — rule 12
 ├── window.ts       # auto context-window detection (session projection first, LLM runtime probe fallback, default 128000) + output-reservation probe (defaultMaxTokens, subtracted in windowFor)

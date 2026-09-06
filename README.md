@@ -218,11 +218,31 @@ DSH 的每个模型请求都派生自其 append-only 会话日志（*surface*）
 | `nudgeMinContextLimitPct` | 内核默认 `0.45` | Nudge 窗口下界（用量占比）——仅作配置校验，增长路径的触发没有百分比下限——与 billion-context-pi 相同的默认值 |
 | `nudgeMaxContextLimitPct` | engine 默认 `0.70`（内核/pi 默认 `0.75`） | 过限线：超过此值则无论增长与否都触发 nudge——刻意低于宿主 compaction-basic 的 80% 自动压缩线，保证强制 nudge 先触发；显式配置优先（`coreOverrides.nudge` 同名键优先级更高，见下） |
 | `nudgeEmergencyThresholdPct` | engine 默认 `0.85`（内核/pi 默认 `0.95`） | 紧急 nudge（绕过每轮去重）——从 `0.95` 下调：95% 时模型已无操作空间且会被 80% 自动压缩线遮蔽；显式配置优先（`coreOverrides.nudge` 同名键优先级更高，见下） |
+| `preset` | — | （可选）一句话选择 nudge 的激进程度：`preserve` / `relaxed` / `balanced` / `efficient` / `aggressive`（详见下文「预设」）。只填充你**未显式设置**的三个 nudge 阈值，优先级 显式值 > `preset` > engine 默认；未知名称在构造期报错。不影响其他键（`modelContextLimit` / `autoNudge` / `prompts` / `coreOverrides`） |
 | `coreOverrides` | — | 任何其他 acp-kernel `Config` 覆盖（billion-context-pi 的 `coreOverrides` 逃生口）。合并顺序：内核默认 → 顶层 pct 配置 → `coreOverrides.nudge` 最后落地——同名键以它为准 |
 | `autoTools` | `true` | 在 `ctx.tools` 注册四个模型工具 |
 | `autoCommand` | `true` | 在 `ctx.commands` 注册 `/acp` 命令 |
 | `autoNudge` | `true` | 当内核建议时向 `agent/pre-step` 注入 nudge |
 | `prompts` | — | （可选）自定义提示词文案：nudge / 范围表 / system prompt / 工具描述按槽位覆盖（模板 + 命名占位符，构造期校验；见上文「自定义提示词文案」与 [docs/configurable-prompts-design.md](docs/configurable-prompts-design.md)） |
+
+## 预设（preset）
+
+不想逐个调三个百分比时，用一个词选择 nudge 的激进程度——从「尽量保留上下文」到「尽早频繁压缩」共五档：
+
+| `preset` | min | max | emergency | 定位 |
+|---|---|---|---|---|
+| `preserve` | 0.55 | 0.78 | 0.93 | 尽量保留上下文，接近上限才提醒压缩 |
+| `relaxed` | 0.50 | 0.75 | 0.90 | 轻度压缩，比 preserve 稍早提醒 |
+| `balanced` | 0.45 | 0.70 | 0.85 | 默认平衡——与插件开箱阈值一致（选它等于不改） |
+| `efficient` | 0.40 | 0.60 | 0.78 | 更勤快地修剪，偏向低 token 占用而非保留完整历史 |
+| `aggressive` | 0.30 | 0.50 | 0.70 | 精简上下文，更早更频繁地压缩 |
+
+- **只填未设的阈值**：`preset` 仅填充你没有显式设置的 `nudge*ContextLimitPct`；同时写了 `preset` 和某个阈值时，该阈值以你的显式值为准（优先级 显式 > preset > 默认）。
+- **不碰其他旋钮**：`modelContextLimit`、`autoNudge`、`prompts`、`coreOverrides` 完全不受影响；`coreOverrides.nudge` 仍最后落地、同名键最高优先。
+- **查看当前档位**：`/acp status` 会打印生效的 `preset` 及其解析后的三个阈值（含你在其上做的显式覆盖）。
+- **拼错即报错**：未知名称在引擎构造期直接抛错并列出合法值（与自定义提示词模板同一约定），不会静默回退默认。
+- **运行时热切换**：预设目前走组合配置（安装 / `cordis.patch.yml`）；待 #75 的 settings.yaml 热加载落地后，可在 `/acp config` 里改。本 PR 先让它在组合层可用。
+- **两个暂未纳入的旋钮**：原始需求里的 `growthRatio`（内核已有 `nudge.growthRatio`，可经 `coreOverrides` 调）和 `protectedLastMessages`（≈ 内核 `preserveRecentMessages`）目前不是本项目的一等旋钮；是否采纳为命名键 / UI 项由维护者决定，未擅自并入预设。
 
 ## 开发
 

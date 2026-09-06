@@ -23,6 +23,7 @@ import { shadowedTokensViaMeter } from './host-tokens.ts'
 import { eventAtOf, sessionEventsOf } from './session-events.ts'
 import { defaultConfig } from 'acp-kernel'
 import { windowSourceLabel } from './window.ts'
+import { PRESETS } from './presets.ts'
 
 async function statusText(env: ToolEnvironment, agent: Agent): Promise<string> {
   const session = agent.session
@@ -48,6 +49,17 @@ async function statusText(env: ToolEnvironment, agent: Agent): Promise<string> {
     `  estimated context: ${estimated} / ${limit} (${Math.round((estimated / limit) * 100)}%)`,
     windowLine,
   ]
+  // Name the active preset (if any) with its effective thresholds: the whole
+  // point of a preset is that the user sees at a glance which tier is in effect
+  // and exactly what it resolved to (an explicit override on top of the preset
+  // shows through here too, since these read the resolved env values).
+  if (env.preset !== undefined) {
+    const pct = (value?: number): string => `${Math.round((value ?? 0) * 100)}%`
+    lines.push(
+      `  preset: ${env.preset} (${PRESETS[env.preset].label})`
+      + ` [min ${pct(env.nudgeMinContextLimitPct)} · max ${pct(env.nudgeMaxContextLimitPct)} · emergency ${pct(env.nudgeEmergencyThresholdPct)}]`,
+    )
+  }
   // A failed probe falls back to the 128K default AND is cached for the
   // process lifetime — the /acp panel must say so explicitly, or the operator
   // can't tell why pressure looks wrong (issue #63: a gateway that disclosed

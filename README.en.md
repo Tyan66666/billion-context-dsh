@@ -221,11 +221,31 @@ This project reuses `acp-kernel`'s compression core and `billion-context-pi`'s d
 | `nudgeMinContextLimitPct` | kernel default `0.45` | Nudge window lower bound (usage fraction) — validation only; the growth-driven trigger has no percentage floor — same default as billion-context-pi |
 | `nudgeMaxContextLimitPct` | engine default `0.70` (kernel/pi default `0.75`) | Over-limit line: above this the nudge fires regardless of growth — deliberately below the host compaction-basic 80% auto-compaction line so the forced nudge fires first; an explicit value wins (a same-name key in `coreOverrides.nudge` outranks it — see below) |
 | `nudgeEmergencyThresholdPct` | engine default `0.85` (kernel/pi default `0.95`) | Emergency nudge (bypasses the per-turn dedup) — lowered from `0.95`: at 95% the model has no room to act and the 80% auto-compaction line shadows it; an explicit value wins (a same-name key in `coreOverrides.nudge` outranks it — see below) |
+| `preset` | — | (optional) Pick the nudge aggressiveness in one word: `preserve` / `relaxed` / `balanced` / `efficient` / `aggressive` (see “Presets” below). Fills ONLY the three nudge thresholds you did not set explicitly; precedence is explicit value > `preset` > engine default, and an unknown name fails construction. Does not touch any other knob (`modelContextLimit` / `autoNudge` / `prompts` / `coreOverrides`) |
 | `coreOverrides` | — | Any other acp-kernel `Config` override (billion-context-pi's `coreOverrides` escape hatch). Merge order: kernel defaults → top-level pct knobs → `coreOverrides.nudge` lands last — same-name keys take its value |
 | `autoTools` | `true` | Register the four model tools on `ctx.tools` |
 | `autoCommand` | `true` | Register the `/acp` command on `ctx.commands` |
 | `autoNudge` | `true` | Inject the nudge into `agent/pre-step` |
 | `prompts` | — | (optional) Custom prompt copy: per-slot overrides for nudge / range table / system prompt / tool descriptions (template + named placeholders, validated at construction; see “Custom prompt copy” above and [docs/configurable-prompts-design.md](docs/configurable-prompts-design.md)) |
+
+## Presets
+
+If you do not want to tune three percentages by hand, pick the nudge aggressiveness in one word — five tiers from “keep context as long as possible” to “compress early and often”:
+
+| `preset` | min | max | emergency | Trade-off |
+|---|---|---|---|---|
+| `preserve` | 0.55 | 0.78 | 0.93 | Keep context as long as possible — nudge only close to the limit |
+| `relaxed` | 0.50 | 0.75 | 0.90 | Light-touch compression — nudges a little earlier than preserve |
+| `balanced` | 0.45 | 0.70 | 0.85 | Default balance — the same thresholds the plugin ships with (choosing this changes nothing) |
+| `efficient` | 0.40 | 0.60 | 0.78 | Trim more often — favors low token usage over keeping full history |
+| `aggressive` | 0.30 | 0.50 | 0.70 | Lean context — compresses early and frequently |
+
+- **Fills only what you left unset**: `preset` fills ONLY the `nudge*ContextLimitPct` values you did not set explicitly; if you set both a `preset` and one of those thresholds, your explicit value wins (precedence: explicit > preset > default).
+- **No other knob is touched**: `modelContextLimit`, `autoNudge`, `prompts`, and `coreOverrides` are unaffected; `coreOverrides.nudge` still lands last and its same-name keys outrank everything.
+- **See the active tier**: `/acp status` prints the effective `preset` and the three resolved thresholds (including any explicit override you made on top of it).
+- **A typo fails loudly**: an unknown name throws at engine construction and lists the valid tiers (the same fail-fast contract as custom prompt templates) — it never silently falls back to the defaults.
+- **Runtime hot-swap**: presets are set at composition time today (install / `cordis.patch.yml`); once #75's settings.yaml hot-reload lands they can be changed from `/acp config`. This PR makes them available at the composition layer first.
+- **Two knobs deliberately left out**: the original request also named `growthRatio` (exists in acp-kernel as `nudge.growthRatio`, reachable via `coreOverrides`) and `protectedLastMessages` (≈ kernel `preserveRecentMessages`). Neither is a first-class engine knob here; adopting them as named keys / UI items is an owner decision, so they are not baked into the presets.
 
 ## Development
 
