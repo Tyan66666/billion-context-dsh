@@ -13,12 +13,12 @@
 
 import { randomUUID } from 'node:crypto'
 import type { Session, SessionEvent, SessionEventMap } from '@deepseek-ai/dsh-session'
-import {
-  CompactionId,
-  compactCheckpointSource,
-  toolPairingBalancedAfter,
-  toolPairingBalancedBefore,
-} from '@deepseek-ai/dsh-compaction'
+import { CompactionId, compactCheckpointSource } from '@deepseek-ai/dsh-compaction'
+// UPSTREAM (issue #124): dsh-compaction@0.1.2-rc.1's toolPairingBalanced*
+// helpers read the removed `session.events` API and crash on every 0.1.2
+// host. Use the local mirror (src/tool-pairing.ts) until the host fix ships,
+// then delete src/tool-pairing.ts and restore the host helpers here.
+import { toolPairingBalancedAfter, toolPairingBalancedBefore } from './tool-pairing.ts'
 import { createAssistantMessage, createUserMessage, type ContentBlock } from '@deepseek-ai/dsh-llm'
 import { defaultCountTokens } from 'acp-kernel'
 import { extractEventText, extractText, toolCallIdOfResultEvent } from './messages.ts'
