@@ -44,7 +44,7 @@ import { acpCommand } from './commands.ts'
 import { buildNudge } from './nudge.ts'
 import { ACP_SYSTEM_PROMPT_ORDER } from './system-prompt.ts'
 import { renderSystemPrompt, resolvePrompts, type AcpPrompts, type ResolvedPrompts } from './prompts.ts'
-import { DEFAULT_CONTEXT_WINDOW, detectContextWindow, projectedContextWindow, type AcpWindow } from './window.ts'
+import { DEFAULT_CONTEXT_WINDOW, probeModelWindow, projectedContextWindow, type AcpWindow } from './window.ts'
 import { deferCompressPairHide, stripOrphanedSurfaceToolMessages } from './region.ts'
 import {
   ACP_SETTINGS_NAMESPACE,
@@ -240,7 +240,8 @@ export class AcpCompactionEngine extends CompactionEngine {
   private settingsService: SettingsProvider | undefined
   /** /acp config read/write surface. */
   readonly settingsCommand: SettingsCommandSurface
-
+  /** Per route the adapter's per-request output cap (the output reservation); null = undisclosed. */
+  private readonly outputReservationCache = new Map<string, number | null>()
   constructor(ctx: Context, config: Partial<AcpConfig> = {}) {
     super(ctx)
     this.config = resolveAcpConfig(config)
@@ -438,7 +439,15 @@ export class AcpCompactionEngine extends CompactionEngine {
    * projectedContextWindow). Falls back to probing the model's real window
    * via `agent.ctx.llm.resolveModelInfo` (cached per provider/model route,
    * probe failures cached too) and finally to DEFAULT_CONTEXT_WINDOW when
-   * auto-detection is disabled or unavailable.
+   * auto-detection is disabled or unavailable. On the auto-detected paths the
+   * adapter's per-request output cap is then SUBTRACTED from the window
+   * (applyReservation): every downstream usage computation must run against
+   * the SUSTAINABLE input budget (window minus output reservation), not the
+   * raw window — a 96K window with a 16K cap carries at most 80K of input,
+   * so the raw denominator understates usage by cap/window (≈17% there, and
+   * far worse on short-window models). An explicit limit keeps the operator's
+   * exact value (they own the denominator); a failed probe keeps the raw
+   * fallback.
    */
   async windowFor(agent: Agent): Promise<AcpWindow> {
     const live = this.readSettingsSource()
@@ -456,17 +465,23 @@ export class AcpCompactionEngine extends CompactionEngine {
     if (this.config.autoModelContextLimit) {
       const projected = projectedContextWindow(agent)
       if (projected !== null) {
-        return { limit: projected, source: 'projection', provider, model }
+        // The window comes from the live projection; the output cap still
+        // comes from the (cached) model probe — the projection schema carries
+        // no cap. After a mid-session switch agent.options names the
+        // PREVIOUS route, so the cap is the best available, not the live one.
+        const cap = await this.outputCapFor(agent, provider, model)
+        return this.applyReservation({ limit: projected, source: 'projection', provider, model }, cap)
       }
     }
     const cached = this.windowCache.get(key)
     if (cached !== undefined) return cached
     let window: AcpWindow
-    if (!live.autoModelContextLimit) {
-      window = { limit: DEFAULT_CONTEXT_WINDOW, source: 'default', provider, model }
+    let cap: number | null = null
+    if (!live.autoModelContextLimit) {      window = { limit: DEFAULT_CONTEXT_WINDOW, source: 'default', provider, model }
     } else {
-      const detected = await detectContextWindow(agent, provider, model)
-      if (detected === null) {
+      const probe = await probeModelWindow(agent, provider, model)
+      cap = probe.outputReservation
+      if (probe.contextWindow === null) {
         // Probe failures are cached below too, so the 128K fallback sticks for
         // the whole process lifetime — a gateway operator who fixes the model
         // API must restart (or set modelContextLimit) before the probe retries.
@@ -478,10 +493,12 @@ export class AcpCompactionEngine extends CompactionEngine {
           `billion-context-dsh: context-window auto-detection failed for ${provider}/${model} — using the ${DEFAULT_CONTEXT_WINDOW} fallback (change modelContextLimit or autoModelContextLimit via /acp config — or restart — to re-probe)`,
         )
         window = { limit: DEFAULT_CONTEXT_WINDOW, source: 'default', provider, model, probeFailed: true }
+        cap = null // the probe failed or disclosed nothing — no cap either
       } else {
-        window = { limit: detected, source: 'auto', provider, model }
+        window = { limit: probe.contextWindow, source: 'auto', provider, model }
       }
     }
+    window = this.applyReservation(window, cap)
     this.windowCache.set(key, window)
     return window
   }
@@ -503,6 +520,32 @@ export class AcpCompactionEngine extends CompactionEngine {
     if (effect.clearWindowCache) this.windowCache.clear()
     if (effect.clearNudgeDedup) this.lastNudgeTurn.clear()
   }
+
+  /**
+   * The adapter's per-request output cap for a route, from one
+   * probeModelWindow call (a local catalog lookup — no request is sent),
+   * cached per route like the window itself.
+   */
+  private async outputCapFor(agent: Agent, provider: string, model: string): Promise<number | null> {
+    if (provider === '' || model === '') return null
+    const key = `${provider}\0${model}`
+    const known = this.outputReservationCache.get(key)
+    if (known !== undefined) return known
+    const cap = (await probeModelWindow(agent, provider, model)).outputReservation
+    this.outputReservationCache.set(key, cap)
+    return cap
+  }
+
+  /**
+   * Subtract the output reservation from a resolved window: `limit` becomes
+   * the SUSTAINABLE input budget (`rawLimit - outputReserved`) that every
+   * downstream usage computation (nudge tiers, truncate, growth) measures
+   * against. No-op when the cap is unknown or not smaller than the window
+   * (degenerate config) — the raw-window behavior is preserved.
+   */
+  private applyReservation(window: AcpWindow, cap: number | null): AcpWindow {
+    if (cap === null || cap >= window.limit) return window
+    return { ...window, rawLimit: window.limit, outputReserved: cap, limit: window.limit - cap }  }
 
   /** ACP is model-driven: automatic pressure policy never summarizes by itself. */
   override async compactIfNeeded(

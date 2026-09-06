@@ -4,10 +4,10 @@ import { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { Session } from '@deepseek-ai/dsh-session'
 import AcpCompactionEngine from '../src/index.ts'
-import { DEFAULT_CONTEXT_WINDOW, detectContextWindow, projectedContextWindow } from '../src/window.ts'
+import { DEFAULT_CONTEXT_WINDOW, detectContextWindow, probeModelWindow, projectedContextWindow } from '../src/window.ts'
 
 interface FakeLlm {
-  resolveModelInfo: (provider: string, model: string) => Promise<{ context?: { contextWindow?: number } }>
+  resolveModelInfo: (provider: string, model: string) => Promise<{ context?: { contextWindow?: number }; defaultMaxTokens?: number }>
 }
 
 interface FakeProjections {
@@ -123,7 +123,7 @@ test('window: projection wins over the llm probe (stale agent.options after a mo
   const window = await engine.windowFor(agent)
   assert.equal(window.limit, 1000000, 'projection window wins over the stale-route probe')
   assert.equal(window.source, 'projection')
-  assert.equal(probeCalls, 0, 'the probe is not even consulted while the projection discloses a window')
+  assert.equal(probeCalls, 1, 'one cached output-cap lookup runs alongside the projection window; the probe never decides the window while the projection discloses one')
 })
 
 test('window: projection is not cached — a later model switch is picked up immediately', async () => {
@@ -251,4 +251,99 @@ test('window: autoModelContextLimit false skips the projection too (even when it
     model: 'test-model',
   })
   assert.equal(calls, 0, 'the probe is skipped as well')
+})
+
+test('window: probeModelWindow returns the window and the output cap in one probe', async () => {
+  let calls = 0
+  const agent = fakeAgent(llmContext({
+    resolveModelInfo: async () => { calls += 1; return { context: { contextWindow: 96000 }, defaultMaxTokens: 16384 } },
+  }))
+  const probe = await probeModelWindow(agent, 'p', 'm')
+  assert.deepEqual(probe, { contextWindow: 96000, outputReservation: 16384 })
+  assert.equal(calls, 1, 'one resolveModelInfo call yields both values')
+})
+
+test('window: probeModelWindow returns nulls for undisclosed, failing, or missing probes', async () => {
+  const undisclosed = fakeAgent(llmContext({ resolveModelInfo: async () => ({}) }))
+  assert.deepEqual(await probeModelWindow(undisclosed, 'p', 'm'), { contextWindow: null, outputReservation: null })
+  const badCap = fakeAgent(llmContext({
+    resolveModelInfo: async () => ({ context: { contextWindow: 96000 }, defaultMaxTokens: -1.5 }),
+  }))
+  assert.deepEqual(await probeModelWindow(badCap, 'p', 'm'), { contextWindow: 96000, outputReservation: null })
+  const failing = fakeAgent(llmContext({
+    resolveModelInfo: async () => { throw new Error('adapter exploded') },
+  }))
+  assert.deepEqual(await probeModelWindow(failing, 'p', 'm'), { contextWindow: null, outputReservation: null })
+  const bare = fakeAgent(new Context())
+  assert.deepEqual(await probeModelWindow(bare, 'p', 'm'), { contextWindow: null, outputReservation: null })
+})
+
+test('window: auto path subtracts the output cap from the probed window', async () => {
+  const engine = new AcpCompactionEngine(new Context())
+  const agent = fakeAgent(llmContext({
+    resolveModelInfo: async () => ({ context: { contextWindow: 96000 }, defaultMaxTokens: 16384 }),
+  }))
+  const window = await engine.windowFor(agent)
+  assert.deepEqual(window, {
+    limit: 79616,
+    source: 'auto',
+    provider: 'test-provider',
+    model: 'test-model',
+    rawLimit: 96000,
+    outputReserved: 16384,
+  })
+})
+
+test('window: projection path subtracts the output cap and caches the cap lookup per route', async () => {
+  let capCalls = 0
+  const ctx = new Context()
+  ctx.provide('sessionProjections', {
+    snapshot: () => ({ values: { contextPressure: { contextWindow: 96000 } } }),
+  })
+  ctx.provide('llm', {
+    resolveModelInfo: async () => { capCalls += 1; return { defaultMaxTokens: 16384 } },
+  })
+  const engine = new AcpCompactionEngine(new Context())
+  const agent = fakeAgent(ctx)
+  const first = await engine.windowFor(agent)
+  const second = await engine.windowFor(agent)
+  assert.deepEqual(first, {
+    limit: 79616,
+    source: 'projection',
+    provider: 'test-provider',
+    model: 'test-model',
+    rawLimit: 96000,
+    outputReserved: 16384,
+  })
+  assert.deepEqual(second, first, 'the projected window stays live but the cap lookup is cached')
+  assert.equal(capCalls, 1, 'the cap is probed once per route, not once per step')
+})
+
+test('window: no subtraction when the host discloses no cap', async () => {
+  const engine = new AcpCompactionEngine(new Context())
+  const agent = fakeAgent(llmContext({
+    resolveModelInfo: async () => ({ context: { contextWindow: 96000 } }),
+  }))
+  const window = await engine.windowFor(agent)
+  assert.deepEqual(window, { limit: 96000, source: 'auto', provider: 'test-provider', model: 'test-model' })
+})
+
+test('window: a cap >= window is degenerate and subtracts nothing', async () => {
+  const engine = new AcpCompactionEngine(new Context())
+  const agent = fakeAgent(llmContext({
+    resolveModelInfo: async () => ({ context: { contextWindow: 16000 }, defaultMaxTokens: 16384 }),
+  }))
+  const window = await engine.windowFor(agent)
+  assert.deepEqual(window, { limit: 16000, source: 'auto', provider: 'test-provider', model: 'test-model' })
+})
+
+test('window: explicit modelContextLimit is never subtracted (the operator owns the denominator)', async () => {
+  let calls = 0
+  const engine = new AcpCompactionEngine(new Context(), { modelContextLimit: 80000 })
+  const agent = fakeAgent(llmContext({
+    resolveModelInfo: async () => { calls += 1; return { context: { contextWindow: 96000 }, defaultMaxTokens: 16384 } },
+  }))
+  const window = await engine.windowFor(agent)
+  assert.deepEqual(window, { limit: 80000, source: 'explicit' })
+  assert.equal(calls, 0, 'explicit config disables the probe and therefore the subtraction')
 })
