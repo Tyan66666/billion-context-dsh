@@ -45,15 +45,14 @@ PR titles are enforced by CI (`.github/workflows/pr-lint.yml`, rule in `scripts/
 4. CI must be green: `ci` (typecheck + test + build) and `pr-title` (title check) are required to merge.
 5. Merging is **human-only**. Per AGENTS.md §5, an Agent must never merge any PR.
 
-## `dist/` build artifacts (the dist-bot handles them)
+## `dist/` build artifacts (you never touch them)
 
-`dist/` is committed so git-source installs work with zero build steps (AGENTS.md §5, issue #92) — but contributors never rebuild or commit it by hand:
+`dist/` is committed so git-source installs work with zero build steps (AGENTS.md §5, issue #92) — but it is invisible to your workflow:
 
-- `.github/workflows/dist-bot.yml` watches every PR that can change the build output (`src/**`, `package.json`, `package-lock.json`, `tsup.config.ts`), rebuilds, and commits fresh artifacts to the PR branch as `github-actions[bot]`.
-- The CI step "Check committed dist matches the source" is the merge gate. On a fresh push it may be briefly red until the bot lands its commit (a minute or two); CI then re-runs green and the PR is mergeable — the squash merge carries the fresh dist onto main.
-- Local `npm run build` is optional and normally produces a zero-byte diff (the toolchain is lockfile-pinned and builds are deterministic). If your local `dist/` lags behind the bot, `git pull` the branch.
-- Fork PRs: the bot's token is read-only there and cannot push. If a fork PR changes the build output, the maintainer syncs `dist/` on a same-repo branch before merging.
-- Release PRs: same mechanism — no manual dist upload. Before `gh release create` (which tags the merged main HEAD), wait for the dist-bot commit (if any) to land so the tag contains the final artifacts.
+- PR branches never carry `dist/` and you never rebuild or commit it. Push freely — the CI dist check does not gate PRs.
+- After every merge that can change the build output (`src/**`, `package.json`, `package-lock.json`, `tsup.config.ts`), `.github/workflows/dist-bot.yml` rebuilds and pushes one fresh-`dist/` commit directly to main as `github-actions[bot]` (main's protection ruleset carries a bypass for the GitHub Actions app; humans still land everything via PRs). Your branch is never touched — no bot commits to pull, no dist conflicts.
+- Local `npm run build` is optional (typecheck and tests run off `src/`). Its output may show as a tracked modification of the `dist/` you inherited from main — just don't commit it (`git checkout -- dist` restores).
+- Releases: after merging the release PR, the dist-bot refreshes main's dist if the build output changed; if so, wait for that commit before `gh release create` so the `#<tag>` install carries the final artifacts.
 
 ## Branch protection on main (enabled)
 
