@@ -173,6 +173,63 @@ test('M3: decompress recovers the shadowed originals read-only', async () => {
   assert.equal(session.deriveMessages().length, 8)
 })
 
+test('M3: decompress pages a large block by default and walks it with offset', async () => {
+  const env = makeEnv()
+  const session = buildTextSession(121)
+  const compress = toolOf(env, 'compress')
+  await compress.execute({
+    content: [{
+      startSeq: 1,
+      endSeq: 120,
+      summary: 'One hundred twenty long authentication messages: JWT access tokens with 15 minute expiry, refresh tokens in Redis with 30 day TTL, login flow in src/auth/login.ts with sliding-window rate limiting, bcrypt cost 12, session revocation on password change.',
+    }],
+  } as never, fakeExec(session))
+
+  const ledger = rebuildBlockLedger(session.events)
+  assert.equal(ledger.length, 1)
+  const blockId = ledger[0]!.blockId
+  const decompress = toolOf(env, 'decompress')
+
+  const firstText = ((await decompress.execute({ blockId }, fakeExec(session))) as { text: string }).text
+  assert.match(firstText, /\[messages 1\.\.100 of 120\]/)
+  assert.match(firstText, /continue with decompress\(\{ blockId: ".*", offset: 100 \}\)/)
+  assert.match(firstText, /\[seq 1\] /)
+  assert.doesNotMatch(firstText, /\[seq 101\] /)
+
+  const secondText = ((await decompress.execute({ blockId, offset: 100 }, fakeExec(session))) as { text: string }).text
+  assert.match(secondText, /\[messages 101\.\.120 of 120\]/)
+  assert.doesNotMatch(secondText, /More available/)
+  assert.match(secondText, /\[seq 101\] /)
+  assert.match(secondText, /\[seq 120\] /)
+
+  const beyondText = ((await decompress.execute({ blockId, offset: 500 }, fakeExec(session))) as { text: string }).text
+  assert.match(beyondText, /offset 500 is past the end/)
+})
+
+test('M3: decompress honors an explicit limit and clamps a negative offset', async () => {
+  const env = makeEnv()
+  const session = buildTextSession(12)
+  const compress = toolOf(env, 'compress')
+  await compress.execute({
+    content: [{
+      startSeq: 1,
+      endSeq: 5,
+      summary: 'Authentication summary with enough technical detail to satisfy the kernel threshold: JWT, refresh tokens in Redis, login flow with rate limiting, bcrypt cost 12, session revocation on password change.',
+    }],
+  } as never, fakeExec(session))
+  const blockId = rebuildBlockLedger(session.events)[0]!.blockId
+  const decompress = toolOf(env, 'decompress')
+
+  const limited = ((await decompress.execute({ blockId, limit: 2 }, fakeExec(session))) as { text: string }).text
+  assert.match(limited, /\[messages 1\.\.2 of 5\]/)
+  assert.match(limited, /offset: 2 \}/)
+  assert.doesNotMatch(limited, /\[seq 3\] /)
+
+  const clamped = ((await decompress.execute({ blockId, offset: -7 }, fakeExec(session))) as { text: string }).text
+  assert.match(clamped, /\[messages 1\.\.\d+ of 5\]/)
+  assert.doesNotMatch(clamped, /past the end/)
+})
+
 test('M3: decompress accepts the kernel block ref bN that acp_status shows', async () => {
   const env = makeEnv()
   const session = buildTextSession(12)

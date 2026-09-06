@@ -1067,3 +1067,38 @@ export function expandShadowedSeqs(session: Session, blockId: string): number[] 
   visit(root)
   return out
 }
+
+/**
+ * Default decompress page size (#112): a block shadowing hundreds of
+ * messages used to be returned whole in ONE tool result — big enough to
+ * flood the context window or get silently trimmed by the host's
+ * tool-result pruner before the model ever saw the tail. One page per call
+ * keeps every recovery usable; `offset` walks the rest.
+ */
+export const DEFAULT_DECOMPRESS_PAGE = 100
+
+export interface DecompressPage {
+  /** Offset actually applied (clamped to >= 0). */
+  offset: number
+  /** Limit actually applied (clamped to >= 1). */
+  limit: number
+  /** Total shadowed messages in the block (tier-expanded). */
+  total: number
+  /** This page's shadowed seqs, in expansion order. */
+  seqs: number[]
+  /** True when no further page follows this one. */
+  exhausted: boolean
+}
+
+/**
+ * Slice a block's expanded shadowed-seq list into one page. Seqs whose
+ * original carries no text still occupy a slot, so page boundaries stay
+ * stable across calls; out-of-range/negative values clamp instead of
+ * failing (optional convenience params, not semantic boundaries).
+ */
+export function sliceDecompressPage(expanded: number[], offset: number, limit: number): DecompressPage {
+  const safeOffset = Math.max(0, Math.floor(offset))
+  const safeLimit = Math.max(1, Math.floor(limit))
+  const seqs = expanded.slice(safeOffset, safeOffset + safeLimit)
+  return { offset: safeOffset, limit: safeLimit, total: expanded.length, seqs, exhausted: safeOffset + seqs.length >= expanded.length }
+}

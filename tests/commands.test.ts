@@ -186,6 +186,34 @@ test('M4: /acp decompress resolves both the compaction-id prefix and the kernel 
   assert.ok(byKernelRef.includes('Block '), 'kernel bN ref resolution works')
 })
 
+test('M4: /acp decompress pages with [offset] [limit] args and rejects bad numbers', async () => {
+  const env = makeEnv(128000)
+  const session = buildSession(12)
+  const { makeTools } = await import('../src/tools.ts')
+  const compress = makeTools(env).find((definition) => definition.name === 'compress')!
+  const agent = fakeAgent(session)
+  await compress.execute({
+    content: [{
+      startSeq: 1,
+      endSeq: 5,
+      summary: 'Authentication system: JWT access tokens with 15 minute expiry, refresh tokens in Redis with 30 day TTL, login flow in src/auth/login.ts with sliding-window rate limiting.',
+    }],
+  } as never, { callId: 'call-acp', name: 'compress', arguments: {}, signal: new AbortController().signal, agent } as never)
+
+  const page = await runAcp(env, agent, 'decompress b1 0 2')
+  assert.match(page, /\[messages 1\.\.2 of 5\]/, 'page footer reports the window')
+  assert.match(page, /Continue with: \/acp decompress [0-9a-f]{8} 2/, 'continue hint carries the next offset')
+
+  const rest = await runAcp(env, agent, 'decompress b1 2')
+  assert.match(rest, /\[messages 3\.\.5 of 5\]/, 'continuation covers the tail')
+  assert.ok(!rest.includes('Continue with'), 'no further page on the last one')
+
+  const badOffset = await runAcp(env, agent, 'decompress b1 abc')
+  assert.match(badOffset, /offset must be a non-negative integer/)
+  const badLimit = await runAcp(env, agent, 'decompress b1 0 0')
+  assert.match(badLimit, /limit must be a positive integer/)
+})
+
 test('M4: /acp status flags a failed window probe with a restart hint (issue #63)', async () => {
   // A gateway that discloses no window (probeFailed) keeps the 128K fallback
   // for the process lifetime — the panel must say so, or the operator can't
