@@ -16,6 +16,7 @@ Model-driven context management (Active Context Pruning / ACP) for the DeepSeek 
 | [Porting verification report](dsh-porting-verification.md) | The verified evidence behind every claim, plus the **v0.1.1 long-session battle report** (6 bugs found and fixed in real use) |
 | [Configurable prompts design](configurable-prompts-design.md) | Design review draft: per-stage prompt overrides (nudge / range table / system prompt / tool descriptions) via `config.prompts`, template + named placeholders, build-time validation |
 | [Shadow-price host-vocabulary design](shadow-price-host-vocabulary-design.md) | Why `shadowedTokenCount` claims must speak the host token-meter's flat-4 vocabulary (issue #54: CJK sessions bricked when priced with the CJK-aware `defaultCountTokens`); meter-first pricing with an exact mirror fallback; L2 upstream direction |
+| [E2E testing design](e2e-testing-design.md) | Automated integration tests via a dedicated headless profile (`scripts/e2e/`): a temp `DSH_HOME` environment carrying only this plugin, one-shot `dsh --profile acp-e2e` runs, session-log assertions (compaction event pairing, non-negative shadow prices, no bricked projections); deterministic mock-LLM tier as the follow-up |
 
 ## 🗂 Source layout
 

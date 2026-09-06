@@ -43,7 +43,9 @@
 	"scripts": {
 		"typecheck": "tsc --noEmit",
 		"build": "tsup && tsc --emitDeclarationOnly",
-		"test": "node --import tsx --test tests/*.test.ts tests/kernel-upstream/*.test.ts"
+		"test": "node --import tsx --test tests/*.test.ts tests/kernel-upstream/*.test.ts",
+		"e2e": "node scripts/e2e/run.mjs",
+		"e2e:full": "ACP_E2E_SET=full node scripts/e2e/run.mjs"
 	},
 	"peerDependencies": {
 		"@deepseek-ai/cordis": "^4.0.1",
