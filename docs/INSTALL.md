@@ -84,9 +84,11 @@ dsh plugin --profile web add github:Tyan66666/billion-context-dsh#v0.2.19
       name: 'billion-context-dsh'
       config:
         # 模型的真实上下文窗口！省略（推荐）时会自动从模型 API 探测
-        # （agent.ctx.llm.resolveModelInfo），探测失败回退默认 128000；
-        # 显式配置则优先且跳过探测。分母配小（如百万窗口模型配 128K）
-        # 会让使用率虚高 8 倍、nudge 过频。growth 触发阈值（50000）不随此值变化。
+        # （agent.ctx.llm.resolveModelInfo），并自动扣除每请求输出预留
+        # （defaultMaxTokens）——实际分母是「窗口 − 输出预留」；探测失败
+        # 回退默认 128000。显式配置则优先、不探测也不扣减：分母完全由
+        # 你定义。分母配小（如百万窗口模型配 128K）会让使用率虚高 8 倍、
+        # nudge 过频。growth 触发阈值（50000）不随此值变化。
         modelContextLimit: 128000
         # （可选）自定义提示词文案：按槽位覆盖 nudge / 范围表 / system prompt /
         # 工具描述，模板 + 命名占位符，构造期校验（拼写错误启动即抛）。未配置时
@@ -141,7 +143,8 @@ cp <deepseek-harness>/apps/cli/config/agent-presets/standard/{agent.cordis.yml,p
 - id: compaction-acp
   name: 'billion-context-dsh'
   config:
-    # 同上：省略时自动探测模型真实窗口，显式配置优先（默认 128000 按 128K 窗口）。
+    # 同上：省略时自动探测模型真实窗口（并扣除每请求输出预留
+    # defaultMaxTokens），显式配置优先且不扣减（默认 128000 按 128K 窗口）。
     modelContextLimit: 128000
 ```
 
