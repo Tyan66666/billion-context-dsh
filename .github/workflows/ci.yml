@@ -42,6 +42,13 @@ jobs:
       # fail if the committed artifacts differ from what the current source
       # produces — otherwise git installs would silently get stale code.
       #
+      # Contributors do NOT rebuild dist/ by hand: the dist-bot workflow
+      # (.github/workflows/dist-bot.yml) commits fresh artifacts to the PR
+      # branch. On a fresh push this check is briefly red until the bot
+      # lands; CI then re-runs green and the PR is mergeable. Fork PRs never
+      # get a bot commit — the maintainer syncs dist/ on a same-repo branch
+      # before merging.
+      #
       # This comparison assumes deterministic builds across platforms: the
       # committed dist/ is built locally (macOS) while CI rebuilds on
       # ubuntu-latest. It holds because the toolchain is lockfile-pinned
@@ -53,7 +60,7 @@ jobs:
       - name: Check committed dist matches the source
         run: |
           if [ -n "$(git status --porcelain -- dist)" ]; then
-            echo '::error::dist/ drifted from source — run `npm run build` and commit the fresh artifacts'
+            echo '::error::dist/ drifted from source — the dist-bot should commit fresh artifacts to this PR branch automatically; if it cannot (e.g. a fork PR), run `npm run build` and commit them yourself'
             git status --short -- dist
             exit 1
           fi

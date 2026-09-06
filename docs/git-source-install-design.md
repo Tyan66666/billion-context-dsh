@@ -34,5 +34,5 @@
 
 - **永远不要给这个包加 `prepare`/`preinstall`/`install`/`postinstall` 脚本**——见上表第三行;`tests/package-artifacts.test.ts` 守护这条契约。
 - **CI 在每次构建后校验 `dist/` 与源码一致**(`.github/workflows/ci.yml` 的 "Check committed dist matches the source" 步骤,`git status --porcelain -- dist`)——防止入库产物过期,git 安装装到旧代码。
-- **改动 `src/` 的 PR 必须同步重新构建并提交 `dist/`**(CI 会红着提醒);发布 PR 尤其要带最新产物,使 `#<tag>` 安装与对应 npm 版本完全一致。
+- **`dist/` 由 dist-bot 自动维护,PR 不再手动携带构建产物**:`.github/workflows/dist-bot.yml` 在可能改变构建产物的 PR(`src/**`、`package.json`、`package-lock.json`、`tsup.config.ts`)上自动重建并把新鲜 `dist/` 提交到 PR 分支,squash 合并时随之带上 main;CI 的漂移检查("Check committed dist matches the source")仍是合并闸门——bot 提交落地前短暂红、落地后转绿。fork PR 的 bot 无法推送,需维护者在同仓库分支同步 `dist/` 后再合并。发布 PR 同样自动覆盖;`gh release create` 打 tag 前等 bot 提交落地,使 `#<tag>` 安装与对应 npm 版本完全一致。
 - 建议用户安装时带 `#<tag>`;不带 ref 则装默认分支的最新构建(可能与最近一次发布有少量滞后)。
