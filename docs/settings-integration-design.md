@@ -5,8 +5,9 @@
 > 斜杠命令在任意模式（TUI/web/headless）读写同一份配置。
 >
 > **范围声明**：本文档只覆盖**阶段一（宿主侧设置接缝）+ 阶段一b（`/acp config` 子命令）**。
-> 浏览器端设置卡片是阶段三，被宿主 `WEB_SETTINGS_NAMESPACES` 白名单硬编码阻塞（见 §8），
-> 需上游 deepseek-harness 先把暴露声明移入 `settings.register()`。
+> 浏览器端设置卡片是阶段三：rc.6 时代被宿主 `WEB_SETTINGS_NAMESPACES` 白名单硬编码阻塞；
+> **2026-09-06 勘探确认 0.1.2 线上门禁已解除**（见 §5「浏览器设置卡片·勘探更新」），
+> 剩余工作是自建 client 卡片/页（需按 0.1.2 客户端重勘后设计）。
 >
 > **评审状态**：已经过三路独立评审（宿主接缝合规 / 引擎架构与回归风险 / 对抗性边界），
 > 全部阻断项已修复，判定均为「修改后通过」。v2 修订明细见文末修订记录。
@@ -349,7 +350,24 @@ private onSettingsChanged(prev: AcpSettings, next: AcpSettings): void {
 
 | 项 | 决定 | 理由 |
 |---|---|---|
-| 浏览器设置卡片 | 阶段三 | `WEB_SETTINGS_NAMESPACES` 硬编码白名单（dsh-host-apiproxy lib/index.js ≈:886）不含自定义 ns，web wire 一律答 `settings-not-exposed`；上游注释明确「暴露声明移入 settings.register()」是 deferred 工作。等上游动了再做，届时浏览器半边机制（`exports["./client"]` + `dsh.client:` 双半包）已探明 |
+| 浏览器设置卡片 | 阶段三 | rc.6 时代被 `WEB_SETTINGS_NAMESPACES` 硬编码白名单阻塞（历史记录保留在下方「勘探更新」末条）；**2026-09-06 勘探：0.1.2 线上门禁已解除**，剩余工作见同节 |
+
+**浏览器设置卡片·勘探更新（2026-09-06）**——门禁已解除：
+
+- **门禁消失**：`WEB_SETTINGS_NAMESPACES` 白名单在 DSH 0.1.2 线源码（master checkout）与实机
+  apiproxy 安装版中均已不存在，web wire 不再答 `settings-not-exposed`。
+- **替代机制**：`SettingsController.describe()`（packages/api/settings-controller/src/index.ts:111）
+  动态描述**全部已注册 namespace**，无需任何白名单；客户端槽位为 `settings.section` /
+  `settings.plugins.tab` / `settings.plugin.item`（packages/client/ui-settings、ui-settings-plugins）。
+- **第三方插件 UI 官方路径**：package.json `dsh.client` 清单 + `exports["./client"]` 导出，由
+  packages/extensions/cordis-client-runner 在浏览器加载（先例：plan-mode / schedule /
+  token-meter / experimental/client-ui-agent-team；HMR = dsh-client-hmr）。
+- **剩余工作**：① 自建 client 卡片/页——卡片是各插件手写，rc.6 时代的 `dsh-client-schema-form`
+  在 0.1.2 客户端已不存在，阶段三设计前需重勘；② tsup client 入口与 dist 入库；③ 对 0.1.2 之前
+  宿主的降级路径（`describe()` 动态描述在 rc 线宿主上的行为待验）。
+- **rc.6 历史记录（保留）**：`WEB_SETTINGS_NAMESPACES` 硬编码白名单（dsh-host-apiproxy
+  lib/index.js ≈:886）不含自定义 ns，web wire 一律答 `settings-not-exposed`；上游注释明确
+  「暴露声明移入 settings.register()」是 deferred 工作——该结论今天已过时，仅作历史留档。
 | `prompts` 进设置层 | 阶段二单独设计 | `resolvePrompts` 构造期 fail-fast + systemPrompt.section 一次性注册，热更需要「重校验 + 重注册 section」语义，不是本阶段的 getter 模式能顺带解决的 |
 | `coreOverrides` / `countTokens` | 永久组合层 | 对象/函数值无法进 YAML 表单层；保留为高级逃生舱 |
 | `autoTools` / `autoCommand` | 永久组合层 | 构造期注册 + 防双注册守卫，中途翻转无意义 |
