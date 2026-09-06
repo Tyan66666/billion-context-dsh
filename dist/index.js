@@ -2635,6 +2635,9 @@ function makePreview(text, query, len) {
   return prefix + text.slice(start, end).trim() + suffix;
 }
 
+// src/index.ts
+import { installSettingsSection } from "@deepseek-ai/dsh-settings";
+
 // src/region.ts
 import { randomUUID } from "crypto";
 import {
@@ -4364,6 +4367,114 @@ function makeTools(env) {
   ];
 }
 
+// src/commands.ts
+import { SettingsConflictError } from "@deepseek-ai/dsh-settings";
+
+// src/settings.ts
+import z from "@deepseek-ai/schemastery";
+import {
+  settingsNamespace
+} from "@deepseek-ai/dsh-settings";
+var ACP_SETTINGS_NAMESPACE = settingsNamespace("compaction-acp");
+var SETTINGS_KEYS = [
+  "modelContextLimit",
+  "autoModelContextLimit",
+  "nudgeMinContextLimitPct",
+  "nudgeMaxContextLimitPct",
+  "nudgeEmergencyThresholdPct",
+  "autoNudge"
+];
+var SETTING_DEFAULTS = {
+  autoModelContextLimit: true,
+  nudgeMaxContextLimitPct: 0.7,
+  nudgeEmergencyThresholdPct: 0.85,
+  autoNudge: true
+};
+function filterSettingsEntry(entry) {
+  return {
+    ...entry.modelContextLimit !== void 0 ? { modelContextLimit: entry.modelContextLimit } : {},
+    ...entry.autoModelContextLimit !== void 0 ? { autoModelContextLimit: entry.autoModelContextLimit } : {},
+    ...entry.nudgeMinContextLimitPct !== void 0 ? { nudgeMinContextLimitPct: entry.nudgeMinContextLimitPct } : {},
+    ...entry.nudgeMaxContextLimitPct !== void 0 ? { nudgeMaxContextLimitPct: entry.nudgeMaxContextLimitPct } : {},
+    ...entry.nudgeEmergencyThresholdPct !== void 0 ? { nudgeEmergencyThresholdPct: entry.nudgeEmergencyThresholdPct } : {},
+    ...entry.autoNudge !== void 0 ? { autoNudge: entry.autoNudge } : {}
+  };
+}
+function resolveAcpSettings(input) {
+  return {
+    modelContextLimit: input.modelContextLimit,
+    autoModelContextLimit: input.autoModelContextLimit ?? SETTING_DEFAULTS.autoModelContextLimit,
+    nudgeMinContextLimitPct: input.nudgeMinContextLimitPct,
+    nudgeMaxContextLimitPct: input.nudgeMaxContextLimitPct ?? SETTING_DEFAULTS.nudgeMaxContextLimitPct,
+    nudgeEmergencyThresholdPct: input.nudgeEmergencyThresholdPct ?? SETTING_DEFAULTS.nudgeEmergencyThresholdPct,
+    autoNudge: input.autoNudge ?? SETTING_DEFAULTS.autoNudge
+  };
+}
+var AcpSettingsSchema = z.object({
+  modelContextLimit: z.number().step(1).min(1),
+  autoModelContextLimit: z.boolean().default(SETTING_DEFAULTS.autoModelContextLimit),
+  nudgeMinContextLimitPct: z.number().min(0).max(1),
+  nudgeMaxContextLimitPct: z.number().min(0).max(1).default(SETTING_DEFAULTS.nudgeMaxContextLimitPct),
+  nudgeEmergencyThresholdPct: z.number().min(0).max(1).default(SETTING_DEFAULTS.nudgeEmergencyThresholdPct),
+  autoNudge: z.boolean().default(SETTING_DEFAULTS.autoNudge)
+});
+function describeSettingsChange(prev, next) {
+  const warnings = [];
+  if (next.nudgeMinContextLimitPct !== void 0 && next.nudgeMinContextLimitPct >= next.nudgeMaxContextLimitPct) {
+    warnings.push(
+      `nudgeMinContextLimitPct (${next.nudgeMinContextLimitPct}) >= nudgeMaxContextLimitPct (${next.nudgeMaxContextLimitPct}) \u2014 the lower bound never engages`
+    );
+  }
+  if (next.nudgeMaxContextLimitPct >= next.nudgeEmergencyThresholdPct) {
+    warnings.push(
+      `nudgeMaxContextLimitPct (${next.nudgeMaxContextLimitPct}) >= nudgeEmergencyThresholdPct (${next.nudgeEmergencyThresholdPct}) \u2014 the emergency tier loses its headroom`
+    );
+  }
+  return {
+    clearWindowCache: prev.modelContextLimit !== next.modelContextLimit || prev.autoModelContextLimit !== next.autoModelContextLimit,
+    clearNudgeDedup: prev.autoNudge === false && next.autoNudge === true,
+    warnings
+  };
+}
+function parseSettingValue(raw) {
+  const text = raw.trim();
+  if (text === "true") return { ok: true, value: true };
+  if (text === "false") return { ok: true, value: false };
+  const num = Number(text);
+  if (text !== "" && Number.isFinite(num)) return { ok: true, value: num };
+  if (text === "null") return { ok: true, value: null };
+  return {
+    ok: false,
+    reason: `"${text}" is not a valid value \u2014 use a number (0.65), true/false, or null to reset the key`
+  };
+}
+function requireService(getService) {
+  const service = getService();
+  if (service === void 0) {
+    throw new Error("runtime settings are not available in this process");
+  }
+  return service;
+}
+function makeSettingsCommandSurface(getService, getSnapshot) {
+  return {
+    get available() {
+      return getService() !== void 0;
+    },
+    snapshot: getSnapshot,
+    describe() {
+      const service = getService();
+      if (service === void 0) return void 0;
+      return service.describe().find((descriptor) => descriptor.ns === ACP_SETTINGS_NAMESPACE);
+    },
+    async update(patch) {
+      await requireService(getService).update(ACP_SETTINGS_NAMESPACE, patch);
+    },
+    async replaceSection(section) {
+      await requireService(getService).replace(ACP_SETTINGS_NAMESPACE, section);
+    }
+  };
+}
+
 // src/window.ts
 var DEFAULT_CONTEXT_WINDOW = 128e3;
 function windowSourceLabel(window) {
@@ -4374,7 +4485,7 @@ function windowSourceLabel(window) {
   if (window.source === "auto") {
     return `auto-detected from ${window.provider ?? "?"}/${window.model ?? "?"}`;
   }
-  if (window.probeFailed === true) return "default (auto-detection failed \u2014 restart to re-probe)";
+  if (window.probeFailed === true) return "default (auto-detection failed \u2014 see /acp config)";
   return "default (auto-detection unavailable)";
 }
 function projectedContextWindow(agent) {
@@ -4414,7 +4525,7 @@ async function statusText(env, agent) {
     `  context window: ${limit} (${windowSourceLabel(window)})`
   ];
   if (window.probeFailed === true) {
-    lines.push(`  \u26A0 window auto-detection failed \u2014 using the ${limit} fallback (restart to re-probe, or set modelContextLimit explicitly)`);
+    lines.push(`  \u26A0 window auto-detection failed \u2014 using the ${limit} fallback (change modelContextLimit or autoModelContextLimit via /acp config \u2014 or restart \u2014 to re-probe)`);
   }
   const state = structuredClone(env.store.stateFor(session));
   const config = kernelConfigFor({ ...env, modelContextLimit: limit });
@@ -4478,11 +4589,14 @@ ${parts.join("\n\n") || "(no recoverable content)"}`;
 function acpCommand(env) {
   return {
     name: "acp",
-    description: "Active Context Pruning \u2014 model-driven context compression. Usage: /acp status | /acp compress <startSeq> <endSeq> <summary> | /acp decompress <blockId>",
+    description: "Active Context Pruning \u2014 model-driven context compression. Usage: /acp status | /acp compress <startSeq> <endSeq> <summary> | /acp decompress <blockId> | /acp config [list|set <key> <value>|reset <key>|all]",
     handler: async (invocation) => {
       const raw = invocation.rawInput.trim();
       if (raw === "" || raw === "status") {
         return { kind: "success", text: await statusText(env, invocation.agent) };
+      }
+      if (raw === "config" || raw.startsWith("config ")) {
+        return { kind: "success", text: await configText(env, raw.slice("config".length).trim()) };
       }
       if (raw.startsWith("compress")) {
         return { kind: "success", text: compressText(env, invocation.agent, raw.slice("compress".length).trim().split(/\s+/)) };
@@ -4490,9 +4604,101 @@ function acpCommand(env) {
       if (raw.startsWith("decompress")) {
         return { kind: "success", text: decompressText(env, invocation.agent, raw.slice("decompress".length).trim().split(/\s+/)) };
       }
-      return { kind: "error", text: `unknown /acp subcommand "${raw.split(/\s+/)[0]}" \u2014 use status | compress | decompress` };
+      return { kind: "error", text: `unknown /acp subcommand "${raw.split(/\s+/)[0]}" \u2014 use status | compress | decompress | config` };
     }
   };
+}
+function isRecord(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+function isSettingsKey(key) {
+  return SETTINGS_KEYS.includes(key);
+}
+function formatSettingsValue(key, value) {
+  if (value === void 0) {
+    if (key === "modelContextLimit") return "auto";
+    if (key === "nudgeMinContextLimitPct") return "0.45 (kernel)";
+    return "\u2014";
+  }
+  return String(value);
+}
+function configListText(surface) {
+  if (surface === void 0) return "runtime settings are not wired in this engine build";
+  const snapshot = surface.snapshot();
+  const descriptor = surface.describe();
+  const lines = [
+    'ACP runtime settings \u2014 namespace "compaction-acp"',
+    "  key                         value        source"
+  ];
+  for (const key of SETTINGS_KEYS) {
+    const userSection = isRecord(descriptor?.user) ? descriptor.user : {};
+    const baseSection = isRecord(descriptor?.base) ? descriptor.base : {};
+    const source = key in userSection ? "user" : key in baseSection ? "base" : "default";
+    lines.push(`  ${key.padEnd(27)} ${formatSettingsValue(key, snapshot[key]).padEnd(12)} ${source}`);
+  }
+  lines.push("", "  changes apply to running sessions immediately (no restart)");
+  lines.push("  coreOverrides (composition layer) merge LAST and beat these values on same-name keys");
+  lines.push("  /acp config reset <key> returns the key to the composition row / engine default");
+  return lines.join("\n");
+}
+async function configSetText(surface, key, rawValue) {
+  if (!isSettingsKey(key)) {
+    return `unknown key "${key}" \u2014 keys: ${SETTINGS_KEYS.join(", ")}`;
+  }
+  if (surface === void 0) return "runtime settings are not wired in this engine build";
+  if (!surface.available) {
+    return "no settings provider in this process \u2014 edit the compaction-acp row in cordis.patch.yml instead (a restart applies it)";
+  }
+  const parsed = parseSettingValue(rawValue);
+  if (!parsed.ok) return parsed.reason;
+  if (parsed.value === null) {
+    return configResetText(surface, key);
+  }
+  const patch = key === "autoNudge" || key === "autoModelContextLimit" ? { [key]: parsed.value } : { [key]: parsed.value };
+  try {
+    await surface.update(patch);
+  } catch (error) {
+    if (error instanceof SettingsConflictError) {
+      return "conflict: another writer changed this setting at the same time \u2014 run /acp config again";
+    }
+    return `rejected: ${String(error)}`;
+  }
+  const windowNote = key === "modelContextLimit" || key === "autoModelContextLimit" ? "\n  window cache cleared \u2014 the next step re-resolves the context window" : "";
+  return `\u2713 ${key} = ${String(parsed.value)} \u2014 applied to running sessions${windowNote}`;
+}
+async function configResetText(surface, target) {
+  if (surface === void 0) return "runtime settings are not wired in this engine build";
+  if (!surface.available) {
+    return "no settings provider in this process \u2014 edit the compaction-acp row in cordis.patch.yml instead (a restart applies it)";
+  }
+  if (target === "all") {
+    await surface.replaceSection({});
+    return "\u2713 all runtime settings reset \u2014 values now come from the composition row / engine defaults";
+  }
+  if (!isSettingsKey(target)) {
+    return `unknown key "${target}" \u2014 keys: ${SETTINGS_KEYS.join(", ")}`;
+  }
+  const descriptor = surface.describe();
+  const userSection = isRecord(descriptor?.user) ? { ...descriptor.user } : {};
+  delete userSection[target];
+  await surface.replaceSection(userSection);
+  const baseSection = isRecord(descriptor?.base) ? descriptor.base : {};
+  const baseValue = baseSection[target];
+  return `\u2713 ${target} reset \u2014 it now reads ${baseValue === void 0 ? "the engine default" : `the composition value ${String(baseValue)}`}`;
+}
+async function configText(env, rest) {
+  const surface = env.settingsCommand;
+  const args = rest.split(/\s+/).filter((part) => part.length > 0);
+  const verb = args[0] ?? "list";
+  if (verb === "list") return configListText(surface);
+  if (verb === "set") {
+    if (args.length < 3) return "usage: /acp config set <key> <value> (e.g. /acp config set nudgeMaxContextLimitPct 0.72)";
+    return configSetText(surface, args[1], args.slice(2).join(" "));
+  }
+  if (verb === "reset") {
+    return configResetText(surface, args[1] ?? "all");
+  }
+  return `unknown /acp config verb "${verb}" \u2014 use list | set <key> <value> | reset <key>|all`;
 }
 
 // src/system-prompt.ts
@@ -4540,6 +4746,12 @@ var AcpCompactionEngine = class extends CompactionEngine {
   compressCallIdsToHide = /* @__PURE__ */ new Set();
   /** Per provider/model route the resolved window (probe failures cached too). */
   windowCache = /* @__PURE__ */ new Map();
+  /** Live settings snapshot thunk (composition → user settings layer); swapped by installSettingsSection. */
+  readSettingsSource = () => resolveAcpSettings({});
+  /** The settings service, captured lazily for /acp config (undefined in provider-less processes). */
+  settingsService;
+  /** /acp config read/write surface. */
+  settingsCommand;
   constructor(ctx, config = {}) {
     super(ctx);
     this.config = resolveAcpConfig(config);
@@ -4547,18 +4759,57 @@ var AcpCompactionEngine = class extends CompactionEngine {
     const ports = this.config.countTokens !== void 0 ? { countTokens: this.config.countTokens } : {};
     this.kernel = createCore(ports);
     this.store = new AcpStateStore();
+    let current = resolveAcpSettings(filterSettingsEntry(this.config));
+    this.readSettingsSource = () => current;
+    const engine = this;
+    const applySettings = () => {
+      const next = this.readSettingsSource();
+      const prev = current;
+      current = next;
+      try {
+        engine.onSettingsChanged(prev, next);
+      } catch (error) {
+        this.ctx.logger.warn(`billion-context-dsh: applying settings change failed: ${String(error)}`);
+      }
+    };
+    this.settingsCommand = makeSettingsCommandSurface(() => this.settingsService, () => current);
+    if (this.config.settingsEnabled !== false) {
+      installSettingsSection(ctx, ACP_SETTINGS_NAMESPACE, AcpSettingsSchema, current, {
+        // The helper swaps the source thunk when the provider mounts and
+        // restores the composition entry when it detaches.
+        setSource: (source) => {
+          this.readSettingsSource = source;
+        },
+        onChange: applySettings
+      });
+      ctx.inject(["settings"], (sctx) => {
+        this.settingsService = sctx.settings;
+      });
+    }
     const env = {
       kernel: this.kernel,
       store: this.store,
-      // Initial value before any probe; windowFor() replaces it per pre-step.
-      modelContextLimit: this.config.modelContextLimit ?? DEFAULT_CONTEXT_WINDOW,
-      nudgeMinContextLimitPct: this.config.nudgeMinContextLimitPct,
-      nudgeMaxContextLimitPct: this.config.nudgeMaxContextLimitPct,
-      nudgeEmergencyThresholdPct: this.config.nudgeEmergencyThresholdPct,
+      // The settings-exposed knobs read LIVE from the settings source, so a
+      // settings.yaml edit (or /acp config set) hot-applies to every
+      // subsequent call — consumers never see stale numbers. (ToolEnvironment
+      // fields are readonly properties; getters satisfy them.)
+      get modelContextLimit() {
+        return engine.readSettingsSource().modelContextLimit ?? DEFAULT_CONTEXT_WINDOW;
+      },
+      get nudgeMinContextLimitPct() {
+        return engine.readSettingsSource().nudgeMinContextLimitPct;
+      },
+      get nudgeMaxContextLimitPct() {
+        return engine.readSettingsSource().nudgeMaxContextLimitPct;
+      },
+      get nudgeEmergencyThresholdPct() {
+        return engine.readSettingsSource().nudgeEmergencyThresholdPct;
+      },
       coreOverrides: this.config.coreOverrides,
       windowFor: (agent) => this.windowFor(agent),
       prompts: this.prompts,
-      compressCallIdsToHide: this.compressCallIdsToHide
+      compressCallIdsToHide: this.compressCallIdsToHide,
+      settingsCommand: this.settingsCommand
     };
     this.env = env;
     const tools = ctx.get("tools");
@@ -4606,7 +4857,7 @@ var AcpCompactionEngine = class extends CompactionEngine {
     });
     ctx.on("agent/pre-step", async (payload, next) => {
       stripOrphanedSurfaceToolMessages(payload.agent.session);
-      if (!this.config.autoNudge) return next();
+      if (!engine.readSettingsSource().autoNudge) return next();
       const decision = await next();
       if (decision.kind === "reject") return decision;
       const window = await this.windowFor(payload.agent);
@@ -4651,8 +4902,9 @@ var AcpCompactionEngine = class extends CompactionEngine {
    * auto-detection is disabled or unavailable.
    */
   async windowFor(agent) {
-    if (this.config.modelContextLimit !== void 0) {
-      return { limit: this.config.modelContextLimit, source: "explicit" };
+    const live = this.readSettingsSource();
+    if (live.modelContextLimit !== void 0) {
+      return { limit: live.modelContextLimit, source: "explicit" };
     }
     const provider = agent.options.provider ?? "";
     const model = agent.options.model ?? "";
@@ -4666,13 +4918,13 @@ var AcpCompactionEngine = class extends CompactionEngine {
     const cached = this.windowCache.get(key);
     if (cached !== void 0) return cached;
     let window;
-    if (!this.config.autoModelContextLimit) {
+    if (!live.autoModelContextLimit) {
       window = { limit: DEFAULT_CONTEXT_WINDOW, source: "default", provider, model };
     } else {
       const detected = await detectContextWindow(agent, provider, model);
       if (detected === null) {
         this.ctx.logger.warn(
-          `billion-context-dsh: context-window auto-detection failed for ${provider}/${model} \u2014 using the ${DEFAULT_CONTEXT_WINDOW} fallback (restart to re-probe, or set modelContextLimit explicitly)`
+          `billion-context-dsh: context-window auto-detection failed for ${provider}/${model} \u2014 using the ${DEFAULT_CONTEXT_WINDOW} fallback (change modelContextLimit or autoModelContextLimit via /acp config \u2014 or restart \u2014 to re-probe)`
         );
         window = { limit: DEFAULT_CONTEXT_WINDOW, source: "default", provider, model, probeFailed: true };
       } else {
@@ -4681,6 +4933,23 @@ var AcpCompactionEngine = class extends CompactionEngine {
     }
     this.windowCache.set(key, window);
     return window;
+  }
+  /**
+   * Diff handler for runtime settings changes: drop the window cache when a
+   * window-related key changed (probe FAILURES are cached too — clearing is
+   * what lets the next pre-step re-probe after a fix), clear the per-turn
+   * nudge dedup when nudges come back on, and warn on order anomalies
+   * (accepted, never rejected — rejecting a write cannot fix an externally
+   * edited settings.yaml, and an invalid stored section would fail the next
+   * boot loud anyway).
+   */
+  onSettingsChanged(prev, next) {
+    const effect = describeSettingsChange(prev, next);
+    for (const warning of effect.warnings) {
+      this.ctx.logger.warn(`billion-context-dsh: ${warning}`);
+    }
+    if (effect.clearWindowCache) this.windowCache.clear();
+    if (effect.clearNudgeDedup) this.lastNudgeTurn.clear();
   }
   /** ACP is model-driven: automatic pressure policy never summarizes by itself. */
   async compactIfNeeded(_agent, _trigger, signal) {
@@ -4707,14 +4976,18 @@ var AcpCompactionEngine = class extends CompactionEngine {
 };
 var index_default = AcpCompactionEngine;
 export {
+  ACP_SETTINGS_NAMESPACE,
   ACP_SYSTEM_PROMPT,
   ACP_SYSTEM_PROMPT_ORDER,
   AcpCompactionEngine,
+  AcpSettingsSchema,
   AcpStateStore,
   AlreadyCompressedRangeError,
   DEFAULT_CONTEXT_WINDOW,
   DEFAULT_PROMPTS,
   DEFAULT_RESOLVED,
+  SETTINGS_KEYS,
+  SETTING_DEFAULTS,
   acpCommand,
   assertNoActiveCompaction,
   blockRefForSummarySeq,
@@ -4722,20 +4995,25 @@ export {
   buildNudge,
   compactionIdsOfKernelBlocks,
   index_default as default,
+  describeSettingsChange,
   detectContextWindow,
   eventsToCoreMessages,
   expandShadowedSeqs,
   extractEventText,
+  filterSettingsEntry,
   findOpenTurn,
   hideCompressToolPair,
   kernelConfigFor,
+  makeSettingsCommandSurface,
   makeTools,
+  parseSettingValue,
   projectEvent,
   projectedContextWindow,
   rebuildBlockLedger,
   renderSystemPrompt,
   renderTemplate,
   resolveAcpConfig,
+  resolveAcpSettings,
   resolvePrompts,
   resolveSurfaceRange,
   resolveTokenCount,

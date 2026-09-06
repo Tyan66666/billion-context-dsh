@@ -1,6 +1,7 @@
 /**
  * M4 — the `/acp` slash command: a human-friendly window into the same
- * machinery the model tools expose (status, one-shot compress, decompress).
+ * machinery the model tools expose (status, one-shot compress, decompress,
+ * runtime settings read/write).
  * @module billion-context-dsh/commands
  */
 import type { CommandDefinition } from '@deepseek-ai/dsh-commands';
