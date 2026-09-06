@@ -2847,7 +2847,7 @@ function shadowedTokensViaMeter(session, seqs, ctx) {
   try {
     const meter = ctx?.get?.("tokenMeter");
     if (meter?.measure !== void 0) {
-      const bySeq = new Map(meter.measure(session).nodes.map((node) => [node.seq, node.tokens]));
+      const bySeq = new Map(meter.measure(session).nodes.map((node) => [node.seq, node.heuristicTokens ?? node.tokens]));
       let total = 0;
       let missing = false;
       for (const seq of seqs) {
