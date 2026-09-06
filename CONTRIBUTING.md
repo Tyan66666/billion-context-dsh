@@ -65,7 +65,7 @@ PR titles are enforced by CI (`.github/workflows/pr-lint.yml`, rule in `scripts/
 
 ## Releasing
 
-See AGENTS.md §5: `npm version` bump → sync version refs in docs → `npm publish` → `release vX.Y.Z` commit → `gh release create` → Pages rebuilds automatically.
+See AGENTS.md §5: `npm version` bump → sync version refs in docs → `npm publish` → release PR (no dist to carry; after the merge the dist-bot refreshes main's `dist/` if the build output changed) → `gh release create` → Pages rebuilds automatically.
 
 ## Issue triage automation (labels → Roadmap project)
 

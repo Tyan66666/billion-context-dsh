@@ -33,6 +33,6 @@
 **配套约束(防止契约被无声破坏):**
 
 - **永远不要给这个包加 `prepare`/`preinstall`/`install`/`postinstall` 脚本**——见上表第三行;`tests/package-artifacts.test.ts` 守护这条契约。
-- **CI 在每次构建后校验 `dist/` 与源码一致**(`.github/workflows/ci.yml` 的 "Check committed dist matches the source" 步骤,`git status --porcelain -- dist`)——防止入库产物过期,git 安装装到旧代码。
+- **CI 定期校验 `dist/` 与源码一致**(`.github/workflows/ci.yml` 的 "Check committed dist matches the source" 步骤,`git status --porcelain -- dist`;每日定时 + dist-bot 自身提交后运行,PR 构建不再执行该检查)——防止入库产物过期,git 安装装到旧代码;日常新鲜度由 dist-bot 在每次合并后维护(见下一条)。
 - **`dist/` 由 dist-bot 在合并后自动维护,PR 分支不携带构建产物,开发者完全零接触**:`.github/workflows/dist-bot.yml` 监听 main 的 push,在可能改变构建产物的合并(`src/**`、`package.json`、`package-lock.json`、`tsup.config.ts`)落地后自动重建,产物有变化时把一份新鲜 `dist/` 以 `github-actions[bot]` 身份直接提交到 main——这需要 main 的分支保护关闭 `enforce_admins`,bot 用 secret `DIST_BOT_TOKEN`(维护者的 fine-grained PAT,管理员凭证)推送;人类仍一律走 PR。CI 的漂移检查("Check committed dist matches the source")不再是 PR 闸门,改为每日定时 + bot 自身提交后校验 main 产物,兜底 bot 失效;合并到 bot 提交落地之间(约一两分钟)main 上的 dist 为上一版。发布 PR 合并后同理:`gh release create` 打 tag 前等 bot 提交落地,使 `#<tag>` 安装与对应 npm 版本完全一致。
 - 建议用户安装时带 `#<tag>`;不带 ref 则装默认分支的最新构建(可能与最近一次发布有少量滞后)。
