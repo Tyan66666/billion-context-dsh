@@ -2637,13 +2637,7 @@ function makePreview(text, query, len) {
 
 // src/region.ts
 import { randomUUID } from "crypto";
-import {
-  CompactionId,
-  compactCheckpointSource,
-  toolPairingBalancedAfter,
-  toolPairingBalancedBefore
-} from "@deepseek-ai/dsh-compaction";
-import { createAssistantMessage, createUserMessage } from "@deepseek-ai/dsh-llm";
+import { CompactionId, compactCheckpointSource } from "@deepseek-ai/dsh-compaction";
 
 // src/session-events.ts
 function sessionEventsOf(session) {
@@ -2656,6 +2650,78 @@ function eventAtOf(session, seq) {
   if (typeof eventAt === "function") return eventAt.call(session, seq);
   return session.events[seq];
 }
+
+// src/tool-pairing.ts
+var balanceCacheBySession = /* @__PURE__ */ new WeakMap();
+function eventDelta(event) {
+  if (event.type === "tool/result") return -1;
+  if (event.type === "assistant/message") {
+    const content = event.data.message?.content;
+    if (!Array.isArray(content)) return 0;
+    let calls = 0;
+    for (const block of content) {
+      if (block !== null && typeof block === "object" && block.type === "tool-call") calls += 1;
+    }
+    return calls;
+  }
+  return 0;
+}
+function eventForSeq(session, seq) {
+  const event = eventAtOf(session, seq);
+  if (event === void 0 || event.seq !== seq) {
+    throw new Error(`tool-pairing balance: surface seq ${seq} has no matching session event (corrupt surface)`);
+  }
+  return event;
+}
+function extendCache(session, cache2, seqs) {
+  const processed = cache2.cutBalanced.length - 1;
+  const tail = seqs.slice(processed);
+  const pendingCuts = [];
+  let inProgressToolCalls = cache2.inProgressToolCalls;
+  for (const seq of tail) {
+    inProgressToolCalls += eventDelta(eventForSeq(session, seq));
+    if (inProgressToolCalls < 0) {
+      throw new Error(`tool-pairing balance: tool/result at surface seq ${seq} has no matching tool-call (corrupt surface)`);
+    }
+    pendingCuts.push(inProgressToolCalls === 0);
+  }
+  tail.forEach((seq, offset) => cache2.indexBySeq.set(seq, processed + offset));
+  cache2.cutBalanced = cache2.cutBalanced.concat(pendingCuts);
+  cache2.inProgressToolCalls = inProgressToolCalls;
+  return cache2;
+}
+function balanceCache(session) {
+  const seqs = session.surface.nodes;
+  const generation = session.surface.replaceGeneration;
+  const cached = balanceCacheBySession.get(session);
+  if (cached === void 0 || cached.generation !== generation || cached.cutBalanced.length - 1 > seqs.length) {
+    const rebuilt = extendCache(session, {
+      generation,
+      cutBalanced: [true],
+      indexBySeq: /* @__PURE__ */ new Map(),
+      inProgressToolCalls: 0
+    }, seqs);
+    balanceCacheBySession.set(session, rebuilt);
+    return rebuilt;
+  }
+  if (cached.cutBalanced.length - 1 < seqs.length) return extendCache(session, cached, seqs);
+  return cached;
+}
+function cutBalance(cache2, seq, offset) {
+  const index = cache2.indexBySeq.get(seq);
+  const balanced = index === void 0 ? void 0 : cache2.cutBalanced[index + offset];
+  if (balanced === void 0) throw new Error(`tool-pairing balance: surface seq ${seq} not found`);
+  return balanced;
+}
+function toolPairingBalancedBefore(session, seq) {
+  return cutBalance(balanceCache(session), seq, 0);
+}
+function toolPairingBalancedAfter(session, seq) {
+  return cutBalance(balanceCache(session), seq, 1);
+}
+
+// src/region.ts
+import { createAssistantMessage, createUserMessage } from "@deepseek-ai/dsh-llm";
 
 // src/messages.ts
 function extractText(content) {
