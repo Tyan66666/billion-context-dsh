@@ -42,6 +42,27 @@ test('M5: findOpenTurn / assertNoActiveCompaction track the durable lock', () =>
   assertNoActiveCompaction(session.events)
 })
 
+test('M5: rebuildBlockLedger is idempotent across repeated calls on one snapshot (issue #109)', () => {
+  const session = buildTextSession(8)
+  const c1 = runCompactionTransaction(session, {
+    start: 1, end: 3, shadowedSeqs: [1, 2, 3],
+    summary: [{ type: 'text', text: 'first summary detail' }],
+    shadowedTokenCount: 100, provider: 'p', model: 'm',
+  })
+  const c2 = runCompactionTransaction(session, {
+    start: 4, end: 6, shadowedSeqs: [4, 5, 6],
+    summary: [{ type: 'text', text: 'second summary detail' }],
+    shadowedTokenCount: 200, provider: 'p', model: 'm',
+  })
+  const events = session.events
+  const first = rebuildBlockLedger(events)
+  const second = rebuildBlockLedger(events)
+  assert.equal(first.length, 2)
+  assert.deepEqual(second, first, 'repeated calls on the same snapshot return identical ledger')
+  assert.equal(first[0]!.blockId, c1.compactionId)
+  assert.equal(first[1]!.blockId, c2.compactionId)
+})
+
 test('M5: runCompactionTransaction lands the four events and shadows the range', () => {
   const session = buildTextSession(6)
   const { compactionId, seqs } = runCompactionTransaction(session, {

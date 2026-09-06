@@ -473,8 +473,14 @@ function summarySeqOfCompaction(events: readonly SessionEvent[], compactionId: s
   return null
 }
 
+// Memoized on the append-only snapshot array (stable within one tool call, see
+// sessionEventsOf): identity+length never goes stale; avoids O(B^2*N) rebuilds (#109).
+const blockLedgerCache = new WeakMap<readonly SessionEvent[], { len: number; ledger: AcpBlockLedgerEntry[] }>()
+
 /** Rebuild the block ledger from the durable log (no kernel state needed). */
 export function rebuildBlockLedger(events: readonly SessionEvent[]): AcpBlockLedgerEntry[] {
+  const cached = blockLedgerCache.get(events)
+  if (cached !== undefined && cached.len === events.length) return cached.ledger
   const ledger: AcpBlockLedgerEntry[] = []
   for (const event of events) {
     if (event.type !== 'compaction/summary') continue
@@ -512,6 +518,7 @@ export function rebuildBlockLedger(events: readonly SessionEvent[]): AcpBlockLed
       createdAt: event.time,
     })
   }
+  blockLedgerCache.set(events, { len: events.length, ledger })
   return ledger
 }
 

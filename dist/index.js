@@ -4,7 +4,7 @@ import {
   ManualCompactionError
 } from "@deepseek-ai/dsh-compaction";
 
-// node_modules/acp-kernel/dist/index.js
+// ../dsh/node_modules/acp-kernel/dist/index.js
 import { createRequire } from "module";
 var REF_WIDTH = 5;
 var MIN_INDEX = 1;
@@ -3065,7 +3065,10 @@ function summarySeqOfCompaction(events, compactionId) {
   }
   return null;
 }
+var blockLedgerCache = /* @__PURE__ */ new WeakMap();
 function rebuildBlockLedger(events) {
+  const cached = blockLedgerCache.get(events);
+  if (cached !== void 0 && cached.len === events.length) return cached.ledger;
   const ledger = [];
   for (const event of events) {
     if (event.type !== "compaction/summary") continue;
@@ -3100,6 +3103,7 @@ function rebuildBlockLedger(events) {
       createdAt: event.time
     });
   }
+  blockLedgerCache.set(events, { len: events.length, ledger });
   return ledger;
 }
 function isToolEvent(event) {
