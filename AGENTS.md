@@ -34,6 +34,12 @@ src/
 ├── host-tokens.ts  # shadow-price pricing: host-vocabulary mirror (estimateHostContent/estimateHostMessage/hostPriceEvent) + shadowedTokensViaMeter (ctx.tokenMeter.measure preferred, mirror fallback) — rule 12
 ├── window.ts       # auto context-window detection (session projection first, LLM runtime probe fallback, default 128000) + output-reservation probe (defaultMaxTokens, subtracted in windowFor)
 └── commands.ts     # M4: /acp slash command
+
+scripts/e2e/
+├── run-e2e.mjs     # entry: runs scenarios/*.json sequentially, asserts the persisted event log (issue #120)
+├── harness.mjs     # in-process real DSH host: cordis + agent-loop + DeepSeek adapter, mounts AcpCompactionEngine
+├── fake-llm.mjs     # scripted OpenAI-compatible SSE server (FIFO turns; {{U1}} live-seq templates; honest usage for rule 12's projection anchor)
+└── scenarios/      # basic-compress / nudge-rhythm / compress-then-decompress (data-only JSON)
 ```
 
 Design decisions (see docs/dsh-porting-verification.md for the full evidence):
@@ -72,11 +78,13 @@ npm install
 npm run typecheck   # strict TS, --noEmit
 npm test            # node --import tsx --test tests/*.test.ts tests/kernel-upstream/*.test.ts
 npm run build       # tsup (inlines acp-kernel) + tsc --emitDeclarationOnly
+npm run test:e2e   # node scripts/e2e/run-e2e.mjs (host harness; needs the build — it loads dist/index.js)
 ```
 
 - **No `as any`**, **No `@ts-ignore`**, No `require` in tests (ESM; use static imports).
 - Add a regression test for every bug fix (see tests/ for the battle-report tests: CJK estimation, stale-range filtering, lone tool expansion, legacy backfill).
 - Keep `@deepseek-ai/*` devDeps on the **0.1.0-rc.6 line** — the stable test baseline (the seam's `src/` is unchanged from 0.1.0-rc.6 through 0.1.1-rc.2 per issue #68). The **peer** range deliberately spans BOTH tuples — `^0.1.0-rc.6 || ^0.1.1-rc.1` — because node-semver's prerelease matching requires a comparator on the SAME `[major, minor, patch]` tuple as the candidate: a lone `^0.1.0-rc.6` can never match `0.1.1-rc.x` (issue #68). On the next seamless seam bump, add its tuple clause to the peer range (regression guard: `tests/peer-range.test.ts`) before considering a devDep baseline move. Do not mix rc lines.
+- **The e2e harness pulls the host agent-loop stack — pin the FULL transitive peer closure** — `@deepseek-ai/dsh-agent-loop` / `dsh-agent-loop-testkit` / `dsh-llm-deepseek` declare `@deepseek-ai/*` peers that are absent from this repo's lockfile; npm resolves such absent peers to the **latest matching prerelease** (rc.8), whose own peers then demand newer siblings — cascading ERESOLVE (same class as issue #68). Every package in the dependency+peer closure must therefore be an **explicit devDep pinned to the rc.6 line** (currently 18 additions; `dsh-token-meter` moved from caret to exact so the harness baseline is reproducible). Re-derive the closure whenever a host package is added or dropped; the verification procedure (registry BFS + `package-lock.json` purity check) is documented in docs/e2e-harness-design.md.
 - **Git worktrees MUST be created inside `worktrees/`** in the project root (e.g. `git worktree add worktrees/<branch> <branch>`). The `worktrees/` directory is gitignored and never pushed. Never create worktrees outside the project.
 - **Docs must stay in sync with every PR** — before opening a PR, review the diff against the documentation: any behavior the change alters must match what the docs describe, and docs that state the old behavior must be updated in the same PR. A PR that changes behavior without touching docs is incomplete.
 - **Feature work MUST document itself** — every feature (any behavior addition or change) must add an explanation of the new capability in the relevant docs: user-facing config/options in `README.md` / `README.en.md`, install-time composition options in `docs/INSTALL.md`, design decisions in `docs/*-design.md`, and the module map / hard-won rules in `AGENTS.md` itself. Precedent: the `config.prompts` feature shipped its README section, INSTALL note, config table row, and design doc in the same PR.
