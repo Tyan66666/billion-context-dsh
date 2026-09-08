@@ -1,0 +1,21 @@
+{
+  "name": "compress-then-decompress",
+  "persona": "You are a concise coding agent.",
+  "engine": { "modelContextLimit": 2000, "autoCommand": false },
+  "userTurns": [
+  { "filler": { "topic": "pruning", "count": 110 } },
+  { "filler": { "topic": "ledger", "count": 110 } },
+  { "filler": { "topic": "regions", "count": 110 } },
+  "Please compress the oldest exchange now.",
+  "Now open block b1 and quote its first note verbatim."
+],
+  "responses": [
+  { "kind": "text", "filler": { "topic": "pruning", "count": 110 } },
+  { "kind": "text", "filler": { "topic": "ledger", "count": 110 } },
+  { "kind": "text", "filler": { "topic": "regions", "count": 110 } },
+  { "kind": "tool", "name": "compress", "argsTemplate": "{\"content\": [{\"startSeq\": {{U1}}, \"endSeq\": {{A1}}, \"summary\": \"Exchange 1: the user asked for a survey of the durable surface model; the assistant answered with 110 numbered notes on pruning behavior, ledger reconciliation, and region transactions. Core topics: surface replacement, checkpoint ledger, replay rebuild.\"}]}" },
+  { "kind": "text", "text": "Compressed the oldest exchange into checkpoint block b1." },
+  { "kind": "tool", "name": "decompress", "argsTemplate": "{\"blockId\": \"b1\"}" },
+  { "kind": "text", "text": "Block b1 restores the original exchange. Its first note reads: Note 0: the pruning section documents behavior 0 of the durable surface model." }
+]
+}

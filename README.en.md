@@ -234,7 +234,10 @@ npm install
 npm run typecheck   # strict TS
 npm test            # node --import tsx --test tests/*.test.ts
 npm run build       # tsup bundle (inlines acp-kernel) + .d.ts
+npm run test:e2e   # end-to-end host regression: real agent loop + scripted fake LLM (see below)
 ```
+
+The end-to-end regression suite (`scripts/e2e/`) assembles the real DSH host in-process (cordis + agent-loop + the DeepSeek adapter), points it at a scripted fake LLM server, mounts this engine as the compaction backend, and asserts the persisted event log: compaction start/end pairing, the durable replace node, strict tool-call/result pairing, and the nudge injection rhythm. Background and trade-offs: [docs/e2e-harness-design.md](docs/e2e-harness-design.md) (issue #120).
 
 `dist/index.js` is self-contained except for the `@deepseek-ai/*` seam packages, which the hosting deployment provides.
 
