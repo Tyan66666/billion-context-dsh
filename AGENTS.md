@@ -39,7 +39,7 @@ scripts/e2e/
 ├── run-e2e.mjs     # entry: runs scenarios/*.json sequentially, asserts the persisted event log (issue #120)
 ├── harness.mjs     # in-process real DSH host: cordis + agent-loop + DeepSeek adapter, mounts AcpCompactionEngine
 ├── fake-llm.mjs     # scripted OpenAI-compatible SSE server (FIFO turns; {{U1}} live-seq templates; honest usage for rule 12's projection anchor)
-└── scenarios/      # basic-compress / nudge-rhythm / compress-then-decompress (data-only JSON)
+└── scenarios/      # basic-compress / nudge-rhythm / compress-then-decompress / acp-status (data-only JSON)
 ```
 
 Design decisions (see docs/dsh-porting-verification.md for the full evidence):

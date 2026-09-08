@@ -24,13 +24,14 @@
 6. **事件字段路径** — 载荷在 `event.data.*`（`type`/`seq`/`surfaceOp` 顶层）: `compaction/summary` → `data.shadowedSeqs/shadowedTokenCount`; `user/message` 的 replace 节点 → `event.surfaceOp.op === 'replace'`（append 是字符串 `'append'`，replace 是对象）; `tool/result` → `data.message.content[].{type:'tool-result'}`（rule 5 真实形状）。
 7. **配对断言打在线协议层** — 日志里 `tool/call` 与 `tool/result` 中间插 compaction 事件（start/summary/replace/end/prune），相邻性断言假失败; 正确断集: 最终线请求 `messages` 里每个 `role:'tool'` 前紧跟 `role:'assistant'`（provider 视角的 400 风险）。
 
-## Scenario 与断集（3 套，17 项）
+## Scenario 与断集（4 套，41 项）
 
 | scenario | 配置 | 断集 |
 |---|---|---|
-| basic-compress | window 2000（系统提示词单占 > 窗口 → EMERGENCY）; 3 轮 warm filler（~6.8K chars each）+ compress `{{U1}}..{{A1}}` + 续回答 | compaction start/end 配对; summary 遮蔽 U1; `shadowedTokenCount ≥ 0`（rule 12 折叠非负）; durable replace 节点落; 线协议严格配对; nudge ≥1; end 后继续 |
-| nudge-rhythm | window 24000; 5 轮小历史 + 2 轮大历史（~16K chars） | 小历史时无注入; 大历史后注入（观测: 仅最后请求——投影锚滞后一轮）; 不每轮注入（rule: advisory 节奏） |
-| compress-then-decompress | basic 基础上 + `decompress {"blockId":"b1"}` 轮 | basic 断 + decompress 结果含原始文本（日志重建路径）; compress 结果报 tier; decompress 不新增 compaction 事件 |
+| basic-compress | window 2000（系统提示词单占 > 窗口 → EMERGENCY）; 3 轮 warm filler（~6.8K chars each）+ compress `{{U1}}..{{A1}}` + 续回答 | compaction start/end 配对; summary 遮蔽 U1; `shadowedTokenCount ≥ 0`（rule 12 折叠非负）; durable replace 节点落; 线协议严格配对; nudge ≥1; end 后继续; **投影: compress 后线请求含 summary、原文已消失**（durable surface 端到端本质）; **nudge 范围表: 表头 oldest first、行带 `[tool X% | text Y%]` 份额、seq 升序**（rule 3） |
+| nudge-rhythm | window 24000; 5 轮小历史 + 2 轮大历史（~16K chars） | 小历史时无注入; 大历史后注入（观测: 仅最后请求——投影锚滞后一轮）; 不每轮注入（rule: advisory 节奏）; **nudge 范围表: 表头 oldest first、行带 `[tool X% | text Y%]` 份额、seq 升序**（rule 3） |
+| compress-then-decompress | basic 基础上 + `decompress {"blockId":"b1"}` 轮 | basic 全断 + decompress 结果含原始文本（日志重建路径）; compress 结果报 tier; decompress 不新增 compaction 事件 |
+| acp-status | window 2000; 3 轮 warm filler + compress 轮 + `acp_status {}` 轮 | 报告存在; 含 `CONTEXT BREAKDOWN` / `COMPRESSED BLOCKS`（kernel `buildStatusReport`，rule 9 非手搓）; 块 `b1` 行 + `Checkpoint seqs` 行（蒸馏入口，issue #60 P2）; `Surface:` seq 锚; `Nudge:` 决策行; **不含 `estimated context`/`context window`**（窗口语义属人侧 `/acp`，rule 9） |
 
 ## 二期（未实现，记录取舍）
 
@@ -41,4 +42,4 @@
 
 ## 验证（2026-09-07, Node v22.23.2）
 
-`timeout 240 node scripts/e2e/run-e2e.mjs` → 17/17 PASS `e2e PASS`。关键观测: basic 5 请求（nudge 在请求 4,5 EMERGENCY; 遮蔽 4518 host-token; prune 隐藏 compress 对）; rhythm 7 请求（nudge 仅请求 7）; decompress 7 请求（b1 结果含 'Note 0: the pruning section'，无新 compaction 事件）。`npm run test:e2e` 同绿。
+`node scripts/e2e/run-e2e.mjs` → 41/41 PASS `e2e PASS`（~2.5s，进程干净退出——runner 显式 `process.exit`，假服务 `close()`+`closeAllConnections()`）。关键观测: basic 5 请求（nudge 在请求 4,5 EMERGENCY; 遮蔽 4518 host-token; prune 隐藏 compress 对; compress 后线请求含 summary、原文消失）; rhythm 7 请求（nudge 仅请求 7）; decompress 7 请求（b1 结果含 'Note 0: the pruning section'，无新 compaction 事件）; acp-status 7 请求（报告含 kernel 段头、`b1`+`Checkpoint seqs`、`Surface:` 锚，不含窗口语义行）。`npm run test:e2e` 同绿。
