@@ -16,6 +16,10 @@ on:
 jobs:
   e2e:
     runs-on: ubuntu-latest
+    # Backstop for a future "never finishes" regression: the suite itself is
+    # ~3s and waitForIdle fails a turn after 60s, so 10 minutes is generous;
+    # without this a hang burns the runner for the 6-hour Actions default.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
 

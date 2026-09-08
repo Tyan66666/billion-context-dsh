@@ -12,13 +12,23 @@ const expand = (entries) => entries.map((entry) => {
   if (entry.kind === 'text') return { ...entry, text: expandText(entry) }
   return typeof entry === 'string' ? entry : expandText(entry)
 })
+// Bounded wait: an engine regression that leaves the agent non-idle (or a
+// status event that fires before this turn's listener is registered) must
+// fail the suite with a clear error, not hang the process — and therefore
+// not burn a 6-hour CI timeout. The timer is unref'd so it never keeps the
+// event loop alive after a successful turn.
+const IDLE_TIMEOUT_MS = 60_000
 const waitForIdle = async (ctx, agent) => {
-  const p = new Promise((resolve) => {
+  const idle = new Promise((resolve) => {
     ctx.on('agent/status', ({ agent, status }) => {
     if (status === 'idle') resolve()
   })
   })
-  return await p
+  const stall = new Promise((resolve, reject) => {
+    const t = setTimeout(() => reject(new Error(`waitForIdle: agent never reached idle within ${IDLE_TIMEOUT_MS}ms — check the fake LLM script and the engine pre-step path`)), IDLE_TIMEOUT_MS)
+    t.unref()
+  })
+  return await Promise.race([idle, stall])
 }
 const updateSeqs = (events, seqs) => {
   const counts = { users: 0, assistants: 0 }

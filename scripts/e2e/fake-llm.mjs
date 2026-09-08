@@ -78,9 +78,13 @@ const writeSse = (res, payload) => {
 const writeDone = (res) => {
   res.write('data: [DONE]\n\n')
 }
+// Unknown placeholders throw instead of degrading to a literal: a scenario
+// typo ({{U9}}) must fail the suite on the spot, not surface later as a
+// confusing "startSeq: MISSING" deep in the engine's error chain.
 const render = (template, seqs) => {
   const found = template.replace(/\{\{(\w+)\}\}/g, (m, k) => {
-  return k in seqs ? String(seqs[k]) : 'MISSING'
+  if (!(k in seqs)) throw new Error(`unknown seq placeholder {{"${k}"}} — recorded seqs: ${Object.keys(seqs).join(', ') || '(none)'}`)
+  return String(seqs[k])
 })
 return found
 }

@@ -16,13 +16,14 @@
 
 ## 关键设计约束（踩过的陷阱，必须保留）
 
-1. **假 LLM 必须报 honest usage** — 引擎 nudge 的用量读优先 `sessionProjections.contextPressure.projectedTokens`（rule 2），该投影以**提供商回报的 prompt size** 为锚（`dsh-token-meter` README: `projectedTokens = pressureTokens + 面移动`）。假服务报 `prompt_tokens: 3` 时引擎测得 ~12 token，nudge 节奏测试永远盲（首轮症状: nudge-rhythm 全绿但无注入）。`fake-llm.mjs` 报 `prompt_tokens = ceil(JSON.stringify(messages).length/4) + ceil(JSON.stringify(tools ?? []).length/4)`（宿主 flat-4 词汇，rule 12 同源），完成 token 按文本长度/4。
+1. **假 LLM 必须报 honest usage** — 引擎 nudge 的用量读优先 `sessionProjections.contextPressure.projectedTokens`（rule 2），该投影以**提供商回报的 prompt size** 为锚（`dsh-token-meter` README: `projectedTokens = pressureTokens + 面移动`）。假服务报 `prompt_tokens: 3` 时引擎测得 ~12 token，nudge 节奏测试永远盲（首轮症状: nudge-rhythm 全绿但无注入）。`fake-llm.mjs` 报 `prompt_tokens = ceil(JSON.stringify(messages).length/4) + ceil(JSON.stringify(tools ?? []).length/4)`（宿主 flat-4 词汇，rule 12 同源），完成 token 按文本长度/4。**注意这是长度近似，不是宿主估计器的复刻**：对节奏测试足够（要求只是「用量随历史增长」），但 nudge 触发百分比与真实会话不同——断言只钉「何时注入/不注入」，不钉具体百分比。
 2. **假服务响应模板用占位符，渲染时注入真实 seq** — scenario 里 compress 参数写 `{{U1}}`/`{{A1}}`（首 user/首 assistant 消息的 seq），`fake-llm.mjs` 在响应时刻从 harness 传入的 live `seqs` 对象渲染。scenario JSON 不钉宿主 seq 布局常量。
 3. **假服务脚本 FIFO 逐请求** — `responses` 与请求 1:1（一个 turn 可能多请求: nudge 注入后仍同请求；tool 调用后宿主再请求即消费下一个条目）。
 4. **依赖钉** — harness 拉宿主 agent-loop 栈; `@deepseek-ai/*` prerelease peer 不在 lockfile 时 npm 解析到最新 prerelease（rc.8）级联 ERESOLVE（issue #68 同类）。闭包全部显式 devDep 钉 `0.1.0-rc.6`（18 新增 + `dsh-token-meter` caret→exact）。验证程序: 注册表 BFS（deps+peers 闭包，钉线版本存在性）→ package.json 写入 → `npm install` → lockfile 纯度检查（全部 `@deepseek-ai/*` 在 rc.6 线，cordis/schemastery/cosmokit 稳定线例外——cordis 传递依赖）。
 5. **e2e 跑打包产物** — `harness.mjs` import `../../dist/index.js`（用户安装同文件）; `test:e2e` 必须在 `npm run build` 后（`.github/workflows/e2e.yml` 顺序保证）。
 6. **事件字段路径** — 载荷在 `event.data.*`（`type`/`seq`/`surfaceOp` 顶层）: `compaction/summary` → `data.shadowedSeqs/shadowedTokenCount`; `user/message` 的 replace 节点 → `event.surfaceOp.op === 'replace'`（append 是字符串 `'append'`，replace 是对象）; `tool/result` → `data.message.content[].{type:'tool-result'}`（rule 5 真实形状）。
 7. **配对断言打在线协议层** — 日志里 `tool/call` 与 `tool/result` 中间插 compaction 事件（start/summary/replace/end/prune），相邻性断言假失败; 正确断集: 最终线请求 `messages` 里每个 `role:'tool'` 前紧跟 `role:'assistant'`（provider 视角的 400 风险）。
+8. **挂死兜底（修「跑不完」，不只「跑完不退出」）** — 三层防护: ① `harness.mjs` `waitForIdle` 用 `Promise.race` 给每轮 60s 超时（timer `unref()`，不拖事件循环），agent 永不 idle 时带清晰报错失败而非挂死; ② `e2e.yml` job 级 `timeout-minutes: 10`（套件本身 ~3s，10 分钟宽裕，兜住任何「跑不完」回归，否则烧 Actions 默认 6 小时）; ③ runner 成功/失败路径都显式 `process.exit`，假服务 `close()`+`closeAllConnections()` 释放句柄。占位符笔误（`{{U9}}`）在 `render` 直接 throw，不当场炸就绕进引擎错误链。
 
 ## Scenario 与断集（4 套，41 项）
 

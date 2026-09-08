@@ -58,11 +58,13 @@ const projectionAfterFirstTool = (requests) => {
   if (idx < 0 || idx + 1 >= requests.length) return ''
   return JSON.stringify(requests[idx + 1].body ?? {})
 }
+// Return the deep TEXT (real newlines), not the JSON string: the b1 block-row
+// assertion is line-anchored, which only works against the rendered report.
 const statusReportOf = (events) => {
   for (const event of events) {
     if (event.type === 'tool/result') {
-      const s = JSON.stringify(event.data.message ?? {})
-      if (s.includes('COMPRESSED BLOCKS')) return s
+      const text = deepText(event.data.message)
+      if (text.includes('COMPRESSED BLOCKS')) return text
     }
   }
   return ''
@@ -127,7 +129,7 @@ const checksStatus = (result) => {
   list.push(['acp_status report present', report.length > 0, `len=${report.length}`])
   list.push(['report has CONTEXT BREAKDOWN (kernel buildStatusReport)', report.includes('CONTEXT BREAKDOWN'), ''])
   list.push(['report has COMPRESSED BLOCKS section', report.includes('COMPRESSED BLOCKS'), ''])
-  list.push(['report lists block b1', report.includes('b1'), ''])
+  list.push(['report lists block b1', /^\s*b1\b/m.test(report), ''])
   list.push(['report has Checkpoint seqs row (distillation entry)', report.includes('Checkpoint seqs'), ''])
   list.push(['report has Surface: seq anchor', report.includes('Surface:'), ''])
   list.push(['report has Nudge decision row', report.includes('Nudge: '), ''])
