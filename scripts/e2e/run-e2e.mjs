@@ -74,7 +74,15 @@ const main = async () => {
   const fails = []
   for (const name of scenarioNames) {
   const scenario = await loadScenario(name)
-  const result = await runScenario(scenario)
+  let result
+  try {
+    result = await runScenario(scenario)
+  } catch (err) {
+    console.log(`--- ${name}`)
+    console.log(`  ERROR ${err && err.message ? err.message : String(err)}`)
+    fails.push(`${name}: scenario threw`)
+    continue
+  }
   console.log(`--- ${name}`)
   const kinds = result.requests.map((request) => request.kind ?? 'error').join(',')
   console.log(`requests: ${kinds}`)
@@ -84,7 +92,11 @@ const main = async () => {
   if (!row[1]) fails.push(`${name}: ${row[0]}`)
   })
 }
-  fails.length ? process.exit(1) : console.log('e2e PASS')
-  return fails
+  if (fails.length) {
+    console.log(`e2e FAIL (${fails.length}): ${fails.join('; ')}`)
+    process.exit(1)
+  }
+  console.log('e2e PASS')
+  process.exit(0)
 }
 await main()

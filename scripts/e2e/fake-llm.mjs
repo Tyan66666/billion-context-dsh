@@ -15,7 +15,9 @@ const startFakeLlm = async (options) => {
     baseURL: `http://127.0.0.1:${server.address().port}`,
     requests: state.requests,
     close: async () => {
-    await close(server)
+    const done = new Promise((resolve) => { server.close(() => resolve()) })
+    if (typeof server.closeAllConnections === 'function') server.closeAllConnections()
+    await done
   }
 }
 }

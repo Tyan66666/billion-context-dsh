@@ -70,6 +70,7 @@ const runScenario = async (scenario) => {
   const events = agent.session.events
   const requests = server.requests
   await ctx.fiber.dispose()
+  await server.close()
   return { events, requests, seqs: { ...seqs } }
 }
 export { runScenario }
