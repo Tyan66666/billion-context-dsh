@@ -8,7 +8,7 @@ import { AcpStateStore } from '../src/state.ts'
 import { buildNudge, buildNudgeText, rangeTable, resolveTokenCount, EMERGENCY_NUDGE_MAX_PER_TURN } from '../src/nudge.ts'
 import { makeTools, type ToolEnvironment } from '../src/tools.ts'
 import { rebuildBlockLedger } from '../src/region.ts'
-import { buildTextSession } from './helpers.ts'
+import { appendTurn, appendUser, buildTextSession, longText } from './helpers.ts'
 
 function fakeAgent(session: import('@deepseek-ai/dsh-session').Session): Agent {
   return {
@@ -83,34 +83,85 @@ test('M4: no nudge is produced for a comfortable context', () => {
 })
 
 test('M4: emergency nudges are capped per user turn (issue #108)', () => {
-  // Extreme pressure (usage >= 98%) forces the overflow/emergency path. Repeated
-  // pre-steps in the same turn must NOT re-inject an emergency nudge forever —
-  // that was the runaway feedback loop (each durable nudge's own tokens push
-  // usage higher). The per-turn budget bounds it to EMERGENCY_NUDGE_MAX_PER_TURN.
+  // Extreme pressure (usage >= 98%) forces the overflow/emergency path on
+  // EVERY pre-step (the kernel wants to inject every time). Repeated pre-steps
+  // in the same turn must NOT re-inject an emergency nudge forever — that was
+  // the runaway feedback loop (each durable nudge's own tokens push usage
+  // higher). The per-turn budget bounds it to EMERGENCY_NUDGE_MAX_PER_TURN:
+  // the first 3 calls inject, the 4th returns null, and every call after
+  // stays null.
+  const env = makeEnv(1500)
+  const session = buildTextSession(12)
+  const lastNudgeTurn = new Map<string, number>()
+  const emergencyNudges = new Map<string, { turn: number; count: number }>()
+  const agent = fakeAgent(session)
+  let capHits = 0
+
+  const outcomes: Array<ReturnType<typeof buildNudge>> = []
+  for (let i = 0; i < EMERGENCY_NUDGE_MAX_PER_TURN + 3; i++) {
+    outcomes.push(buildNudge(agent, env, lastNudgeTurn, emergencyNudges, () => { capHits += 1 }))
+  }
+  for (let i = 0; i < EMERGENCY_NUDGE_MAX_PER_TURN; i++) {
+    assert.ok(outcomes[i] !== null, `call ${i + 1} injects within the per-turn budget`)
+    assert.equal(outcomes[i]!.emergency, true, 'every injected nudge here is emergency')
+  }
+  assert.equal(outcomes[EMERGENCY_NUDGE_MAX_PER_TURN], null, `call ${EMERGENCY_NUDGE_MAX_PER_TURN + 1} returns null once the per-turn budget is spent`)
+  for (let i = EMERGENCY_NUDGE_MAX_PER_TURN + 1; i < outcomes.length; i++) {
+    assert.equal(outcomes[i], null, `call ${i + 1} stays suppressed`)
+  }
+  assert.equal(capHits, 3, 'the cap-hit hook fires for every suppressed call (host logs it)')
+})
+
+test('M4: the emergency nudge cap resets on a new user turn (issue #108)', () => {
+  // The budget is per USER TURN: once the turn advances, the session gets a
+  // fresh EMERGENCY_NUDGE_MAX_PER_TURN budget (same semantics as the normal
+  // per-turn dedup).
   const env = makeEnv(1500)
   const session = buildTextSession(12)
   const lastNudgeTurn = new Map<string, number>()
   const emergencyNudges = new Map<string, { turn: number; count: number }>()
   const agent = fakeAgent(session)
 
-  const outcomes: Array<ReturnType<typeof buildNudge>> = []
-  for (let i = 0; i < EMERGENCY_NUDGE_MAX_PER_TURN + 3; i++) {
-    outcomes.push(buildNudge(agent, env, lastNudgeTurn, emergencyNudges))
+  for (let i = 0; i < EMERGENCY_NUDGE_MAX_PER_TURN; i++) {
+    assert.ok(buildNudge(agent, env, lastNudgeTurn, emergencyNudges) !== null, `turn 1: call ${i + 1} injects`)
   }
-  let injected = 0
-  let lastInjectedIndex = -1
-  for (let i = 0; i < outcomes.length; i++) {
-    const outcome = outcomes[i]
-    if (outcome === null) continue
-    injected += 1
-    lastInjectedIndex = i
-    assert.equal(outcome.emergency, true, 'every injected nudge here is emergency')
+  assert.equal(buildNudge(agent, env, lastNudgeTurn, emergencyNudges), null, 'turn 1: call 4 is capped')
+
+  appendTurn(session, 2)
+  const fresh = buildNudge(agent, env, lastNudgeTurn, emergencyNudges)
+  assert.ok(fresh !== null, 'turn 2: the cap resets and an emergency nudge lands again')
+  assert.equal(fresh.emergency, true, 'turn 2: still an emergency nudge')
+})
+
+test('M4: a normal nudge does not consume the emergency budget (issue #108)', () => {
+  // Mixed pressure within one user turn: a normal-pressure nudge (above the
+  // 70% over-limit line, below the 85% emergency line) fires once and then
+  // dedups — but it must NOT eat into the emergency budget. When the same
+  // turn's pressure then crosses the emergency line, the full
+  // EMERGENCY_NUDGE_MAX_PER_TURN emergency injections are still available.
+  // 12 longText messages = 12,391 tokens; limit 16000 → 77.4% (normal);
+  // +3 user messages = 15,490 → 96.8% (emergency).
+  const env = makeEnv(16000)
+  const session = buildTextSession(12)
+  const lastNudgeTurn = new Map<string, number>()
+  const emergencyNudges = new Map<string, { turn: number; count: number }>()
+  const agent = fakeAgent(session)
+
+  const first = buildNudge(agent, env, lastNudgeTurn, emergencyNudges)
+  assert.ok(first !== null, 'a normal-pressure nudge lands at 77%')
+  assert.equal(first.emergency, false, 'it is a normal nudge, not emergency')
+  assert.equal(buildNudge(agent, env, lastNudgeTurn, emergencyNudges), null, 'the normal nudge dedups within the turn')
+
+  appendUser(session, longText('more', 100))
+  appendUser(session, longText('more', 101))
+  appendUser(session, longText('more', 102))
+
+  for (let i = 0; i < EMERGENCY_NUDGE_MAX_PER_TURN; i++) {
+    const outcome = buildNudge(agent, env, lastNudgeTurn, emergencyNudges)
+    assert.ok(outcome !== null, `emergency call ${i + 1} lands — the normal nudge did not consume the budget`)
+    assert.equal(outcome.emergency, true, 'now it is an emergency nudge')
   }
-  assert.ok(injected >= 1, 'an emergency nudge lands under extreme pressure')
-  assert.ok(injected <= EMERGENCY_NUDGE_MAX_PER_TURN, 'never exceeds the per-turn cap')
-  for (let i = lastInjectedIndex + 1; i < outcomes.length; i++) {
-    assert.equal(outcomes[i], null, `call ${i} is suppressed once the per-turn budget is spent`)
-  }
+  assert.equal(buildNudge(agent, env, lastNudgeTurn, emergencyNudges), null, 'call 4 is capped even after the normal nudge')
 })
 
 test('M4: range table is computed from the surface, skipping the protected tail', () => {

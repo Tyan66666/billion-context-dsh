@@ -133,12 +133,17 @@ export const EMERGENCY_NUDGE_MAX_PER_TURN = 3
  * unrelieved ≥threshold pressure cannot re-inject a durable nudge on every
  * pre-step forever (issue #108). Also advances the in-memory kernel state (ref
  * assignment) so the compress tool can resolve seq → mNNNNN refs.
+ *
+ * `onEmergencyCapHit` (optional) fires when the kernel still wants an
+ * emergency nudge but the per-turn budget is spent — the host uses it to log
+ * why the model stops receiving nudges (issue #108 review).
  */
 export function buildNudge(
   agent: Agent,
   env: NudgeEnvironment,
   lastNudgeTurn: Map<string, number>,
   emergencyNudges: Map<string, { turn: number; count: number }>,
+  onEmergencyCapHit?: () => void,
 ): NudgeOutcome | null {
   const session = agent.session
   const state = env.store.stateFor(session)
@@ -168,7 +173,10 @@ export function buildNudge(
     // and commit 414acd1).
     const record = emergencyNudges.get(session.id)
     if (record !== undefined && record.turn === turnNumber) {
-      if (record.count >= EMERGENCY_NUDGE_MAX_PER_TURN) return null
+      if (record.count >= EMERGENCY_NUDGE_MAX_PER_TURN) {
+        onEmergencyCapHit?.()
+        return null
+      }
       record.count += 1
     } else {
       emergencyNudges.set(session.id, { turn: turnNumber, count: 1 })
