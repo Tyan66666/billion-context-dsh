@@ -126,6 +126,7 @@ export declare class AcpCompactionEngine extends CompactionEngine {
     private readonly lastNudgeTurn;
     /** Successful compress call ids awaiting their tool/result so the pair can be hidden. */
     private readonly compressCallIdsToHide;
+    /** B2：去重判定面现算自会话面（无跨请求状态——旧副本被遮蔽即整包重注）。 */
     /** Per provider/model route the resolved window (probe failures cached too). */
     private readonly windowCache;
     /** Per route the adapter's per-request output cap (the output reservation); null = undisclosed. */

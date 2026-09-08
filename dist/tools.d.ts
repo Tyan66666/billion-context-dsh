@@ -40,5 +40,61 @@ export interface ToolEnvironment extends KernelConfigInput {
  * for pressure decisions even when auto-detection had found a larger window).
  */
 export declare function resolveEffectiveWindow(env: ToolEnvironment, agent: Agent): Promise<AcpWindow>;
+export declare const compressParameters: {
+    readonly arguments: {
+        readonly type: 'json';
+        readonly description: 'Tolerated wrapped-arguments form (model-generated); unwrapped in handleCompress. Prefer passing content directly.';
+    };
+    readonly topic: {
+        readonly type: 'string';
+        readonly description: 'Fallback topic for entries without their own.';
+    };
+    readonly content: {
+        readonly type: 'array';
+        readonly description: 'One or more ranges to compress, each with startSeq/endSeq boundaries (surface seqs) and a dense summary. Required — pass it directly, not wrapped in an arguments key.';
+        readonly items: {
+            readonly type: 'object';
+            readonly properties: {
+                readonly startSeq: {
+                    readonly required: true;
+                    readonly oneOf: readonly [{
+                        readonly type: 'integer';
+                        readonly description: 'First surface seq of the range.';
+                    }, {
+                        readonly type: 'string';
+                        readonly description: 'Seq as text; a trailing #callId fragment is ignored.';
+                    }];
+                };
+                readonly endSeq: {
+                    readonly required: true;
+                    readonly oneOf: readonly [{
+                        readonly type: 'integer';
+                        readonly description: 'Inclusive last surface seq of the range.';
+                    }, {
+                        readonly type: 'string';
+                        readonly description: 'Seq as text; a trailing #callId fragment is ignored.';
+                    }];
+                };
+                readonly summary: {
+                    readonly type: 'string';
+                    readonly required: true;
+                    readonly description: 'Complete technical summary replacing the range; keep paths, decisions, values verbatim. Minimum 50 characters.';
+                };
+                readonly topic: {
+                    readonly type: 'string';
+                    readonly description: 'Short label (3-5 words) for this range.';
+                };
+                readonly verifiedReadings: {
+                    readonly type: 'array';
+                    readonly items: {
+                        readonly type: 'string';
+                    };
+                    readonly description: 'Optional: acceptance readings that are already green before this compression (e.g. "t0-fastpath 8/8", "closedloop 414/414"). Stored structurally on the compaction/summary event and recovered by verifiedReadingsOf, so later steps need not re-run the checks.';
+                };
+            };
+            readonly additionalProperties: false;
+        };
+    };
+};
 /** Build the four ACP model tools bound to one engine. */
 export declare function makeTools(env: ToolEnvironment): ToolDefinition[];

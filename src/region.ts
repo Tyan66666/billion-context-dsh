@@ -21,7 +21,7 @@ import { CompactionId, compactCheckpointSource } from '@deepseek-ai/dsh-compacti
 import { toolPairingBalancedAfter, toolPairingBalancedBefore } from './tool-pairing.ts'
 import { createAssistantMessage, createUserMessage, type ContentBlock } from '@deepseek-ai/dsh-llm'
 import { defaultCountTokens } from 'acp-kernel'
-import { extractEventText, extractText, toolCallIdOfResultEvent } from './messages.ts'
+import { extractEventText, extractText, toolCallIdOfResultEvent, withSummaryFramePrefix } from './messages.ts'
 import { hostPriceEvent } from './host-tokens.ts'
 import { eventAtOf, sessionEventsOf } from './session-events.ts'
 
@@ -349,6 +349,8 @@ export interface CompactionTransactionInput {
   /** The kernel block's direct/effective message ids (raw CoreMessage ids) — recorded for faithful rehydration. */
   readonly directMessageIds?: readonly string[]
   readonly effectiveMessageIds?: readonly string[]
+  /** B3：压缩前已绿的验收读数（结构化，压缩后仍可读）。 */
+  readonly verifiedReadings?: readonly string[]
 }
 
 /**
@@ -373,6 +375,11 @@ export interface AcpCompactionSummaryFields {
   readonly directMessageIds?: readonly string[]
   /** The kernel block's effective message ids (raw CoreMessage ids) at creation. */
   readonly effectiveMessageIds?: readonly string[]
+  /**
+   * B3 止损依据结构化（2026-09-08 方案 §4 B3）：压缩前把「已绿验收读数」写进结构化字段，
+   * 使其在压缩后与义务同等保真——摘要里的「做完了」必须带得出证据，否则压缩=证据蒸发。
+   */
+  readonly verifiedReadings?: readonly string[]
 }
 
 type CompactionSummaryData = SessionEventMap['compaction/summary']
@@ -380,6 +387,26 @@ type CompactionSummaryData = SessionEventMap['compaction/summary']
 /** Read a `compaction/summary` event's data including the ACP tier extension fields. */
 export function readCompactionSummary(event: SessionEvent): CompactionSummaryData & AcpCompactionSummaryFields {
   return event.data as CompactionSummaryData & AcpCompactionSummaryFields
+}
+
+/** B3：读压缩块的结构化验收读数（缺位=空数组，绝不抛）。 */
+export function verifiedReadingsOf(event: SessionEvent): string[] {
+  const list = readCompactionSummary(event).verifiedReadings
+  return Array.isArray(list) ? list.map(String) : []
+}
+
+/**
+ * B1：给摘要块数组的第一个文本块加标源前缀（幂等——已带前缀不重复加）。
+ * 只动文本块，工具/图片块原样保留。
+ */
+export function prefixSummaryBlocks(blocks: readonly ContentBlock[]): ContentBlock[] {
+  let done = false
+  return blocks.map((block) => {
+    if (done || block.type !== 'text') return block
+    done = true
+    const textBlock = block as { type: 'text'; text: string }
+    return { ...textBlock, text: withSummaryFramePrefix(textBlock.text) } as ContentBlock
+  })
 }
 
 /**
@@ -431,10 +458,14 @@ export function runCompactionTransaction(
         : { parentBlockIds: [...input.parentBlockIds] }),
       ...(input.directMessageIds === undefined ? {} : { directMessageIds: [...input.directMessageIds] }),
       ...(input.effectiveMessageIds === undefined ? {} : { effectiveMessageIds: [...input.effectiveMessageIds] }),
+      ...(input.verifiedReadings === undefined || input.verifiedReadings.length === 0
+        ? {}
+        : { verifiedReadings: [...input.verifiedReadings] }),
     } as CompactionSummaryData & AcpCompactionSummaryFields).seq)
 
+    // B1：摘要帧在**创建期**就标源（不只是投影期）——durable log 里也一眼可辨「模型自写」。
     const message = createUserMessage({
-      content: input.summary,
+      content: prefixSummaryBlocks(input.summary),
       source: compactCheckpointSource(compactionId),
     })
     seqs.push(session.append('user/message', message, {

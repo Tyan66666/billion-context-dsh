@@ -117,6 +117,8 @@ export interface CompactionTransactionInput {
     /** The kernel block's direct/effective message ids (raw CoreMessage ids) — recorded for faithful rehydration. */
     readonly directMessageIds?: readonly string[];
     readonly effectiveMessageIds?: readonly string[];
+    /** B3：压缩前已绿的验收读数（结构化，压缩后仍可读）。 */
+    readonly verifiedReadings?: readonly string[];
 }
 /**
  * ACP tier extension fields carried on `compaction/summary` events. The
@@ -140,10 +142,22 @@ export interface AcpCompactionSummaryFields {
     readonly directMessageIds?: readonly string[];
     /** The kernel block's effective message ids (raw CoreMessage ids) at creation. */
     readonly effectiveMessageIds?: readonly string[];
+    /**
+     * B3 止损依据结构化（2026-09-08 方案 §4 B3）：压缩前把「已绿验收读数」写进结构化字段，
+     * 使其在压缩后与义务同等保真——摘要里的「做完了」必须带得出证据，否则压缩=证据蒸发。
+     */
+    readonly verifiedReadings?: readonly string[];
 }
 type CompactionSummaryData = SessionEventMap['compaction/summary'];
 /** Read a `compaction/summary` event's data including the ACP tier extension fields. */
 export declare function readCompactionSummary(event: SessionEvent): CompactionSummaryData & AcpCompactionSummaryFields;
+/** B3：读压缩块的结构化验收读数（缺位=空数组，绝不抛）。 */
+export declare function verifiedReadingsOf(event: SessionEvent): string[];
+/**
+ * B1：给摘要块数组的第一个文本块加标源前缀（幂等——已带前缀不重复加）。
+ * 只动文本块，工具/图片块原样保留。
+ */
+export declare function prefixSummaryBlocks(blocks: readonly ContentBlock[]): ContentBlock[];
 /**
  * Run one durable compression transaction. Throws on invalid state; on success
  * the four events are in the log and the surface has one summary node.

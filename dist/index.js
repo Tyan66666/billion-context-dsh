@@ -2774,10 +2774,20 @@ function buildToolCallIndex(events) {
   }
   return index;
 }
+var SUMMARY_FRAME_PREFIX = "[\u6A21\u578B\u81EA\u5199\u6458\u8981 \xB7 \u975E\u7528\u6237\u539F\u6587 \xB7 \u5176\u4E2D\u4E49\u52A1\u53E5\u9700\u590D\u6838]";
+function withSummaryFramePrefix(text) {
+  return text.startsWith(SUMMARY_FRAME_PREFIX) ? text : `${SUMMARY_FRAME_PREFIX}
+${text}`;
+}
+function isCompactionCheckpoint(event) {
+  const source = event.data.source;
+  return source?.plugin === "compact" || source?.kind === "compaction";
+}
 function projectEvent(event, toolNames) {
   switch (event.type) {
     case "user/message": {
-      const text = extractText(event.data.content);
+      const raw = extractText(event.data.content);
+      const text = isCompactionCheckpoint(event) ? withSummaryFramePrefix(raw) : raw;
       return text.length > 0 ? [{ id: String(event.seq), role: "user", contentType: "text", text }] : [];
     }
     case "assistant/message": {
@@ -3073,6 +3083,15 @@ function shadowedSeqsOf(session, start, end) {
 function readCompactionSummary(event) {
   return event.data;
 }
+function prefixSummaryBlocks(blocks) {
+  let done = false;
+  return blocks.map((block) => {
+    if (done || block.type !== "text") return block;
+    done = true;
+    const textBlock = block;
+    return { ...textBlock, text: withSummaryFramePrefix(textBlock.text) };
+  });
+}
 function runCompactionTransaction(session, input) {
   assertNoActiveCompaction(sessionEventsOf(session));
   const turn = findOpenTurn(sessionEventsOf(session));
@@ -3102,10 +3121,11 @@ function runCompactionTransaction(session, input) {
       ...input.topic === void 0 ? {} : { topic: input.topic },
       ...input.parentBlockIds === void 0 || input.parentBlockIds.length === 0 ? {} : { parentBlockIds: [...input.parentBlockIds] },
       ...input.directMessageIds === void 0 ? {} : { directMessageIds: [...input.directMessageIds] },
-      ...input.effectiveMessageIds === void 0 ? {} : { effectiveMessageIds: [...input.effectiveMessageIds] }
+      ...input.effectiveMessageIds === void 0 ? {} : { effectiveMessageIds: [...input.effectiveMessageIds] },
+      ...input.verifiedReadings === void 0 || input.verifiedReadings.length === 0 ? {} : { verifiedReadings: [...input.verifiedReadings] }
     }).seq);
     const message = createUserMessage({
-      content: input.summary,
+      content: prefixSummaryBlocks(input.summary),
       source: compactCheckpointSource(compactionId)
     });
     seqs.push(session.append("user/message", message, {
@@ -3699,8 +3719,10 @@ var DEFAULT_PROMPTS = {
   nudge: {
     // 与 kernel nudge-text.ts EFFICIENCY_NOTE 逐字对齐——不含 "Context usage is at X%"
     // 陈述(usage 只通过 breakdown 传达);{pct} 仍可用作自定义占位符。
-    normal: "This is an efficiency nudge to compress early and keep context lean \u2014 not an overflow warning. A separate, stronger alert will appear if the context is actually full.\n\n{philosophy}",
-    emergency: "\u26A0\uFE0F Context limit reached \u2014 compress now. Prioritize consumed tool outputs.\n\n{philosophy}",
+    // B6（2026-09-08）：正文 ≤300 B——philosophy 段移出 nudge（已住系统提示与工具描述），
+    // 每拍复读同一份 6 KB 文本=重复计费。
+    normal: "Efficiency nudge: compress consumed ranges early to keep context lean \u2014 not an overflow warning. A stronger alert appears only if the context is actually full.",
+    emergency: "\u26A0\uFE0F Context limit reached \u2014 compress now. Prioritize consumed tool outputs.",
     guidance: HOW_TO_COMPRESS_RULES,
     tier: "Tier {tier}: {count} tier-{prevTier} block(s) distillable ({tokens} tokens) \u2014 distill them by compressing their checkpoint seq(s) [seqs {seqs}] as one range: compress({ content: [{ startSeq: {firstSeq}, endSeq: {lastSeq}, summary }] }).",
     breakdown: "Context breakdown: {system}K system | {tool}K tool | {summaries}K summaries | {code}K code | {text}K text",
@@ -3714,7 +3736,7 @@ var DEFAULT_PROMPTS = {
     footer: "Compress with: compress({ content: [{ startSeq, endSeq, summary }] }) \u2014 content is an array: batch multiple unrelated segments in one call, each entry its own block. Keep ranges disjoint.\nSnapshot taken at nudge time: the seqs go stale once the surface moves (a later compress shadows them), so re-run acp_status for fresh refs before compressing."
   },
   tools: {
-    compress: "Replace older conversation ranges with dense summaries you write. Each message seq is a surface reference. Single range: compress({ content: [{ startSeq, endSeq, summary }] }). Batch multiple unrelated ranges in one call (each content entry becomes its own block); keep ranges disjoint. Never compress content the current step is actively using. Compress boundaries are SURFACE SEQS (acp_status Surface: row, latest nudge table) \u2014 NOT the block refs (bN, e.g. b1) that acp_status COMPRESSED BLOCKS shows, which are for decompress only. Drilldown mN refs (e.g. m00306) are ALSO accepted as startSeq/endSeq \u2014 they are auto-mapped to the live surface seq; an unknown mN (never assigned on the current surface) fails with guidance. Seq refs must come from the CURRENT surface (acp_status or the latest nudge): a span whose edges were shadowed by an earlier compress is auto-remapped to its still-live content, a fully compressed span is reported as already compressed, and invented/other-session seqs fail with guidance. Good compression moments: stage or subtask completion whose details you have fully consumed and will not re-check, strategy switches, intermediate milestones, and wrapping up failed exploration \u2014 when the details are consumed and no longer critical for the task ahead. Before compressing, ask: will I need to re-verify any detail from this range in this task? If yes, keep it live. When you write a summary, turn dead-end exploration into a conclusion (what was tried, why it failed, the next step) \u2014 not a blow-by-blow; and keep the summary the ONLY record: self-contained, so a later reader (or you, after decompress) can continue without the original.",
+    compress: 'Replace older conversation ranges with dense summaries you write. Each message seq is a surface reference. Single range: compress({ content: [{ startSeq, endSeq, summary }] }). Batch multiple unrelated ranges in one call (each content entry becomes its own block); keep ranges disjoint. Never compress content the current step is actively using. Compress boundaries are SURFACE SEQS (acp_status Surface: row, latest nudge table) \u2014 NOT the block refs (bN, e.g. b1) that acp_status COMPRESSED BLOCKS shows, which are for decompress only. Drilldown mN refs (e.g. m00306) are ALSO accepted as startSeq/endSeq \u2014 they are auto-mapped to the live surface seq; an unknown mN (never assigned on the current surface) fails with guidance. Seq refs must come from the CURRENT surface (acp_status or the latest nudge): a span whose edges were shadowed by an earlier compress is auto-remapped to its still-live content, a fully compressed span is reported as already compressed, and invented/other-session seqs fail with guidance. Good compression moments: stage or subtask completion whose details you have fully consumed and will not re-check, strategy switches, intermediate milestones, and wrapping up failed exploration \u2014 when the details are consumed and no longer critical for the task ahead. Before compressing, ask: will I need to re-verify any detail from this range in this task? If yes, keep it live. When you write a summary, turn dead-end exploration into a conclusion (what was tried, why it failed, the next step) \u2014 not a blow-by-blow; and keep the summary the ONLY record: self-contained, so a later reader (or you, after decompress) can continue without the original. Optional verifiedReadings: string[] per content entry records acceptance readings that are already green (e.g. "t0-fastpath 8/8") \u2014 stored structurally on the compaction event so later steps need not re-run them.',
     decompress: "Recover the original content of a compressed block by its blockId \u2014 the kernel block ref `bN` shown by acp_status (e.g. b1), or a compaction id from search_context (read-only; does not unshadow the range).",
     searchContext: "Search inside compressed blocks (summaries and original content) for information the model no longer sees in context. When a summary lacks a detail you need (exact values, error strings, decisions, verbatim code), SEARCH the compressed blocks FIRST \u2014 never guess or reconstruct from memory: search_context(query) locates the right block, then decompress only that block to recover the original.",
     acpStatus: 'Context status: overview of the current context \u2014 CONTEXT BREAKDOWN (tool/text/summaries token shares of the visible total), COMPRESSED BLOCKS ledger, and the nudge decision. No args = overview. Percentages are shares of the visible content, not the context window. Note: the block refs in COMPRESSED BLOCKS (bN, e.g. b1) are for decompress; compress uses the Surface: seq range, not bN. Drilldown: pass scope:"compressed" for a per-block list, or scope:"uncompressed" with view:"messages" (every visible message) / view:"ranges" (merged ranges); tool filters to one tool name, sort reorders (size/time/tool; age for compressed), limit caps rows (default 30). Drilldown row refs are kernel ids (mN) \u2014 feed them straight to compress as startSeq/endSeq (auto-mapped to the live surface seq); bN is for decompress, Surface: seqs also work in compress.'
@@ -3759,6 +3781,12 @@ When you write a summary, it becomes the ONLY record of that range: keep file pa
 var DEFAULT_RESOLVED = DEFAULT_PROMPTS;
 
 // src/nudge.ts
+var GUIDANCE_BLOCKS = [COMPRESS_PHILOSOPHY, HOW_TO_COMPRESS_RULES, TIER2_DISTILL_RULES, TIER3_CONDENSE_RULES];
+function stripNudgeGuidance(text) {
+  let out = text;
+  for (const block of GUIDANCE_BLOCKS) out = out.split(block).join("");
+  return out.replace(/\n{3,}/g, "\n\n").trim();
+}
 function resolveTokenCount(agent, coreMessages) {
   const projections = agent.ctx?.get?.("sessionProjections");
   const projected = projections?.snapshot?.(agent.session)?.values?.contextPressure?.projectedTokens;
@@ -3824,7 +3852,7 @@ function buildNudgeText(nudge, emergency, session, prompts = DEFAULT_RESOLVED) {
   return adaptKernelNudgeToSeq(rendered.text, nudge, session, prompts);
 }
 function adaptKernelNudgeToSeq(text, nudge, session, prompts) {
-  let out = text;
+  let out = stripNudgeGuidance(text);
   if ((nudge.tier === 2 || nudge.tier === 3) && (nudge.tierTargetBlocks?.length ?? 0) > 0) {
     out = replaceTierTrigger(out, nudge, session, prompts);
   } else if (out.includes('"startId"')) {
@@ -3919,7 +3947,7 @@ function renderNudgeFromTemplates(nudge, emergency, session, prompts) {
     parts.push(rangeTable(session, prompts));
   }
   if (prompts.nudge.tip !== "") parts.push("", prompts.nudge.tip);
-  return parts.join("\n");
+  return stripNudgeGuidance(parts.join("\n"));
 }
 
 // src/tools.ts
@@ -3987,7 +4015,20 @@ var compressParameters = {
           ]
         },
         summary: { type: "string", required: true, description: "Complete technical summary replacing the range; keep paths, decisions, values verbatim. Minimum 50 characters." },
-        topic: { type: "string", description: "Short label (3-5 words) for this range." }
+        topic: { type: "string", description: "Short label (3-5 words) for this range." },
+        // B3 (2026-09-08 governance plan): the handler and region.ts have
+        // accepted verifiedReadings since the plan landed, but the declared
+        // parameter schema did not list it — `additionalProperties: false`
+        // then rejected every live call that carried it
+        // (`invalid arguments: "content[0].verifiedReadings" is not a declared
+        // property`), so the structured-loss-stopping field was unreachable
+        // from the model's tool interface. Declared here; additionalProperties
+        // stays false so unknown fields are still rejected.
+        verifiedReadings: {
+          type: "array",
+          items: { type: "string" },
+          description: 'Optional: acceptance readings that are already green before this compression (e.g. "t0-fastpath 8/8", "closedloop 414/414"). Stored structurally on the compaction/summary event and recovered by verifiedReadingsOf, so later steps need not re-run the checks.'
+        }
       },
       additionalProperties: false
     }
@@ -4125,6 +4166,8 @@ async function handleCompress(env, args, exec) {
       endSeq,
       startRef,
       endRef,
+      // B3：把该段声明的已绿验收读数带上（缺位=不写键）
+      ...Array.isArray(range.verifiedReadings) && range.verifiedReadings.length > 0 ? { verifiedReadings: range.verifiedReadings.map(String) } : {},
       summary: range.summary,
       ...(range.topic ?? args.topic) === void 0 ? {} : { topic: range.topic ?? args.topic }
     });
@@ -4201,7 +4244,9 @@ async function handleCompress(env, args, exec) {
       // rehydrates the SAME effective messages (a tier-2 block's coverage is
       // its parents' originals, not the checkpoint node).
       directMessageIds: block.directMessageIds,
-      effectiveMessageIds: block.effectiveMessageIds
+      effectiveMessageIds: block.effectiveMessageIds,
+      // B3：已绿验收读数随压缩块落盘（缺位=不写键）
+      ...range.verifiedReadings === void 0 ? {} : { verifiedReadings: range.verifiedReadings }
     });
     const adjusted = start !== range.startSeq || end !== range.endSeq;
     const tierLabel2 = `, tier ${tier}`;
@@ -4572,6 +4617,71 @@ function acpCommand(env) {
 var ACP_SYSTEM_PROMPT = renderSystemPrompt(DEFAULT_PROMPTS);
 var ACP_SYSTEM_PROMPT_ORDER = 150;
 
+// src/injection-dedupe.ts
+import { createHash } from "crypto";
+var DEDUPE_SOURCES = ["agent-instructions", "skill-catalog", "runtime", "runtime-context"];
+var UNCHANGED_PREFIX = "[unchanged: sha1:";
+function sha1Short(text) {
+  return createHash("sha1").update(text).digest("hex").slice(0, 12);
+}
+function unchangedStub(hash) {
+  return `${UNCHANGED_PREFIX}${hash}]`;
+}
+function injectionKey(kind, hash) {
+  return `${kind}#${hash}`;
+}
+function messageText(content) {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  const parts = [];
+  for (const block of content) {
+    if (block === null || typeof block !== "object") continue;
+    const b = block;
+    if (b.type === "text" && typeof b.text === "string") parts.push(b.text);
+    else if (Array.isArray(b.content)) parts.push(messageText(b.content));
+  }
+  return parts.join("\n");
+}
+function visibleInjectionKeys(session) {
+  const keys = /* @__PURE__ */ new Set();
+  const nodes = session?.surface?.nodes ?? [];
+  const events = session?.events ?? [];
+  for (const seq of nodes) {
+    const event = events[seq];
+    if (event === null || event === void 0) continue;
+    const kind = event.data?.source?.kind;
+    if (typeof kind !== "string" || !DEDUPE_SOURCES.includes(kind)) continue;
+    const text = messageText(event.data?.content);
+    if (text.length === 0) continue;
+    keys.add(injectionKey(kind, sha1Short(text)));
+  }
+  return keys;
+}
+function elideUnchangedInjections(messages, visible) {
+  let elided = 0;
+  let injectedBytes = 0;
+  let savedBytes = 0;
+  const out = messages.map((message) => {
+    const kind = message?.source?.kind;
+    if (typeof kind !== "string" || !DEDUPE_SOURCES.includes(kind)) return message;
+    const text = messageText(message.content);
+    if (text.length === 0) return message;
+    const hash = sha1Short(text);
+    const fullBytes = Buffer.byteLength(text, "utf8");
+    if (!visible.has(injectionKey(kind, hash))) {
+      injectedBytes += fullBytes;
+      return message;
+    }
+    const stub = unchangedStub(hash);
+    const stubBytes = Buffer.byteLength(stub, "utf8");
+    elided += 1;
+    injectedBytes += stubBytes;
+    savedBytes += fullBytes - stubBytes;
+    return { ...message, content: [{ type: "text", text: stub }] };
+  });
+  return { messages: out, elided, injectedBytes, savedBytes };
+}
+
 // src/index.ts
 var DEFAULT_CONFIG = {
   autoModelContextLimit: true,
@@ -4611,6 +4721,7 @@ var AcpCompactionEngine = class extends CompactionEngine {
   lastNudgeTurn = /* @__PURE__ */ new Map();
   /** Successful compress call ids awaiting their tool/result so the pair can be hidden. */
   compressCallIdsToHide = /* @__PURE__ */ new Set();
+  /** B2：去重判定面现算自会话面（无跨请求状态——旧副本被遮蔽即整包重注）。 */
   /** Per provider/model route the resolved window (probe failures cached too). */
   windowCache = /* @__PURE__ */ new Map();
   /** Per route the adapter's per-request output cap (the output reservation); null = undisclosed. */
@@ -4681,13 +4792,26 @@ var AcpCompactionEngine = class extends CompactionEngine {
     });
     ctx.on("agent/pre-step", async (payload, next) => {
       stripOrphanedSurfaceToolMessages(payload.agent.session);
-      if (!this.config.autoNudge) return next();
+      const applyDedupe = (messages) => {
+        const visible = visibleInjectionKeys(payload.agent.session);
+        const r = elideUnchangedInjections(messages, visible);
+        if (r.elided > 0) {
+          this.ctx.logger.info(`billion-context-dsh: injection dedupe \u2014 ${r.elided} unchanged frame(s), re-injected ${r.injectedBytes} B (saved ${r.savedBytes} B)`);
+        }
+        return r.messages;
+      };
+      if (!this.config.autoNudge) {
+        const decision0 = await next();
+        if (decision0.kind === "reject") return decision0;
+        return { kind: "enter", messages: applyDedupe(decision0.messages) };
+      }
       const decision = await next();
       if (decision.kind === "reject") return decision;
       const window = await this.windowFor(payload.agent);
       const outcome = buildNudge(payload.agent, { ...env, modelContextLimit: window.limit }, this.lastNudgeTurn);
-      if (outcome === null) return decision;
-      return { kind: "enter", messages: [...decision.messages, outcome.message] };
+      const deduped = applyDedupe(decision.messages);
+      if (outcome === null) return { kind: "enter", messages: deduped };
+      return { kind: "enter", messages: [...deduped, outcome.message] };
     });
     const systemPrompt = ctx.get("systemPrompt");
     if (systemPrompt !== void 0) {

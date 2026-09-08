@@ -8,6 +8,7 @@
 
 import {
   COMPRESS_PHILOSOPHY,
+  HOW_TO_COMPRESS_RULES,
   TIER2_DISTILL_RULES,
   TIER3_CONDENSE_RULES,
   defaultCountTokens,
@@ -24,6 +25,19 @@ import { buildCompressibleSeqRanges, findOpenTurn, summarySeqOfKernelBlock, surf
 import { sessionEventsOf } from './session-events.ts'
 import { kernelConfigFor, type KernelConfigInput } from './config.ts'
 import { DEFAULT_RESOLVED, renderTemplate, type ResolvedPrompts } from './prompts.ts'
+
+/**
+ * B6 nudge 瘦身（2026-09-08 方案 §4 B6）：哲学段与压缩规则段**移出 nudge**——
+ * 它们已经住在系统提示与工具描述里（各注一次），每拍复读=同一份文本反复计费
+ * （本会话实测：nudge 正文 6.1 KB/次 × 3 = 18.4 KB）。nudge 只留「该压缩了 + 压缩哪些」。
+ */
+const GUIDANCE_BLOCKS = [COMPRESS_PHILOSOPHY, HOW_TO_COMPRESS_RULES, TIER2_DISTILL_RULES, TIER3_CONDENSE_RULES] as const
+
+export function stripNudgeGuidance(text: string): string {
+  let out = text
+  for (const block of GUIDANCE_BLOCKS) out = out.split(block).join('')
+  return out.replace(/\n{3,}/g, '\n\n').trim()
+}
 
 /** Kernel inputs the nudge path shares with the compress tool. */
 export interface NudgeEnvironment extends KernelConfigInput {
@@ -196,7 +210,8 @@ function adaptKernelNudgeToSeq(
   session: import('@deepseek-ai/dsh-session').Session,
   prompts: ResolvedPrompts,
 ): string {
-  let out = text
+  // B6：先摘掉哲学/规则段（它们住在系统提示与工具描述里），再做 seq 适配
+  let out = stripNudgeGuidance(text)
   // Tier nudges: replace the kernel trigger block (block ids bN) with our tier
   // line carrying surface seqs. The kernel's TIER2/3 rules stay in the tail.
   if ((nudge.tier === 2 || nudge.tier === 3) && (nudge.tierTargetBlocks?.length ?? 0) > 0) {
@@ -342,5 +357,7 @@ function renderNudgeFromTemplates(
   // Batch-compress tip (from kernel's nudge-text.ts style).
   if (prompts.nudge.tip !== '') parts.push('', prompts.nudge.tip)
 
-  return parts.join('\n')
+  // B6：模板路径同样摘掉哲学/规则段——否则宿主只要覆盖任一 nudge 槽位（如只改 tip），
+  // 整份 6 KB 指引就会重新贴回来（独立复核 2026-09-08 发现的软缺口）。
+  return stripNudgeGuidance(parts.join('\n'))
 }

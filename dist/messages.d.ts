@@ -50,6 +50,17 @@ export declare function buildToolCallIndex(events: readonly SessionEvent[]): Rea
  *                        untagged (`toolName: ''`), never "text".
  * Non-surface events project to nothing.
  */
+/**
+ * B1 摘要帧标源（2026-09-08 过度工程治理方案 §4 B1）。
+ *
+ * 压缩摘要是**模型自写**的，不是用户原话。旧实现把它以 user/message 注入（source=compact），
+ * 与真人输入同等地位——于是摘要里的义务句被当成用户指令、模型自己的猜测被当成用户承诺。
+ * 注入期加显式前缀；创建期（region.ts）与投影期（此处）两处同源，且幂等。
+ */
+export declare const SUMMARY_FRAME_PREFIX = "[\u6A21\u578B\u81EA\u5199\u6458\u8981 \u00B7 \u975E\u7528\u6237\u539F\u6587 \u00B7 \u5176\u4E2D\u4E49\u52A1\u53E5\u9700\u590D\u6838]";
+export declare function withSummaryFramePrefix(text: string): string;
+/** 是否为压缩检查点帧（compaction summary 注入的 user/message）。 */
+export declare function isCompactionCheckpoint(event: SessionEvent): boolean;
 export declare function projectEvent(event: SessionEvent, toolNames?: ReadonlyMap<string, string>): CoreMessage[];
 /** Project a session's message events into CoreMessage[] in log order. */
 export declare function eventsToCoreMessages(events: readonly SessionEvent[], toolNames?: ReadonlyMap<string, string>): CoreMessage[];
