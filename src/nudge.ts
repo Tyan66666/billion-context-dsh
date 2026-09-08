@@ -117,16 +117,28 @@ function measuredTokenCount(agent: Agent, coreMessages: CoreMessage[]): number {
 }
 
 /**
+ * Max emergency nudge injections within a single user turn. Bounds the
+ * positive-feedback loop where an unrelieved ≥emergency-threshold pressure
+ * re-injects a durable emergency nudge on every pre-step forever (issue #108).
+ * Mirrors billion-context-pi commit 414acd1 (cap emergency nudge injections per
+ * user turn). Normal-pressure nudges remain limited to one per turn regardless.
+ */
+export const EMERGENCY_NUDGE_MAX_PER_TURN = 3
+
+/**
  * Decide and build one nudge message for the agent's next pre-step. Returns
- * null when the kernel recommends no nudge or one was already injected for the
- * current turn (emergency nudges always bypass the dedup). Also advances the
- * in-memory kernel state (ref assignment) so the compress tool can resolve
- * seq → mNNNNN refs.
+ * null when the kernel recommends no nudge or the per-turn budget is spent:
+ * normal-pressure nudges fire at most once per user turn, and emergency nudges
+ * are capped at {@link EMERGENCY_NUDGE_MAX_PER_TURN} per user turn so an
+ * unrelieved ≥threshold pressure cannot re-inject a durable nudge on every
+ * pre-step forever (issue #108). Also advances the in-memory kernel state (ref
+ * assignment) so the compress tool can resolve seq → mNNNNN refs.
  */
 export function buildNudge(
   agent: Agent,
   env: NudgeEnvironment,
   lastNudgeTurn: Map<string, number>,
+  emergencyNudges: Map<string, { turn: number; count: number }>,
 ): NudgeOutcome | null {
   const session = agent.session
   const state = env.store.stateFor(session)
@@ -144,9 +156,24 @@ export function buildNudge(
   const emergency = nudge.breakdown?.emergencyOverride === 1
 
   const turnNumber = findOpenTurn(sessionEventsOf(session)) ?? 0
-  const alreadyShown = !emergency && lastNudgeTurn.get(session.id) === turnNumber
-  if (alreadyShown) return null
-  lastNudgeTurn.set(session.id, turnNumber)
+  if (!emergency) {
+    // Normal-pressure nudge: at most one per user turn (unchanged behavior).
+    if (lastNudgeTurn.get(session.id) === turnNumber) return null
+    lastNudgeTurn.set(session.id, turnNumber)
+  } else {
+    // Emergency nudge: bounded per user turn. Without this cap an unrelieved
+    // ≥emergencyThreshold pressure re-injects a durable nudge on EVERY pre-step
+    // (each appended as a user/message event), and the nudge's own tokens push
+    // usage higher → a runaway feedback loop (issue #108; mirrors pi #223/#250
+    // and commit 414acd1).
+    const record = emergencyNudges.get(session.id)
+    if (record !== undefined && record.turn === turnNumber) {
+      if (record.count >= EMERGENCY_NUDGE_MAX_PER_TURN) return null
+      record.count += 1
+    } else {
+      emergencyNudges.set(session.id, { turn: turnNumber, count: 1 })
+    }
+  }
 
   const text = buildNudgeText(nudge, emergency, session, env.prompts)
   const message = createUserMessage({

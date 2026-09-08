@@ -65,7 +65,7 @@ export {
 } from './prompts.ts'
 export { makeTools, type ToolEnvironment } from './tools.ts'
 export { acpCommand } from './commands.ts'
-export { buildNudge, resolveTokenCount, type NudgeEnvironment, type NudgeOutcome } from './nudge.ts'
+export { buildNudge, resolveTokenCount, EMERGENCY_NUDGE_MAX_PER_TURN, type NudgeEnvironment, type NudgeOutcome } from './nudge.ts'
 export {
   DEFAULT_CONTEXT_WINDOW,
   detectContextWindow,
@@ -196,6 +196,8 @@ export class AcpCompactionEngine extends CompactionEngine {
   readonly env: ToolEnvironment
 
   private readonly lastNudgeTurn = new Map<string, number>()
+  /** Per-session emergency-nudge injection budget for the current user turn (issue #108). */
+  private readonly emergencyNudges = new Map<string, { turn: number; count: number }>()
   /** Successful compress call ids awaiting their tool/result so the pair can be hidden. */
   private readonly compressCallIdsToHide = new Set<string>()
   /** Per provider/model route the resolved window (probe failures cached too). */
@@ -305,7 +307,7 @@ export class AcpCompactionEngine extends CompactionEngine {
       const decision = await next()
       if (decision.kind === 'reject') return decision
       const window = await this.windowFor(payload.agent)
-      const outcome = buildNudge(payload.agent, { ...env, modelContextLimit: window.limit }, this.lastNudgeTurn)
+      const outcome = buildNudge(payload.agent, { ...env, modelContextLimit: window.limit }, this.lastNudgeTurn, this.emergencyNudges)
       if (outcome === null) return decision
       return { kind: 'enter', messages: [...decision.messages, outcome.message] }
     })

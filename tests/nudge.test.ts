@@ -5,7 +5,7 @@ import { createCore, defaultCountTokens, type CompressionCore, type NudgeDecisio
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { AcpStateStore } from '../src/state.ts'
-import { buildNudge, buildNudgeText, rangeTable, resolveTokenCount } from '../src/nudge.ts'
+import { buildNudge, buildNudgeText, rangeTable, resolveTokenCount, EMERGENCY_NUDGE_MAX_PER_TURN } from '../src/nudge.ts'
 import { makeTools, type ToolEnvironment } from '../src/tools.ts'
 import { rebuildBlockLedger } from '../src/region.ts'
 import { buildTextSession } from './helpers.ts'
@@ -49,8 +49,9 @@ test('M4: buildNudge injects a compressible-range table under pressure', () => {
   const env = makeEnv(4000)
   const session = buildTextSession(12)
   const lastNudgeTurn = new Map<string, number>()
+  const emergencyNudges = new Map<string, { turn: number; count: number }>()
 
-  const outcome = buildNudge(fakeAgent(session), env, lastNudgeTurn)
+  const outcome = buildNudge(fakeAgent(session), env, lastNudgeTurn, emergencyNudges)
   assert.ok(outcome !== null, 'a nudge is produced under pressure')
   const text = outcome!.message.content.map((block) => (block as { text?: string }).text ?? '').join('')
   assert.match(text, /compress/i)
@@ -64,12 +65,13 @@ test('M4: a nudge is injected at most once per turn (dedup)', () => {
   const env = makeEnv(15000)
   const session = buildTextSession(12)
   const lastNudgeTurn = new Map<string, number>()
+  const emergencyNudges = new Map<string, { turn: number; count: number }>()
   const agent = fakeAgent(session)
 
-  const first = buildNudge(agent, env, lastNudgeTurn)
+  const first = buildNudge(agent, env, lastNudgeTurn, emergencyNudges)
   assert.ok(first !== null, 'first injection happens')
   assert.equal(first!.emergency, false, 'this is a normal-pressure nudge')
-  assert.equal(buildNudge(agent, env, lastNudgeTurn), null, 'same turn is deduped')
+  assert.equal(buildNudge(agent, env, lastNudgeTurn, emergencyNudges), null, 'same turn is deduped')
   assert.equal(lastNudgeTurn.get(session.id), 1, 'the turn was recorded')
 })
 
@@ -77,21 +79,38 @@ test('M4: no nudge is produced for a comfortable context', () => {
   const env = makeEnv(128000)
   const session = buildTextSession(12)
   const lastNudgeTurn = new Map<string, number>()
-  assert.equal(buildNudge(fakeAgent(session), env, lastNudgeTurn), null)
+  assert.equal(buildNudge(fakeAgent(session), env, lastNudgeTurn, new Map()), null)
 })
 
-test('M4: emergency nudges bypass the per-turn dedup', () => {
-  // Extreme pressure (usage >= 98%) forces the overflow warning through.
+test('M4: emergency nudges are capped per user turn (issue #108)', () => {
+  // Extreme pressure (usage >= 98%) forces the overflow/emergency path. Repeated
+  // pre-steps in the same turn must NOT re-inject an emergency nudge forever —
+  // that was the runaway feedback loop (each durable nudge's own tokens push
+  // usage higher). The per-turn budget bounds it to EMERGENCY_NUDGE_MAX_PER_TURN.
   const env = makeEnv(1500)
   const session = buildTextSession(12)
   const lastNudgeTurn = new Map<string, number>()
+  const emergencyNudges = new Map<string, { turn: number; count: number }>()
   const agent = fakeAgent(session)
 
-  const first = buildNudge(agent, env, lastNudgeTurn)
-  assert.ok(first !== null)
-  const second = buildNudge(agent, env, lastNudgeTurn)
-  assert.ok(second !== null, 'emergency nudge bypasses dedup')
-  assert.equal(second!.emergency, true)
+  const outcomes: Array<ReturnType<typeof buildNudge>> = []
+  for (let i = 0; i < EMERGENCY_NUDGE_MAX_PER_TURN + 3; i++) {
+    outcomes.push(buildNudge(agent, env, lastNudgeTurn, emergencyNudges))
+  }
+  let injected = 0
+  let lastInjectedIndex = -1
+  for (let i = 0; i < outcomes.length; i++) {
+    const outcome = outcomes[i]
+    if (outcome === null) continue
+    injected += 1
+    lastInjectedIndex = i
+    assert.equal(outcome.emergency, true, 'every injected nudge here is emergency')
+  }
+  assert.ok(injected >= 1, 'an emergency nudge lands under extreme pressure')
+  assert.ok(injected <= EMERGENCY_NUDGE_MAX_PER_TURN, 'never exceeds the per-turn cap')
+  for (let i = lastInjectedIndex + 1; i < outcomes.length; i++) {
+    assert.equal(outcomes[i], null, `call ${i} is suppressed once the per-turn budget is spent`)
+  }
 })
 
 test('M4: range table is computed from the surface, skipping the protected tail', () => {
@@ -120,7 +139,8 @@ test('M4: buildNudge recommends tier-2 distillation when tier-1 blocks accumulat
   await compress.execute({ content: [{ startSeq: 6, endSeq: 10, summary: NUDGE_TIER_SUMMARY }] } as never, fakeExec(session))
 
   const lastNudgeTurn = new Map<string, number>()
-  const outcome = buildNudge(fakeAgent(session), env, lastNudgeTurn)
+  const emergencyNudges = new Map<string, { turn: number; count: number }>()
+  const outcome = buildNudge(fakeAgent(session), env, lastNudgeTurn, emergencyNudges)
   assert.ok(outcome !== null, 'distillable tier-1 blocks produce a tier-2 nudge')
   const text = outcome!.message.content.map((block) => (block as { text?: string }).text ?? '').join('')
   assert.match(text, /Tier 2:/)
