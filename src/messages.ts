@@ -116,10 +116,31 @@ export function buildToolCallIndex(events: readonly SessionEvent[]): ReadonlyMap
  *                        untagged (`toolName: ''`), never "text".
  * Non-surface events project to nothing.
  */
+/**
+ * B1 摘要帧标源（2026-09-08 过度工程治理方案 §4 B1）。
+ *
+ * 压缩摘要是**模型自写**的，不是用户原话。旧实现把它以 user/message 注入（source=compact），
+ * 与真人输入同等地位——于是摘要里的义务句被当成用户指令、模型自己的猜测被当成用户承诺。
+ * 注入期加显式前缀；创建期（region.ts）与投影期（此处）两处同源，且幂等。
+ */
+export const SUMMARY_FRAME_PREFIX = '[模型自写摘要 · 非用户原文 · 其中义务句需复核]'
+
+export function withSummaryFramePrefix(text: string): string {
+  return text.startsWith(SUMMARY_FRAME_PREFIX) ? text : `${SUMMARY_FRAME_PREFIX}\n${text}`
+}
+
+/** 是否为压缩检查点帧（compaction summary 注入的 user/message）。 */
+export function isCompactionCheckpoint(event: SessionEvent): boolean {
+  const source = (event.data as { source?: { plugin?: unknown; kind?: unknown } }).source
+  return source?.plugin === 'compact' || source?.kind === 'compaction'
+}
+
 export function projectEvent(event: SessionEvent, toolNames?: ReadonlyMap<string, string>): CoreMessage[] {
   switch (event.type) {
     case 'user/message': {
-      const text = extractText((event.data as { content?: unknown }).content)
+      const raw = extractText((event.data as { content?: unknown }).content)
+      // B1：摘要帧标源（模型自写 ≠ 用户原文）
+      const text = isCompactionCheckpoint(event) ? withSummaryFramePrefix(raw) : raw
       return text.length > 0 ? [{ id: String(event.seq), role: 'user', contentType: 'text', text }] : []
     }
     case 'assistant/message': {

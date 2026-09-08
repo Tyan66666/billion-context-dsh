@@ -30,9 +30,9 @@ export const ACP_BLOCK_LEDGER_MARKER = '$dshAcpBlockLedger'
 export const ACP_BLOCK_LEDGER_VERSION = 1
 
 /**
- * The six ACP tier/lineage fields carried durably per compressed block so a
+ * The ACP tier/lineage fields carried durably per compressed block so a
  * restarted engine rehydrates the SAME kernel blocks (tier, lineage, coverage)
- * instead of collapsing everything to tier 1.
+ * instead of collapsing everything to tier 1, plus B3's verified readings.
  */
 export interface AcpBlockLedgerPayload {
   /** Compression tier: 1 (message range), 2 (distills tier-1), 3 (distills tier-2). */
@@ -47,6 +47,8 @@ export interface AcpBlockLedgerPayload {
   readonly directMessageIds?: readonly string[]
   /** The kernel block's effective message ids at creation (raw CoreMessage ids). */
   readonly effectiveMessageIds?: readonly string[]
+  /** B3: acceptance readings already green before compression (e.g. "t0-fastpath 8/8"). */
+  readonly verifiedReadings?: readonly string[]
 }
 
 /** True only for an array whose every element is a string. */
@@ -71,6 +73,9 @@ export function encodeAcpBlockLedger(payload: AcpBlockLedgerPayload): ContentBlo
   }
   if (payload.directMessageIds !== undefined) obj.directMessageIds = [...payload.directMessageIds]
   if (payload.effectiveMessageIds !== undefined) obj.effectiveMessageIds = [...payload.effectiveMessageIds]
+  if (payload.verifiedReadings !== undefined && payload.verifiedReadings.length > 0) {
+    obj.verifiedReadings = [...payload.verifiedReadings]
+  }
   return [{ type: 'text', text: JSON.stringify(obj) }]
 }
 

@@ -28,6 +28,7 @@ import {
   isCheckpointNode,
   isRealUserTurn,
   toolCallIdOfResultEvent,
+  withSummaryFramePrefix,
 } from './messages.ts'
 import { hostPriceEvent } from './host-tokens.ts'
 import { eventAtOf, sessionEventsOf } from './session-events.ts'
@@ -65,6 +66,8 @@ export interface AcpBlockLedgerEntry {
   /** The kernel block's raw direct/effective message ids at creation (recorded since the tier feature; absent for legacy). */
   readonly directMessageIds?: readonly string[]
   readonly effectiveMessageIds?: readonly string[]
+  /** B3: acceptance readings that were already green before compression (absent when the compress call carried none). */
+  readonly verifiedReadings?: readonly string[]
   /** Unix epoch ms of the compaction/summary event. */
   readonly createdAt: number
 }
@@ -373,6 +376,8 @@ export interface CompactionTransactionInput {
   /** The kernel block's direct/effective message ids (raw CoreMessage ids) — recorded for faithful rehydration. */
   readonly directMessageIds?: readonly string[]
   readonly effectiveMessageIds?: readonly string[]
+  /** B3：压缩前已绿的验收读数（结构化，压缩后仍可读）。 */
+  readonly verifiedReadings?: readonly string[]
 }
 
 type CompactionSummaryData = SessionEventMap['compaction/summary']
@@ -387,6 +392,33 @@ type CompactionSummaryData = SessionEventMap['compaction/summary']
  */
 export function readCompactionSummary(event: SessionEvent): CompactionSummaryData & AcpBlockLedgerPayload {
   return event.data as CompactionSummaryData & AcpBlockLedgerPayload
+}
+
+/**
+ * B3: read the structured verified readings a compress call recorded for this
+ * block (acceptance checks that were already green before the range was
+ * shadowed — e.g. "t0-fastpath 8/8"). Post-fix writers carry them inside the
+ * admitted `rawOutput` member (AcpBlockLedgerPayload); legacy writers put them
+ * top-level. Absent in either shape → empty array; never throws.
+ */
+export function verifiedReadingsOf(event: SessionEvent): string[] {
+  const data = readCompactionSummary(event)
+  const list = decodeAcpBlockLedger(data.rawOutput).verifiedReadings ?? data.verifiedReadings
+  return Array.isArray(list) ? list.map(String) : []
+}
+
+/**
+ * B1：给摘要块数组的第一个文本块加标源前缀（幂等——已带前缀不重复加）。
+ * 只动文本块，工具/图片块原样保留。
+ */
+export function prefixSummaryBlocks(blocks: readonly ContentBlock[]): ContentBlock[] {
+  let done = false
+  return blocks.map((block) => {
+    if (done || block.type !== 'text') return block
+    done = true
+    const textBlock = block as { type: 'text'; text: string }
+    return { ...textBlock, text: withSummaryFramePrefix(textBlock.text) } as ContentBlock
+  })
 }
 
 /**
@@ -435,10 +467,18 @@ export function runCompactionTransaction(
         : { parentBlockIds: [...input.parentBlockIds] }),
       ...(input.directMessageIds === undefined ? {} : { directMessageIds: [...input.directMessageIds] }),
       ...(input.effectiveMessageIds === undefined ? {} : { effectiveMessageIds: [...input.effectiveMessageIds] }),
+      ...(input.verifiedReadings === undefined || input.verifiedReadings.length === 0
+        ? {}
+        : { verifiedReadings: [...input.verifiedReadings] }),
     }
+    // B1: frame the model-written summary ONCE at creation and write the SAME framed
+    // blocks to both the durable compaction/summary event and the checkpoint node
+    // below — log readers (search, acp_status, ledger) must never see different text
+    // than what the model sees in context (review item: prefix/raw mismatch).
+    const framedSummary = prefixSummaryBlocks(input.summary)
     seqs.push(session.append('compaction/summary', {
       compactionId,
-      summary: input.summary,
+      summary: framedSummary,
       shadowedRange: { start: input.start, end: input.end },
       shadowedSeqs: [...input.shadowedSeqs],
       shadowedTokenCount: input.shadowedTokenCount,
@@ -447,8 +487,11 @@ export function runCompactionTransaction(
       rawOutput: encodeAcpBlockLedger(ledgerPayload),
     } as CompactionSummaryData).seq)
 
+    // The checkpoint node carries the SAME framed blocks as the compaction/summary
+    // event (see above); projection-time framing in messages.ts stays as an
+    // idempotent safety net for legacy blocks written before this feature.
     const message = createUserMessage({
-      content: input.summary,
+      content: framedSummary,
       source: compactCheckpointSource(compactionId),
     })
     // The replace op MUST use the 0.1.5 field names: dsh-session's validator
@@ -544,6 +587,9 @@ export function rebuildBlockLedger(events: readonly SessionEvent[]): AcpBlockLed
     const topic: string | undefined = embedded.topic ?? (typeof data.topic === 'string' ? data.topic : undefined)
     const kernelBlockId: string | undefined = embedded.kernelBlockId
       ?? (typeof data.kernelBlockId === 'string' ? data.kernelBlockId : undefined)
+    const verifiedReadings: string[] | undefined = embedded.verifiedReadings
+      ? [...embedded.verifiedReadings]
+      : (Array.isArray(data.verifiedReadings) ? [...data.verifiedReadings] : undefined)
     const summarySeq = summarySeqs.get(data.compactionId) ?? null
     ledger.push({
       blockId: data.compactionId,
@@ -559,6 +605,7 @@ export function rebuildBlockLedger(events: readonly SessionEvent[]): AcpBlockLed
       ...(summarySeq === null ? {} : { summarySeq }),
       ...(directMessageIds === undefined ? {} : { directMessageIds }),
       ...(effectiveMessageIds === undefined ? {} : { effectiveMessageIds }),
+      ...(verifiedReadings === undefined ? {} : { verifiedReadings }),
       createdAt: event.time,
     })
   }
