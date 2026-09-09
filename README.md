@@ -172,7 +172,7 @@ DSH 的每个模型请求都派生自其 append-only 会话日志（*surface*）
 | refs（`m00001` 标签） | surface seq，由 nudge 的可压缩范围表携带 |
 | nudge（"效率提示——尽早压缩保持精简"） | 由内核的压力决策在 `agent/pre-step` 注入——效率通知 + 上下文分解 + 压缩规则，语气对齐 kernel/pi；绝非命令 |
 | `decompress` | 从日志只读恢复被遮蔽的原文 |
-| `search_context` | 从日志重建块摘要 + 被遮蔽原文的统一文档集，交 acp-kernel `searchBlocks`（hybrid：词干化 + CJK bigram + 字符 n-gram 模糊）打分；命中回链所属块 |
+| `search_context` | 从日志重建块摘要 + 被遮蔽原文的统一文档集（按日志快照缓存：新事件落盘前重复搜索直接复用，issue #133），交 acp-kernel `searchBlocks`（hybrid：词干化 + CJK bigram + 字符 n-gram 模糊）打分；命中回链所属块 |
 | `acp_status` | CONTEXT BREAKDOWN（tool/text/summaries 占可见总量）+ 压缩块账本 + nudge 决策行 + `Checkpoint seqs` 行（active 块的 `bN → seq` 映射——压缩某个 checkpoint seq 即蒸馏该块，issue #60）；不含上下文窗口；支持 scope/view/tool/sort/limit 钻取 |
 | 块状态 | 内存内核状态 + **日志重建账本**（无旁车文件） |
 | 分层蒸馏（T2/T3） | 再次压缩某块的摘要节点 = 蒸馏该块（tier 2），蒸馏 tier-2 块得 tier 3；tier 与内核块 id 持久化进日志，重启后内核状态从日志再水合、可继续蒸馏 |

@@ -35,7 +35,7 @@ import {
   type CompactionTrigger,
   type ManualCompactAgentContext,
 } from '@deepseek-ai/dsh-compaction'
-import { createCore, type CompressionCore } from 'acp-kernel'
+import { createCore, setDocCacheCap, type CompressionCore } from 'acp-kernel'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { AcpStateStore } from './state.ts'
 import { makeTools, type ToolEnvironment } from './tools.ts'
@@ -211,6 +211,16 @@ export class AcpCompactionEngine extends CompactionEngine {
     this.prompts = resolvePrompts(config.prompts)
     const ports = this.config.countTokens !== undefined ? { countTokens: this.config.countTokens } : {}
     this.kernel = createCore(ports)
+    // The kernel's docFeatures cache (per-doc search features) defaults to an
+    // 8MB source-char cap — sized for multi-session server processes. A DSH
+    // profile is single-user and its search corpus (ALL shadowed originals)
+    // routinely exceeds 8MB, so the default re-tokenizes the corpus on every
+    // search_context call (issue #133: ~18s/call on a 40MB corpus). 128MB
+    // covers the largest reported session (17.6M shadowed tokens ≈ 70MB text)
+    // with headroom; steady-state feature heap is ~6.3× cached source chars
+    // (measured), so worst case ≈ 800MB — acceptable on a host already
+    // holding session logs of that scale.
+    setDocCacheCap(128 * 1024 * 1024)
     this.store = new AcpStateStore()
 
     const env: ToolEnvironment = {
