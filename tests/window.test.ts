@@ -347,3 +347,59 @@ test('window: explicit modelContextLimit is never subtracted (the operator owns 
   assert.deepEqual(window, { limit: 80000, source: 'explicit' })
   assert.equal(calls, 0, 'explicit config disables the probe and therefore the subtraction')
 })
+
+test('window: 切模型后 output cap 跟随实时路由（而非 stale 的 agent.options）', async () => {
+  // 会话中途切模型：agent.options 仍指向旧路由（old-p/old-m → 32K cap），
+  // 而 session 最后一条 request/context 记录的是新实时路由（new-p/new-m → 16K cap）。
+  // 修复前 cap 从 stale 的 agent.options 探测，32K cap 被从新路由的 1M 窗口里
+  // 扣掉（得 968000）；现在 liveRoute() 解析实时路由，扣的是 16K cap（得 984000）。
+  const ctx = new Context()
+  ctx.provide('sessionProjections', {
+    snapshot: () => ({ values: { contextPressure: { contextWindow: 1000000 } } }),
+  })
+  ctx.provide('llm', {
+    resolveModelInfo: async (provider: string, model: string) => {
+      if (provider === 'new-p' && model === 'new-m') return { defaultMaxTokens: 16000 }
+      if (provider === 'old-p' && model === 'old-m') return { defaultMaxTokens: 32000 }
+      return {}
+    },
+  })
+  const engine = new AcpCompactionEngine(new Context())
+  const agent = {
+    id: 'test-session',
+    session: { requestContext: () => ({ provider: 'new-p', model: 'new-m', contextWindow: 1000000 }) },
+    options: { provider: 'old-p', model: 'old-m' },
+    ctx,
+  } as unknown as Agent
+  const window = await engine.windowFor(agent)
+  assert.equal(window.source, 'projection')
+  assert.equal(window.rawLimit, 1000000)
+  assert.equal(window.outputReserved, 16000, 'cap 跟随实时路由（new-p/new-m），而非 stale 的 agent.options（old-p/old-m → 32000）')
+  assert.equal(window.limit, 984000, '1M 窗口减实时 16K cap，而非 stale 32K cap（否则得 968000）')
+})
+
+test('window: session 未记录路由时 liveRoute 回退 agent.options', async () => {
+  // session 第一条 request/context 事件前 requestContext() 为 undefined，
+  // liveRoute 返回 null，cap 探测回退到 agent.options（此时唯一已知的路由）。
+  const ctx = new Context()
+  ctx.provide('sessionProjections', {
+    snapshot: () => ({ values: { contextPressure: { contextWindow: 96000 } } }),
+  })
+  ctx.provide('llm', {
+    resolveModelInfo: async (provider: string, model: string) => {
+      if (provider === 'test-provider' && model === 'test-model') return { defaultMaxTokens: 16384 }
+      return {}
+    },
+  })
+  const engine = new AcpCompactionEngine(new Context())
+  const agent = {
+    id: 'test-session',
+    session: { requestContext: () => undefined },
+    options: { provider: 'test-provider', model: 'test-model' },
+    ctx,
+  } as unknown as Agent
+  const window = await engine.windowFor(agent)
+  assert.equal(window.source, 'projection')
+  assert.equal(window.outputReserved, 16384, 'session 无已记录路由时回退 agent.options')
+  assert.equal(window.limit, 96000 - 16384)
+})

@@ -103,6 +103,23 @@ export function projectedContextWindow(agent: Agent): number | null {
   return null
 }
 
+/**
+ * Read the LIVE model route from the session's last `request/context` event.
+ * After a mid-session model switch `agent.options` is a stale snapshot (it
+ * names the PREVIOUS route), so the per-route output cap must be resolved
+ * against this live route instead — otherwise the cap lags one switch behind
+ * (a 32K cap from a just-left model subtracted from the new model's window).
+ * Returns null before the session has recorded any route, so callers fall
+ * back to `agent.options`.
+ */
+export function liveRoute(agent: Agent): { provider: string; model: string } | null {
+  const rc = agent.session.requestContext()
+  if (rc && rc.provider !== '' && rc.model !== '') {
+    return { provider: rc.provider, model: rc.model }
+  }
+  return null
+}
+
 /** The model window plus the adapter's per-request output cap, in one probe. */
 export interface ModelWindowProbe {
   /** The model's total context window in tokens, when disclosed. */
