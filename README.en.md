@@ -70,22 +70,23 @@ Restart `dsh` afterwards (bundle layers are composed at startup), open a new ses
 
 > **DSH version compatibility.** The package declares all four runtime seam
 > packages (`dsh-compaction` / `dsh-session` / `dsh-llm` / `dsh-tools`) as peer
-> dependencies, sharing the range
-> `^0.1.0-rc.6 || ^0.1.1-rc.1 || ^0.1.2-alpha.4`,
-> covering the `0.1.0-rc.x` and `0.1.1-rc.x` release lines (including the current
-> DSH release; the seam's `src/` is unchanged from `0.1.0-rc.6` to `0.1.1-rc.2`, so the public
-> API is identical) and the `0.1.2-alpha.x` line (which removed the
-> `Session.events` getter in favour of `snapshotEvents()` / `eventAt()`; this
-> engine feature-detects both shapes, so one build runs on either seam). The
-> range is multiple `||` clauses **on purpose**: npm
-> (node-semver) only lets a prerelease version satisfy a range that carries a
-> comparator on the SAME `[major, minor, patch]` tuple as the candidate, so a lone
-> `^0.1.0-rc.6` can never match `0.1.1-rc.x` (issue #68) or `0.1.2-alpha.x` —
-> older releases fail to install on DSH 0.1.1-rc.x / 0.1.2-alpha.x; upgrade to a
-> release containing this fix. Declaring all four seam packages as peers (not
-> just `dsh-compaction`) ensures that, even under pnpm's
+> dependencies, sharing the range `>=0.1.5-alpha.1 <0.1.6-0` — exactly the
+> `0.1.5` line (every prerelease plus the final `0.1.5`). From the `0.1.5` line
+> on, the session's replace operation was renamed from `{ op, start, end }` to
+> `{ op, startSeq, endSeq }` and is validated strictly (exactly those three
+> keys), so the engine emits the new shape only: on older DSH hosts (< 0.1.5)
+> every `compress` call is rejected at runtime (issue #136), which is why the
+> old lines are out of contract — upgrade DSH before installing this release.
+> The explicit bounds (instead of a caret) are deliberate: a caret would
+> silently admit the unverified 0.1.6+ line. Declaring all four seam packages
+> as peers (not just `dsh-compaction`) ensures that, even under pnpm's
 > hoisted/linked layout, installations resolve them to the **host's own** copy
 > rather than a stale nested copy inconsistent with the host.
+>
+> Behavior note (from 0.1.5 on): the host no longer permits invisible
+> replacement nodes, so when the engine cleans up orphaned tool messages it
+> leaves one short visible placeholder message in their place; the host-owned
+> system prompt node (surface node 0) is excluded from compressible ranges.
 
 **Path B: plain `npm install` (package only — a composition row is required).**
 
