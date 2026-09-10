@@ -1,10 +1,13 @@
 /**
  * Issue #124 regression — the host's tool-pairing balance helpers
- * (`@deepseek-ai/dsh-compaction` `toolPairingBalancedBefore/After`) read the
- * REMOVED `session.events` API and crash on every dsh 0.1.2 session with
- * `TypeError: Cannot read properties of undefined (reading '<seq>')`. The
- * engine therefore uses a local mirror (src/tool-pairing.ts) whose only
- * difference is reading events through the cross-version accessor.
+ * (`@deepseek-ai/dsh-compaction` `toolPairingBalancedBefore/After`) used to
+ * read the REMOVED `session.events` API and crash on every dsh 0.1.2 session
+ * with `TypeError: Cannot read properties of undefined (reading '<seq>')`.
+ * The engine therefore uses a local mirror (src/tool-pairing.ts) whose only
+ * difference is reading events through the cross-version accessor. The
+ * upstream fix shipped in dsh-compaction 0.1.5-alpha.2 (the helpers now read
+ * `session.eventAt(seq)`); the mirror stays because the peer range still
+ * admits 0.1.2-line hosts, whose own dsh-compaction would still crash.
  */
 
 import { test } from 'node:test'
@@ -69,16 +72,23 @@ test('local balance checks agree with the host helpers wherever the host helpers
   }
 })
 
-test('on the 0.1.2 session shape the host helpers crash and the local mirror works (issue #124)', () => {
+test('on the 0.1.2 session shape the 0.1.5-line host helpers work via eventAt and agree with the local mirror (issue #124)', () => {
   const shape = asHost012Shape(buildPairSession())
   const nodes = shape.surface.nodes
-  // The host helper reads the removed `session.events` — pinned so its return
-  // to service (post host fix) is a deliberate, visible change.
-  assert.throws(() => hostBefore(shape, nodes[0]!), TypeError)
-  assert.throws(() => hostAfter(shape, nodes[0]!), TypeError)
-  // The local mirror reads through the cross-version accessor and answers.
-  assert.equal(typeof localBefore(shape, nodes[0]!), 'boolean')
-  assert.equal(typeof localAfter(shape, nodes[0]!), 'boolean')
+  // dsh-compaction 0.1.5-alpha.2 shipped the #124 fix: the balance helpers now
+  // read `session.eventAt(seq)` instead of the removed `session.events`, so
+  // they answer on the 0.1.2-shaped session (which exposes only the accessor
+  // API). This pin flips with the devDep bump — on a REAL 0.1.2-line host its
+  // own dsh-compaction still reads `.events` and would crash, which is why
+  // the engine keeps the local mirror for that host era.
+  assert.equal(typeof hostBefore(shape, nodes[0]!), 'boolean', 'the fixed host helper answers on the 0.1.2 shape')
+  assert.equal(typeof hostAfter(shape, nodes[0]!), 'boolean', 'the fixed host helper answers on the 0.1.2 shape')
+  // The local mirror reads through the cross-version accessor and agrees with
+  // the fixed host helpers on every cut of the shape.
+  for (const seq of nodes) {
+    assert.equal(localBefore(shape, seq), hostBefore(shape, seq), `mirror disagrees with the fixed host helper before seq ${seq}`)
+    assert.equal(localAfter(shape, seq), hostAfter(shape, seq), `mirror disagrees with the fixed host helper after seq ${seq}`)
+  }
 })
 
 test('resolveSurfaceRange stays fully functional on the 0.1.2 session shape', () => {

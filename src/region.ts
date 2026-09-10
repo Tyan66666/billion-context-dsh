@@ -19,7 +19,7 @@ import { CompactionId, compactCheckpointSource } from '@deepseek-ai/dsh-compacti
 // host. Use the local mirror (src/tool-pairing.ts) until the host fix ships,
 // then delete src/tool-pairing.ts and restore the host helpers here.
 import { toolPairingBalancedAfter, toolPairingBalancedBefore } from './tool-pairing.ts'
-import { createAssistantMessage, createUserMessage, type ContentBlock } from '@deepseek-ai/dsh-llm'
+import { createUserMessage, type ContentBlock } from '@deepseek-ai/dsh-llm'
 import { defaultCountTokens } from 'acp-kernel'
 import { extractEventText, extractText, toolCallIdOfResultEvent } from './messages.ts'
 import { hostPriceEvent } from './host-tokens.ts'
@@ -438,7 +438,7 @@ export function runCompactionTransaction(
       source: compactCheckpointSource(compactionId),
     })
     seqs.push(session.append('user/message', message, {
-      surfaceOp: { op: 'replace', start: input.start as SurfaceSeq, end: input.end as SurfaceSeq },
+      surfaceOp: { op: 'replace', startSeq: input.start as SurfaceSeq, endSeq: input.end as SurfaceSeq },
       sourceEventSeqs: [...input.shadowedSeqs] as SurfaceSeq[],
     }).seq)
 
@@ -555,31 +555,15 @@ function toolCallIdsOfEvent(event: SessionEvent): string[] {
 }
 
 /**
- * Provider/model to stamp on a synthetic empty assistant pruning node.
- */
-function assistantProviderModel(event: SessionEvent): { provider: string; model: string } {
-  if (event.type === 'assistant/message') {
-    const message = (event.data as { message?: { source?: { provider?: unknown; model?: unknown } } }).message
-    return {
-      provider: typeof message?.source?.provider === 'string' ? message.source.provider : 'billion-context-dsh',
-      model: typeof message?.source?.model === 'string' ? message.source.model : 'surface-prune',
-    }
-  }
-  return { provider: 'billion-context-dsh', model: 'surface-prune' }
-}
-
-/**
  * Durable model-free prune: append `compaction/prune` as the shadow price, then
- * replace the given surface seqs with either a user message carrying `text`
- * (used for compress call/result hiding, so the model still sees the tool
- * outcome) or an EMPTY assistant message (used for orphan cleanup, which DSH
- * derives to nothing). The originals remain in the append-only log.
+ * replace the given surface seqs with a user message carrying `text` (used for
+ * compress call/result hiding, so the model still sees the tool outcome) or —
+ * when no text is available — a terse placeholder user message (used for
+ * orphan cleanup). The originals remain in the append-only log.
  */
 function hideSurfaceSeqs(
   session: Session,
   seqs: readonly number[],
-  provider: string,
-  model: string,
   text?: string,
   priceEvent: (event: SessionEvent) => number = hostPriceEvent,
 ): void {
@@ -599,22 +583,18 @@ function hideSurfaceSeqs(
     shadowedSeqs: [...seqs] as SurfaceSeq[],
     shadowedTokenCount,
   })
-  if (text !== undefined) {
-    session.append('user/message', createUserMessage({
-      content: [{ type: 'text', text }],
-      source: { kind: 'plugin', plugin: 'billion-context-dsh' },
-    }), {
-      surfaceOp: { op: 'replace', start: start as SurfaceSeq, end: end as SurfaceSeq },
-      sourceEventSeqs: [...seqs] as SurfaceSeq[],
-    })
-    return
-  }
-  session.append('assistant/message', {
-    turn: findOpenTurn(sessionEventsOf(session)) ?? 0,
-    step: 0,
-    message: createAssistantMessage({ content: [], source: { provider, model } }),
-  }, {
-    surfaceOp: { op: 'replace', start: start as SurfaceSeq, end: end as SurfaceSeq },
+  // dsh-session >= 0.1.3 cannot express "replace a range with a node that
+  // derives to nothing": an empty assistant/message replace is rejected on
+  // replay because sourceEventSeqs are forbidden on assistant/message, so a
+  // non-empty shadowed range could never be cited (deepseek-harness commit
+  // 27bf1039db "refactor(session)!: distinguish event seqs from log offsets").
+  // Replace with a terse user message instead — the same visible-node idiom
+  // the host's compaction-basic and tool-result pruner use.
+  session.append('user/message', createUserMessage({
+    content: [{ type: 'text', text: text ?? '(pruned tool message)' }],
+    source: { kind: 'plugin', plugin: 'billion-context-dsh' },
+  }), {
+    surfaceOp: { op: 'replace', startSeq: start as SurfaceSeq, endSeq: end as SurfaceSeq },
     sourceEventSeqs: [...seqs] as SurfaceSeq[],
   })
 }
@@ -660,10 +640,9 @@ export function hideCompressToolPair(session: Session, callId: string, resultSeq
   // Only hide an actually adjacent pair; never shadow unrelated messages that
   // happen to sit between a stale call and result.
   if (startIdx < 0 || endIdx < 0 || endIdx - startIdx !== 1) return false
-  const { provider, model } = assistantProviderModel(events[callSeq]!)
   const resultEvent = events[resolvedResultSeq]
   const resultText = resultEvent === undefined ? '' : extractEventText(resultEvent)
-  hideSurfaceSeqs(session, [callSeq, resolvedResultSeq], provider, model, resultText.trim().length > 0 ? resultText : undefined)
+  hideSurfaceSeqs(session, [callSeq, resolvedResultSeq], resultText.trim().length > 0 ? resultText : undefined)
   return true
 }
 
@@ -763,10 +742,8 @@ export function stripOrphanedSurfaceToolMessages(
   const hidden = [...hiddenSet].sort((a, b) => a - b)
   let count = 0
   for (const seq of hidden) {
-    const event = eventAtOf(session, seq)
-    if (event === undefined) continue
-    const { provider, model } = assistantProviderModel(event)
-    hideSurfaceSeqs(session, [seq], provider, model)
+    if (eventAtOf(session, seq) === undefined) continue
+    hideSurfaceSeqs(session, [seq])
     count += 1
   }
   return count

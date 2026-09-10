@@ -52,13 +52,14 @@ const runScenario = async (scenario) => {
   const { SessionId } = await import('@deepseek-ai/dsh-session')
   const { createUserMessage } = await import('@deepseek-ai/dsh-llm')
   const AgentLoop = (await import('@deepseek-ai/dsh-agent-loop')).default
-  const SessionProjectionRegistry = (await import('@deepseek-ai/dsh-session-projection')).default
   const { mountAgentLoopTestDependencies } = await import('@deepseek-ai/dsh-agent-loop-testkit')
   const LlmDeepSeek = await import('@deepseek-ai/dsh-llm-deepseek')
   const TokenMeter = (await import('@deepseek-ai/dsh-token-meter')).default
   const AcpEngine = (await import(String(ENGINE))).default
   const ctx = new Context()
-  await ctx.plugin(SessionProjectionRegistry)
+  // mountAgentLoopTestDependencies registers SessionProjectionRegistry itself
+  // on the 0.1.5 line — registering it here as well would double-register the
+  // "sessionProjections" service and fail the mount.
   await mountAgentLoopTestDependencies(ctx, { systemPrompt: { persona: scenario.persona } })
   await ctx.plugin(AgentLoop, { agents: [] })
   await ctx.plugin(LlmDeepSeek, { models: [{ id: 'deepseek-v4-flash', contextWindow: scenario.engine.modelContextLimit }] })
@@ -75,9 +76,9 @@ const runScenario = async (scenario) => {
   }))
   await waitForIdle(ctx, agent)
   await new Promise((resolve) => { setTimeout(resolve, 100) })
-  updateSeqs(agent.session.events, seqs)
+  updateSeqs(agent.session.snapshotEvents(), seqs)
   }
-  const events = agent.session.events
+  const events = agent.session.snapshotEvents()
   const requests = server.requests
   await ctx.fiber.dispose()
   await server.close()

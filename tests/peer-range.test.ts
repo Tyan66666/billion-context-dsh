@@ -23,10 +23,19 @@ import semver from 'semver'
 // `snapshotEvents()` / `eventAt()`); the engine now feature-detects both
 // shapes, and the `^0.1.2-alpha.4` clause admits the whole 0.1.2 alpha seam.
 //
+// DSH 0.1.3-alpha changed the `SurfaceOp` replace shape: `{ op, start, end }`
+// became `{ op, startSeq, endSeq }` (deepseek-ai/deepseek-harness commit
+// 27bf1039db "refactor(session)!: distinguish event seqs from log offsets").
+// The engine emits the NEW shape unconditionally (matching every other DSH
+// compaction package), so the 0.1.3-alpha.2 and 0.1.5-alpha.1 tuple clauses
+// admit the published successor seams (issue #136). The old 0.1.0 → 0.1.2
+// clauses stay so existing installs on older hosts keep resolving — those
+// hosts reject the new shape at compress time and must pin a pre-fix release.
+//
 // The versions below come from `npm view @deepseek-ai/dsh-session versions`
 // — the published line matches dsh-compaction / dsh-llm / dsh-tools exactly
-// (0.1.0-rc.6 → 0.1.2-alpha.5). The 0.1.3 and 0.2.x entries are the
-// not-yet-published neighbors the range must anticipate or reject.
+// (0.1.0-rc.6 → 0.1.5-rc.1). The 0.2.x entries are the not-yet-published
+// neighbors the range must anticipate or reject.
 
 const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as {
 	peerDependencies: Record<string, string>
@@ -61,10 +70,20 @@ for (const peerName of seamPeers) {
 		for (const v of ['0.1.1-rc.3', '0.1.1-rc.9', '0.1.1-rc.99']) {
 			assert.equal(semver.satisfies(v, peerRange), true, `${v} must satisfy ${peerRange} (same-line rc)`)
 		}
-		// The 0.1.2 alpha seam (current DSH runtime, `Session.events` removed): the
+		// The 0.1.2 alpha seam (the `Session.events`-removal era): the
 		// published 0.1.2-alpha.4 and any same-tuple-prerelease successor install.
 		for (const v of ['0.1.2-alpha.4', '0.1.2-alpha.5', '0.1.2-rc.1']) {
 			assert.equal(semver.satisfies(v, peerRange), true, `${v} must satisfy ${peerRange} (0.1.2 seam)`)
+		}
+		// The 0.1.3 seam (new `startSeq`/`endSeq` SurfaceOp shape, issue #136):
+		// the published 0.1.3-alpha.2 and same-tuple successors install.
+		for (const v of ['0.1.3-alpha.2', '0.1.3-rc.1', '0.1.3-rc.99']) {
+			assert.equal(semver.satisfies(v, peerRange), true, `${v} must satisfy ${peerRange} (0.1.3 seam)`)
+		}
+		// The 0.1.5 seam (current DSH runtime, e.g. 0.1.5-alpha.2): the whole
+		// tuple installs via the `^0.1.5-alpha.1` clause.
+		for (const v of ['0.1.5-alpha.1', '0.1.5-alpha.2', '0.1.5-rc.1', '0.1.5-rc.9']) {
+			assert.equal(semver.satisfies(v, peerRange), true, `${v} must satisfy ${peerRange} (0.1.5 seam)`)
 		}
 	})
 
@@ -73,10 +92,10 @@ for (const peerName of seamPeers) {
 		for (const v of ['0.0.1-rc.5', '0.1.0-rc.2', '0.1.0-rc.5']) {
 			assert.equal(semver.satisfies(v, peerRange), false, `${v} must NOT satisfy ${peerRange}`)
 		}
-		// Next lines: a jump to 0.1.3, and 0.2.x are all deliberate, later
-		// decisions — never silently allowed. (0.1.2-rc.x is allowed above: it is
-		// the same tuple as the admitted 0.1.2-alpha seam.)
-		for (const v of ['0.1.3-rc.1', '0.2.0-rc.1', '0.2.0', '0.2.1']) {
+		// Next lines: a jump to 0.2.x, and the unpublished 0.1.4 gap line are
+		// all deliberate, later decisions — never silently allowed. (0.1.2-rc.x
+		// and 0.1.3-rc.x are allowed above: they sit on the admitted tuples.)
+		for (const v of ['0.1.4-alpha.1', '0.2.0-rc.1', '0.2.0', '0.2.1']) {
 			assert.equal(semver.satisfies(v, peerRange), false, `${v} must NOT satisfy ${peerRange}`)
 		}
 	})
