@@ -13,6 +13,8 @@ import {
   defaultCountTokens,
   renderNudgeText,
   type CompressionCore,
+  type CompressionState,
+  type ContextBreakdown,
   type CoreMessage,
   type NudgeDecision,
 } from 'acp-kernel'
@@ -116,24 +118,107 @@ function measuredTokenCount(agent: Agent, coreMessages: CoreMessage[]): number {
   return resolveTokenCount(agent, coreMessages)
 }
 
+/** A compaction checkpoint summary node (`source.plugin === 'compact'`). These
+ *  are NOT in any block's `effectiveMessageIds`, so feeding them to the
+ *  surface breakdown would count the summary twice — once as `block.summary`
+ *  and once as a visible text message (mirror of `/acp` status's exclusion in
+ *  src/tools.ts `isCheckpointEvent`). */
+function isCheckpointEvent(event: import('@deepseek-ai/dsh-session').SessionEvent): boolean {
+  if (event.type !== 'user/message') return false
+  const source = (event.data as { source?: { plugin?: string } }).source
+  return source?.plugin === 'compact'
+}
+
+/**
+ * Compute a SURFACE-ONLY context breakdown for display, aligned with
+ * `acp_status` (kernel `buildStatusReport`/`renderOverview`).
+ *
+ * The kernel's own `computeContextBreakdown` (which the nudge text renders)
+ * walks the message array it is fed — and `buildNudge` feeds it the FULL log
+ * (`allLogMessages`, needed so T2/T3 distillation can anchor every block). So
+ * a session with compressed blocks reports HISTORICAL totals there: every
+ * original tool/text message already absorbed into a block is counted again,
+ * e.g. `85.2K tool` for ~8.5K of live tool context. `acp_status` instead feeds
+ * `buildStatusReport` the VISIBLE surface + active-block summaries, so its
+ * breakdown reads the true current context. This function reproduces that
+ * visible-surface reality for the nudge line so the two tools agree.
+ *
+ * Classification replicates kernel `computeContextBreakdown` (tool-call/
+ * tool-result → tool, `system` role → system, `` code `` fence in text →
+ * code, else text) EXCEPT summaries: kernel detects summaries by a
+ * `[Compressed conversation section]` text prefix, which never matches a DSH
+ * checkpoint node (our summary is the plain summary + `compactCheckpointSource`
+ * source marker). We instead count active-block summaries directly from kernel
+ * state (same source `buildStatusReport` uses), and the caller must exclude
+ * checkpoint summary nodes from `messages` (they are not in any block's
+ * `effectiveMessageIds` and would double-count — mirror of `/acp` status's
+ * `isCheckpointEvent` exclusion).
+ */
+export function computeSurfaceBreakdown(
+  state: CompressionState,
+  messages: readonly CoreMessage[],
+  total: number,
+  growth: number,
+): ContextBreakdown {
+  let system = 0
+  let tool = 0
+  let code = 0
+  let text = 0
+  for (const message of messages) {
+    const tokens = defaultCountTokens(message.text ?? '')
+    if (message.contentType === 'tool-call' || message.contentType === 'tool-result') {
+      tool += tokens
+    } else if (message.role === 'system') {
+      system += tokens
+    } else if ((message.text ?? '').includes('```')) {
+      code += tokens
+    } else {
+      text += tokens
+    }
+  }
+  let summaries = 0
+  for (const block of state.blocks) {
+    if (block.active) summaries += defaultCountTokens(block.summary)
+  }
+  return { system, tool, summaries, code, text, total, growth }
+}
+
+/**
+ * Max emergency nudge injections within a single user turn. Bounds the
+ * positive-feedback loop where an unrelieved ≥emergency-threshold pressure
+ * re-injects a durable emergency nudge on every pre-step forever (issue #108).
+ * Mirrors billion-context-pi commit 414acd1 (cap emergency nudge injections per
+ * user turn). Normal-pressure nudges remain limited to one per turn regardless.
+ */
+export const EMERGENCY_NUDGE_MAX_PER_TURN = 3
+
 /**
  * Decide and build one nudge message for the agent's next pre-step. Returns
- * null when the kernel recommends no nudge or one was already injected for the
- * current turn (emergency nudges always bypass the dedup). Also advances the
- * in-memory kernel state (ref assignment) so the compress tool can resolve
- * seq → mNNNNN refs.
+ * null when the kernel recommends no nudge or the per-turn budget is spent:
+ * normal-pressure nudges fire at most once per user turn, and emergency nudges
+ * are capped at {@link EMERGENCY_NUDGE_MAX_PER_TURN} per user turn so an
+ * unrelieved ≥threshold pressure cannot re-inject a durable nudge on every
+ * pre-step forever (issue #108). Also advances the in-memory kernel state (ref
+ * assignment) so the compress tool can resolve seq → mNNNNN refs.
+ *
+ * `onEmergencyCapHit` (optional) fires when the kernel still wants an
+ * emergency nudge but the per-turn budget is spent — the host uses it to log
+ * why the model stops receiving nudges (issue #108 review).
  */
 export function buildNudge(
   agent: Agent,
   env: NudgeEnvironment,
   lastNudgeTurn: Map<string, number>,
+  emergencyNudges: Map<string, { turn: number; count: number }>,
+  onEmergencyCapHit?: () => void,
 ): NudgeOutcome | null {
   const session = agent.session
   const state = env.store.stateFor(session)
   // Full log for the kernel (so block anchors survive — see handleCompress);
   // the measured token count stays a SURFACE measurement.
   const coreMessages = allLogMessages(session)
-  const surfaceMessages = eventsToCoreMessages(surfaceEventsOf(session))
+  const surfaceEvents = surfaceEventsOf(session)
+  const surfaceMessages = eventsToCoreMessages(surfaceEvents)
   const tokenCount = measuredTokenCount(agent, surfaceMessages)
   const config = kernelConfigFor(env)
   const turn = env.kernel.processTurn({ messages: coreMessages, state, config, tokenCount })
@@ -141,12 +226,43 @@ export function buildNudge(
 
   const nudge = turn.nudge
   if (nudge === undefined || !nudge.shouldInject) return null
+  // The kernel computed `contextBreakdown` from the FULL log (allLogMessages),
+  // so after any compression it reports HISTORICAL totals (a huge `tool` that
+  // is really the compressed-away originals). Override it with the visible
+  // surface + active-block summaries so the nudge line matches acp_status
+  // (which renders from `buildStatusReport` over the surface). Checkpoint
+  // summary nodes are excluded (they are not in any block's effectiveMessageIds
+  // and would double-count) — the same exclusion `/acp` status applies. The
+  // breakdown is display-only and never drives injection, so this override is
+  // safe for the decision path.
+  const statusMessages = eventsToCoreMessages(
+    surfaceEvents.filter((event) => isCheckpointEvent(event) === false),
+  )
+  nudge.contextBreakdown = computeSurfaceBreakdown(turn.state, statusMessages, tokenCount, nudge.contextBreakdown?.growth ?? 0)
   const emergency = nudge.breakdown?.emergencyOverride === 1
 
   const turnNumber = findOpenTurn(sessionEventsOf(session)) ?? 0
-  const alreadyShown = !emergency && lastNudgeTurn.get(session.id) === turnNumber
-  if (alreadyShown) return null
-  lastNudgeTurn.set(session.id, turnNumber)
+  if (!emergency) {
+    // Normal-pressure nudge: at most one per user turn (unchanged behavior).
+    if (lastNudgeTurn.get(session.id) === turnNumber) return null
+    lastNudgeTurn.set(session.id, turnNumber)
+  } else {
+    // Emergency nudge: bounded per user turn. Without this cap an unrelieved
+    // ≥emergencyThreshold pressure re-injects a durable nudge on EVERY pre-step
+    // (each appended as a user/message event), and the nudge's own tokens push
+    // usage higher → a runaway feedback loop (issue #108; mirrors pi #223/#250
+    // and commit 414acd1).
+    const record = emergencyNudges.get(session.id)
+    if (record !== undefined && record.turn === turnNumber) {
+      if (record.count >= EMERGENCY_NUDGE_MAX_PER_TURN) {
+        onEmergencyCapHit?.()
+        return null
+      }
+      record.count += 1
+    } else {
+      emergencyNudges.set(session.id, { turn: turnNumber, count: 1 })
+    }
+  }
 
   const text = buildNudgeText(nudge, emergency, session, env.prompts)
   const message = createUserMessage({

@@ -39,7 +39,7 @@ export { ACP_SYSTEM_PROMPT, ACP_SYSTEM_PROMPT_ORDER } from './system-prompt.ts';
 export { DEFAULT_PROMPTS, DEFAULT_RESOLVED, renderSystemPrompt, renderTemplate, resolvePrompts, type AcpPrompts, type NudgePrompts, type PromptInput, type PromptOverride, type RangeTablePrompts, type ResolvedPrompts, type ToolPrompts, } from './prompts.ts';
 export { makeTools, type ToolEnvironment } from './tools.ts';
 export { acpCommand } from './commands.ts';
-export { buildNudge, resolveTokenCount, type NudgeEnvironment, type NudgeOutcome } from './nudge.ts';
+export { buildNudge, resolveTokenCount, EMERGENCY_NUDGE_MAX_PER_TURN, type NudgeEnvironment, type NudgeOutcome } from './nudge.ts';
 export { DEFAULT_CONTEXT_WINDOW, detectContextWindow, projectedContextWindow, windowSourceLabel, type AcpWindow, } from './window.ts';
 export { AlreadyCompressedRangeError, rebuildBlockLedger, resolveSurfaceRange, runCompactionTransaction, shadowedSeqsOf, findOpenTurn, assertNoActiveCompaction, blockRegistry, blockRefForSummarySeq, compactionIdsOfKernelBlocks, summarySeqOfKernelBlock, expandShadowedSeqs, hideCompressToolPair, stripOrphanedSurfaceToolMessages, type AcpBlockLedgerEntry, type CompactionTransactionInput, type ResolvedSurfaceRange, } from './region.ts';
 export { eventsToCoreMessages, projectEvent, surfaceEventsOf, extractEventText } from './messages.ts';
@@ -67,10 +67,11 @@ export interface AcpConfig {
      */
     readonly nudgeMaxContextLimitPct?: number;
     /**
-     * Emergency nudge threshold (bypasses the per-turn dedup). Engine default
-     * 0.85 (down from the kernel/billion-context-pi default 0.95: 95% leaves
-     * the model no room to act before the API rejects, and the host's 80%
-     * compaction-basic line shadows it in standard/code/cordis modes).
+     * Emergency nudge threshold (bypasses the per-turn dedup, but is capped at
+     * EMERGENCY_NUDGE_MAX_PER_TURN = 3 injections per user turn — issue #108).
+     * Engine default 0.85 (down from the kernel/billion-context-pi default 0.95:
+     * 95% leaves the model no room to act before the API rejects, and the host's
+     * 80% compaction-basic line shadows it in standard/code/cordis modes).
      */
     readonly nudgeEmergencyThresholdPct?: number;
     /**
@@ -124,6 +125,8 @@ export declare class AcpCompactionEngine extends CompactionEngine {
      */
     readonly env: ToolEnvironment;
     private readonly lastNudgeTurn;
+    /** Per-session emergency-nudge injection budget for the current user turn (issue #108). */
+    private readonly emergencyNudges;
     /** Successful compress call ids awaiting their tool/result so the pair can be hidden. */
     private readonly compressCallIdsToHide;
     /** Per provider/model route the resolved window (probe failures cached too). */

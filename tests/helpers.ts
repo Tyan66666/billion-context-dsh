@@ -28,6 +28,7 @@ export function appendAssistant(session: Session, text: string, turn = 1, step =
   session.append('assistant/message', {
     turn,
     step,
+    stream: [],
     message: createAssistantMessage({
       content: [{ type: 'text', text }],
       provider: 'test-provider',
@@ -40,6 +41,7 @@ export function appendToolCall(session: Session, text: string, callId: string, t
   session.append('assistant/message', {
     turn,
     step,
+    stream: [],
     message: createAssistantMessage({
       content: [
         { type: 'text', text },
@@ -73,6 +75,7 @@ export function appendMultiToolCall(session: Session, text: string, callIds: rea
   session.append('assistant/message', {
     turn,
     step,
+    stream: [],
     message: createAssistantMessage({
       content: [
         { type: 'text', text },

@@ -73,6 +73,7 @@ function buildCjkPairSession(pairs: number): Session {
     session.append('assistant/message', {
       turn: 1,
       step,
+      stream: [],
       message: createAssistantMessage({
         content: [{ type: 'text', text: cjkText(`a${index}`, 2000) }],
         provider: 'test-provider',
@@ -115,8 +116,8 @@ function fakeExec(session: Session, ctx: Context | { get(name: string): unknown 
 }
 
 function lastEventOf(session: Session, type: string): { seq: number; data: { shadowedTokenCount: number } & Record<string, unknown> } | undefined {
-  for (let index = session.events.length - 1; index >= 0; index -= 1) {
-    const event = session.events[index]!
+  for (let index = session.snapshotEvents().length - 1; index >= 0; index -= 1) {
+    const event = session.snapshotEvents()[index]!
     if (event.type === type) {
       return { seq: event.seq, data: event.data as { shadowedTokenCount: number } & Record<string, unknown> }
     }
@@ -153,7 +154,7 @@ function routedMeterStub(imageSeqs: ReadonlySet<number>, visualTokens: number): 
     measure(measured: Session) {
       return {
         nodes: measured.surface.nodes.map((seq) => {
-          const event = measured.events[seq]
+          const event = measured.snapshotEvents()[seq]
           const heuristicTokens = event === undefined ? 0 : hostPriceEvent(event)
           return {
             seq,
@@ -181,7 +182,7 @@ test('L3: compress tool claims the HOST price — host projection stays non-nega
   // handleCompress snapshots the registry (resolveTokenCount) BEFORE the
   // transaction, so the projection cell is already folded to the pre-transaction
   // log — drive ONLY the transaction events appended after this point.
-  const beforeEvents = session.events.length
+  const beforeEvents = session.snapshotEvents().length
   const result = await compress.execute({
     content: [{
       startSeq: 2,
@@ -202,7 +203,7 @@ test('L3: compress tool claims the HOST price — host projection stays non-nega
 
   // 4. The #54 arithmetic, reproduced: the OLD defaultCountTokens claim would
   //    overdraw the meter (CJK priced 1 char/token vs the host's 4 chars/token).
-  const oldClaim = shadowed.reduce((sum, seq) => sum + defaultCountTokens(extractEventText(session.events[seq]!)), 0)
+  const oldClaim = shadowed.reduce((sum, seq) => sum + defaultCountTokens(extractEventText(session.snapshotEvents()[seq]!)), 0)
   assert.ok(oldClaim > hostClaim, 'defaultCountTokens overclaims CJK vs the host price')
   assert.ok(oldClaim > preTotal, '#54: the old claim would overdraw the meter (negative messageTokens)')
 
@@ -211,8 +212,8 @@ test('L3: compress tool claims the HOST price — host projection stays non-nega
   //    The registry is event-driven (ctx.on('session/event')) and detached
   //    test sessions never emit, so drive the post-transaction events once.
   const registry = ctx.sessionProjections
-  for (let index = beforeEvents; index < session.events.length; index += 1) {
-    registry.drive(session, session.events[index]!)
+  for (let index = beforeEvents; index < session.snapshotEvents().length; index += 1) {
+    registry.drive(session, session.snapshotEvents()[index]!)
   }
   const snap = registry.snapshot(session)
   const messageTokens = snap.values.contextBreakdown!.messageTokens
@@ -239,7 +240,7 @@ test('L3: prune (orphan cleanup) claims the HOST price too', async () => {
       source: { kind: 'tool', callId: 'gone' },
     },
   }, { surfaceOp: 'append' })
-  const orphanEvent = session.events[session.events.length - 1]!
+  const orphanEvent = session.snapshotEvents()[session.snapshotEvents().length - 1]!
   const expected = hostPriceEvent(orphanEvent)
   const oldClaim = defaultCountTokens(extractEventText(orphanEvent))
 
@@ -264,6 +265,7 @@ test('L3: /acp compress uses RESOLVED edges and prices the host vocabulary (raw-
   session.append('assistant/message', {
     turn: 1,
     step: 1,
+    stream: [],
     message: createAssistantMessage({
       content: [
         { type: 'text', text: cjkText('plan', 400) },
@@ -342,11 +344,12 @@ test('L3: hostPriceEvent projects non-surface events to 0 and empty assistant me
   session.append('assistant/message', {
     turn: 1,
     step: 1,
+    stream: [],
     message: createAssistantMessage({ content: [], provider: 'p', model: 'm' }),
   }, { surfaceOp: 'append' })
   session.append('step/end', { turn: 1, step: 1 })
   const byType = new Map<SessionEvent['type'], SessionEvent>()
-  for (const event of session.events) byType.set(event.type, event)
+  for (const event of session.snapshotEvents()) byType.set(event.type, event)
   assert.equal(hostPriceEvent(byType.get('turn/start')!), 0, 'non-surface events price to 0')
   assert.equal(hostPriceEvent(byType.get('step/start')!), 0, 'non-surface events price to 0')
   assert.equal(hostPriceEvent(byType.get('step/end')!), 0, 'non-surface events price to 0')
@@ -383,6 +386,7 @@ test('L3: image-route meters price the claim in heuristicTokens — a node.token
   session.append('assistant/message', {
     turn: 1,
     step: 1,
+    stream: [],
     message: createAssistantMessage({
       content: [{ type: 'text', text: cjkText('报错原因是上游连接超时，重试即可恢复。', 2600) }],
       provider: 'test-provider',
@@ -404,6 +408,7 @@ test('L3: image-route meters price the claim in heuristicTokens — a node.token
     session.append('assistant/message', {
       turn: 1,
       step,
+      stream: [],
       message: createAssistantMessage({
         content: [{ type: 'text', text: cjkText(`回答${step}：加重试和熔断即可。`, 1300) }],
         provider: 'test-provider',
@@ -427,7 +432,7 @@ test('L3: image-route meters price the claim in heuristicTokens — a node.token
 
   const compress = makeTools(env).find((definition) => definition.name === 'compress')
   assert.ok(compress)
-  const beforeEvents = session.events.length
+  const beforeEvents = session.snapshotEvents().length
   const result = await compress.execute({
     content: [{
       startSeq: 2,
@@ -456,8 +461,8 @@ test('L3: image-route meters price the claim in heuristicTokens — a node.token
   // 3. The REAL host projection (the fold that threw in production) accepts
   //    the heuristic claim: non-negative and in exact agreement with the meter.
   const registry = ctx.sessionProjections
-  for (let index = beforeEvents; index < session.events.length; index += 1) {
-    registry.drive(session, session.events[index]!)
+  for (let index = beforeEvents; index < session.snapshotEvents().length; index += 1) {
+    registry.drive(session, session.snapshotEvents()[index]!)
   }
   const snap = registry.snapshot(session)
   const messageTokens = snap.values.contextBreakdown!.messageTokens
@@ -474,7 +479,7 @@ test('L3: pre-0.1.2 meters expose a single tokens field — the claim keeps read
     measure(measured: Session) {
       return {
         nodes: measured.surface.nodes.map((seq) => {
-          const event = measured.events[seq]
+          const event = measured.snapshotEvents()[seq]
           return { seq, tokens: event === undefined ? 0 : hostPriceEvent(event) }
         }),
       }

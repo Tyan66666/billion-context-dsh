@@ -70,22 +70,23 @@ Restart `dsh` afterwards (bundle layers are composed at startup), open a new ses
 
 > **DSH version compatibility.** The package declares all four runtime seam
 > packages (`dsh-compaction` / `dsh-session` / `dsh-llm` / `dsh-tools`) as peer
-> dependencies, sharing the range
-> `^0.1.0-rc.6 || ^0.1.1-rc.1 || ^0.1.2-alpha.4`,
-> covering the `0.1.0-rc.x` and `0.1.1-rc.x` release lines (including the current
-> DSH release; the seam's `src/` is unchanged from `0.1.0-rc.6` to `0.1.1-rc.2`, so the public
-> API is identical) and the `0.1.2-alpha.x` line (which removed the
-> `Session.events` getter in favour of `snapshotEvents()` / `eventAt()`; this
-> engine feature-detects both shapes, so one build runs on either seam). The
-> range is multiple `||` clauses **on purpose**: npm
-> (node-semver) only lets a prerelease version satisfy a range that carries a
-> comparator on the SAME `[major, minor, patch]` tuple as the candidate, so a lone
-> `^0.1.0-rc.6` can never match `0.1.1-rc.x` (issue #68) or `0.1.2-alpha.x` —
-> older releases fail to install on DSH 0.1.1-rc.x / 0.1.2-alpha.x; upgrade to a
-> release containing this fix. Declaring all four seam packages as peers (not
-> just `dsh-compaction`) ensures that, even under pnpm's
+> dependencies, sharing the range `>=0.1.5-alpha.1 <0.1.6-0` — exactly the
+> `0.1.5` line (every prerelease plus the final `0.1.5`). From the `0.1.5` line
+> on, the session's replace operation was renamed from `{ op, start, end }` to
+> `{ op, startSeq, endSeq }` and is validated strictly (exactly those three
+> keys), so the engine emits the new shape only: on older DSH hosts (< 0.1.5)
+> every `compress` call is rejected at runtime (issue #136), which is why the
+> old lines are out of contract — upgrade DSH before installing this release.
+> The explicit bounds (instead of a caret) are deliberate: a caret would
+> silently admit the unverified 0.1.6+ line. Declaring all four seam packages
+> as peers (not just `dsh-compaction`) ensures that, even under pnpm's
 > hoisted/linked layout, installations resolve them to the **host's own** copy
 > rather than a stale nested copy inconsistent with the host.
+>
+> Behavior note (from 0.1.5 on): the host no longer permits invisible
+> replacement nodes, so when the engine cleans up orphaned tool messages it
+> leaves one short visible placeholder message in their place; the host-owned
+> system prompt node (surface node 0) is excluded from compressible ranges.
 
 **Path B: plain `npm install` (package only — a composition row is required).**
 
@@ -220,7 +221,7 @@ This project reuses `acp-kernel`'s compression core and `billion-context-pi`'s d
 | `autoModelContextLimit` | `true` | Resolve the real context window automatically: the host projection first (`windowFor` → `projectedContextWindow`, `src/window.ts`), then the model API probe (`agent.ctx.llm.resolveModelInfo`); both are skipped when `autoModelContextLimit: false`. On probe failure it falls back to the default, and the `/acp` command shows the window source (the `acp_status` model tool carries no window info). A failed probe is surfaced in the host log and the `/acp` panel (`restart to re-probe`) — the failure is cached like a success, so fixing the gateway requires a restart or an explicit `modelContextLimit` before the probe retries. On a successful probe the adapter's per-request output cap (`defaultMaxTokens` — the output reservation the provider guarantees at the end of the window) is SUBTRACTED, so every downstream pressure decision (nudge tiers, truncate, growth) measures usage against the SUSTAINABLE input budget (window − reservation): a 96K window with a 16K cap carries at most 80K of input, and the raw denominator understated usage by cap/window (≈17% there — and the ratio is far higher on short-window models, where the same cap is a quarter or more of the window). When the cap is undisclosed, the limit is explicit, or the probe fails, the raw-window behavior is kept; `/acp status` shows the subtraction (raw − reservation) |
 | `nudgeMinContextLimitPct` | kernel default `0.45` | Nudge window lower bound (usage fraction) — validation only; the growth-driven trigger has no percentage floor — same default as billion-context-pi |
 | `nudgeMaxContextLimitPct` | engine default `0.70` (kernel/pi default `0.75`) | Over-limit line: above this the nudge fires regardless of growth — deliberately below the host compaction-basic 80% auto-compaction line so the forced nudge fires first; an explicit value wins (a same-name key in `coreOverrides.nudge` outranks it — see below) |
-| `nudgeEmergencyThresholdPct` | engine default `0.85` (kernel/pi default `0.95`) | Emergency nudge (bypasses the per-turn dedup) — lowered from `0.95`: at 95% the model has no room to act and the 80% auto-compaction line shadows it; an explicit value wins (a same-name key in `coreOverrides.nudge` outranks it — see below) |
+| `nudgeEmergencyThresholdPct` | engine default `0.85` (kernel/pi default `0.95`) | Emergency nudge (bypasses the per-turn dedup, but is capped at 3 injections per user turn — issue #108) — lowered from `0.95`: at 95% the model has no room to act and the 80% auto-compaction line shadows it; an explicit value wins (a same-name key in `coreOverrides.nudge` outranks it — see below) |
 | `coreOverrides` | — | Any other acp-kernel `Config` override (billion-context-pi's `coreOverrides` escape hatch). Merge order: kernel defaults → top-level pct knobs → `coreOverrides.nudge` lands last — same-name keys take its value |
 | `autoTools` | `true` | Register the four model tools on `ctx.tools` |
 | `autoCommand` | `true` | Register the `/acp` command on `ctx.commands` |
