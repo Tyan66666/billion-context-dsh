@@ -3793,7 +3793,8 @@ function rangeTable(session, prompts = DEFAULT_RESOLVED) {
 function measuredTokenCount(agent, coreMessages) {
   return resolveTokenCount(agent, coreMessages);
 }
-function buildNudge(agent, env, lastNudgeTurn) {
+var EMERGENCY_NUDGE_MAX_PER_TURN = 3;
+function buildNudge(agent, env, lastNudgeTurn, emergencyNudges, onEmergencyCapHit) {
   const session = agent.session;
   const state = env.store.stateFor(session);
   const coreMessages = allLogMessages(session);
@@ -3806,9 +3807,21 @@ function buildNudge(agent, env, lastNudgeTurn) {
   if (nudge === void 0 || !nudge.shouldInject) return null;
   const emergency = nudge.breakdown?.emergencyOverride === 1;
   const turnNumber = findOpenTurn(sessionEventsOf(session)) ?? 0;
-  const alreadyShown = !emergency && lastNudgeTurn.get(session.id) === turnNumber;
-  if (alreadyShown) return null;
-  lastNudgeTurn.set(session.id, turnNumber);
+  if (!emergency) {
+    if (lastNudgeTurn.get(session.id) === turnNumber) return null;
+    lastNudgeTurn.set(session.id, turnNumber);
+  } else {
+    const record = emergencyNudges.get(session.id);
+    if (record !== void 0 && record.turn === turnNumber) {
+      if (record.count >= EMERGENCY_NUDGE_MAX_PER_TURN) {
+        onEmergencyCapHit?.();
+        return null;
+      }
+      record.count += 1;
+    } else {
+      emergencyNudges.set(session.id, { turn: turnNumber, count: 1 });
+    }
+  }
   const text = buildNudgeText(nudge, emergency, session, env.prompts);
   const message = createUserMessage2({
     content: [{ type: "text", text }],
@@ -4609,6 +4622,8 @@ var AcpCompactionEngine = class extends CompactionEngine {
    */
   env;
   lastNudgeTurn = /* @__PURE__ */ new Map();
+  /** Per-session emergency-nudge injection budget for the current user turn (issue #108). */
+  emergencyNudges = /* @__PURE__ */ new Map();
   /** Successful compress call ids awaiting their tool/result so the pair can be hidden. */
   compressCallIdsToHide = /* @__PURE__ */ new Set();
   /** Per provider/model route the resolved window (probe failures cached too). */
@@ -4685,7 +4700,17 @@ var AcpCompactionEngine = class extends CompactionEngine {
       const decision = await next();
       if (decision.kind === "reject") return decision;
       const window = await this.windowFor(payload.agent);
-      const outcome = buildNudge(payload.agent, { ...env, modelContextLimit: window.limit }, this.lastNudgeTurn);
+      const outcome = buildNudge(
+        payload.agent,
+        { ...env, modelContextLimit: window.limit },
+        this.lastNudgeTurn,
+        this.emergencyNudges,
+        () => {
+          ctx.logger.warn(
+            `billion-context-dsh: emergency nudge suppressed \u2014 per-turn budget of ${EMERGENCY_NUDGE_MAX_PER_TURN} spent (session ${payload.agent.session.id}); pressure is still above the emergency threshold`
+          );
+        }
+      );
       if (outcome === null) return decision;
       return { kind: "enter", messages: [...decision.messages, outcome.message] };
     });
@@ -4828,6 +4853,7 @@ export {
   DEFAULT_CONTEXT_WINDOW,
   DEFAULT_PROMPTS,
   DEFAULT_RESOLVED,
+  EMERGENCY_NUDGE_MAX_PER_TURN,
   acpCommand,
   assertNoActiveCompaction,
   blockRefForSummarySeq,
