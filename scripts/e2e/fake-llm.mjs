@@ -48,7 +48,7 @@ const handler = (req, res) => {
   writeSse(res, { choices: [{ index: 0, delta: { content: '' }, finish_reason: 'stop' }], usage })
     writeDone(res)
     res.end()
-    state.requests.push({ kind: 'text', body: JSON.parse(body) })
+    state.requests.push({ kind: 'text', raw: body, body: parsed })
     return
   }
   if (turn.kind === 'tool') {
@@ -60,7 +60,7 @@ const handler = (req, res) => {
   writeSse(res, { choices: [{ index: 0, delta: { content: '' }, finish_reason: 'tool_calls' }], usage: { prompt_tokens: Math.ceil(JSON.stringify(parsed.messages ?? []).length / 4) + Math.ceil(JSON.stringify(parsed.tools ?? []).length / 4), completion_tokens: 2 } })
   writeDone(res)
   res.end()
-  state.requests.push({ kind: 'tool', name: turn.name, body: JSON.parse(body) })
+  state.requests.push({ kind: 'tool', name: turn.name, raw: body, body: parsed })
 }
 })
 }

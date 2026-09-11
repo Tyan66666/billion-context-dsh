@@ -136,6 +136,60 @@ const checksStatus = (result) => {
   list.push(['report excludes window-semantics rows (human-side /acp)', !report.includes('estimated context') && !report.includes('context window'), ''])
   return list
 }
+// Prompt-cache guard at the WIRE level. The request body is the only thing a provider
+// can key a cache on, so pin the parts of it that must not move across a scenario's LLM
+// calls. `raw` is the exact body string the fake LLM received (fake-llm.mjs keeps it);
+// per-message comparisons re-serialize the parsed form, which preserves the wire key
+// order (JSON.parse keeps insertion order) and normalizes only whitespace.
+const outboundMessagesOf = (request) => {
+  return Array.isArray(request.body?.messages) ? request.body.messages : []
+}
+const rawEnvelopeOf = (request) => {
+  const at = request.raw ? request.raw.indexOf('"messages"') : -1
+  return at < 0 ? request.raw ?? '' : request.raw.slice(0, at)
+}
+const cachePrefixChecks = (result) => {
+  const list = []
+  const requests = result.requests.filter((request) => outboundMessagesOf(request).length > 0)
+  if (requests.length < 2) {
+    return [['wire: at least two LLM request bodies captured', false, `requests=${requests.length}`]]
+  }
+
+  // Envelope: model / stream flags / key order / spacing, i.e. everything before the
+  // messages array. Comparing the RAW string is what makes key order observable.
+  const envelopes = new Set(requests.map(rawEnvelopeOf))
+  list.push(['wire: raw request envelope byte-stable (key order + spacing)', envelopes.size === 1, `${envelopes.size} distinct`])
+
+  const schemas = new Set(requests.map((request) => JSON.stringify(request.body.tools ?? null)))
+  list.push(['wire: tools array byte-stable across requests', schemas.size === 1, `${schemas.size} distinct schema(s)`])
+
+  // The leading message is the largest cacheable prefix. Compare from the second request
+  // on: the engine injects its one-time ACP guidance section during the first turn's
+  // pre-step, so request 1 may legitimately precede that injection.
+  const leading = requests.slice(1).map((request) => JSON.stringify(outboundMessagesOf(request)[0] ?? null))
+  const leadingDistinct = new Set(leading).size
+  list.push(['wire: leading message byte-stable after request 1', leadingDistinct === 1, `${leadingDistinct} distinct`])
+
+  // A scenario with no compaction is append-only by construction, so the previous
+  // request's message list must be a byte-identical prefix of the next one — any
+  // in-place rewrite of an earlier message lands here. Compaction scenarios skip this:
+  // the durable replace rewrites the surface by design.
+  if (!result.events.some((event) => event.type === 'compaction/summary')) {
+    let firstChange = ''
+    for (let i = 1; i < requests.length && firstChange === ''; i += 1) {
+      const before = outboundMessagesOf(requests[i - 1])
+      const after = outboundMessagesOf(requests[i])
+      for (let j = 0; j < before.length; j += 1) {
+        if (JSON.stringify(after[j]) !== JSON.stringify(before[j])) {
+          firstChange = `request #${i + 1} message ${j}`
+          break
+        }
+      }
+    }
+    list.push(['wire: append-only turns keep every earlier message byte-identical', firstChange === '', firstChange])
+  }
+  return list
+}
 const checksOf = { 'basic-compress': checksBasic, 'nudge-rhythm': checksRhythm, 'compress-then-decompress': checksDecompress, 'acp-status': checksStatus }
 const loadScenario = async (name) => {
   return JSON.parse(readFileSync(new URL(`./scenarios/${name}.json`, import.meta.url), 'utf8'))
@@ -156,7 +210,7 @@ const main = async () => {
   console.log(`--- ${name}`)
   const kinds = result.requests.map((request) => request.kind ?? 'error').join(',')
   console.log(`requests: ${kinds}`)
-  const checks = checksOf[name](result)
+  const checks = [...checksOf[name](result), ...cachePrefixChecks(result)]
   checks.forEach((row) => {
   console.log(`  ${row[1] ? 'PASS' : 'FAIL'} ${row[0]}${row[2] ? ` — ${row[2]}` : ''}`)
   if (!row[1]) fails.push(`${name}: ${row[0]}`)
