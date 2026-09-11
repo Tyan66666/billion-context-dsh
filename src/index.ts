@@ -37,6 +37,7 @@ import {
 } from '@deepseek-ai/dsh-compaction'
 import { createCore, type CompressionCore } from 'acp-kernel'
 import type { Agent } from '@deepseek-ai/dsh-agent'
+import { DEFAULT_SESSION_CACHE_LIMIT, LruMap } from './lru.ts'
 import { AcpStateStore } from './state.ts'
 import { makeTools, type ToolEnvironment } from './tools.ts'
 import { acpCommand } from './commands.ts'
@@ -196,7 +197,7 @@ export class AcpCompactionEngine extends CompactionEngine {
    */
   readonly env: ToolEnvironment
 
-  private readonly lastNudgeTurn = new Map<string, number>()
+  private readonly lastNudgeTurn = new LruMap<string, number>(DEFAULT_SESSION_CACHE_LIMIT)
   /** Per-session emergency-nudge injection budget for the current user turn (issue #108). */
   private readonly emergencyNudges = new Map<string, { turn: number; count: number }>()
   /** Successful compress call ids awaiting their tool/result so the pair can be hidden. */

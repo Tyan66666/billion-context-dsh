@@ -2635,6 +2635,33 @@ function makePreview(text, query, len) {
   return prefix + text.slice(start, end).trim() + suffix;
 }
 
+// src/lru.ts
+var DEFAULT_SESSION_CACHE_LIMIT = 512;
+var LruMap = class extends Map {
+  maxEntries;
+  constructor(maxEntries) {
+    super();
+    this.maxEntries = Math.max(1, Math.floor(maxEntries));
+  }
+  get(key) {
+    if (!super.has(key)) return void 0;
+    const value = super.get(key);
+    super.delete(key);
+    super.set(key, value);
+    return value;
+  }
+  set(key, value) {
+    super.delete(key);
+    super.set(key, value);
+    while (this.size > this.maxEntries) {
+      const oldest = this.keys().next().value;
+      if (oldest === void 0) break;
+      super.delete(oldest);
+    }
+    return this;
+  }
+};
+
 // src/region.ts
 import { randomUUID } from "crypto";
 import { CompactionId, compactCheckpointSource, toolPairingBalancedAfter, toolPairingBalancedBefore } from "@deepseek-ai/dsh-compaction";
@@ -3499,8 +3526,29 @@ function nextBlockIdAfter(events) {
   }
   return max + 1;
 }
+function nextRunIdAfter(blocks) {
+  let max = 0;
+  for (const block of blocks) {
+    const num = Number(block.runId.slice(1));
+    if (Number.isInteger(num)) max = Math.max(max, num);
+  }
+  return max + 1;
+}
 var AcpStateStore = class {
-  states = /* @__PURE__ */ new Map();
+  /**
+   * Live kernel states, capped by an LRU policy (issue #113): once the cap is
+   * reached the coldest session's state is dropped, and its next access
+   * rehydrates through stateFor's log-rebuild path below. Rehydration is
+   * deterministic — bN ids are recorded in the durable event or synthesised
+   * in ledger order, and run ids continue after the rehydrated max — so block
+   * identity survives eviction exactly as it survives a restart. Kernel
+   * fields that reset on eviction (tokenSnapshot, nudge cadence, stats
+   * counters) all self-heal on the session's next turn.
+   */
+  states;
+  constructor(limit = DEFAULT_SESSION_CACHE_LIMIT) {
+    this.states = new LruMap(limit);
+  }
   /** Kernel state for one session, initialised on first access. */
   stateFor(session) {
     const id = session.id;
@@ -3511,6 +3559,7 @@ var AcpStateStore = class {
     if (events.some((event) => event.type === "compaction/summary")) {
       state.blocks = rebuildKernelBlocks(events);
       state.nextBlockId = nextBlockIdAfter(events);
+      state.nextRunId = nextRunIdAfter(state.blocks);
     }
     this.states.set(id, state);
     return state;
@@ -4545,7 +4594,7 @@ var AcpCompactionEngine = class extends CompactionEngine {
    * revive lost-config bugs with every unit test green.
    */
   env;
-  lastNudgeTurn = /* @__PURE__ */ new Map();
+  lastNudgeTurn = new LruMap(DEFAULT_SESSION_CACHE_LIMIT);
   /** Per-session emergency-nudge injection budget for the current user turn (issue #108). */
   emergencyNudges = /* @__PURE__ */ new Map();
   /** Successful compress call ids awaiting their tool/result so the pair can be hidden. */
