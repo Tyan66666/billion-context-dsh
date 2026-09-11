@@ -14,7 +14,7 @@ import { type CompressionCore } from 'acp-kernel';
 import type { Agent } from '@deepseek-ai/dsh-agent';
 import type { AcpStateStore } from './state.ts';
 import { type KernelConfigInput } from './config.ts';
-import type { AcpWindow } from './window.ts';
+import { type AcpWindow } from './window.ts';
 import { type ResolvedPrompts } from './prompts.ts';
 export interface ToolEnvironment extends KernelConfigInput {
     readonly kernel: CompressionCore;

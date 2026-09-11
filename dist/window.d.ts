@@ -25,9 +25,11 @@ export interface AcpWindow {
     readonly source: 'explicit' | 'auto' | 'projection' | 'default';
     /**
      * Route the window was resolved for. 'auto' reports the probed route;
-     * 'projection' returns also set it, mirroring agent.options — which can be
-     * stale after a mid-session model switch (inert today: windowSourceLabel
-     * never reads these fields for the projection source).
+     * 'projection' returns also set it, from the session's LIVE route (its last
+     * `request/context` event) — NOT `agent.options`, which is a stale snapshot
+     * after a mid-session model switch; `agent.options` is the fallback only
+     * before the session has recorded any route. (Inert today: windowSourceLabel
+     * never reads these fields for the projection source.)
      */
     readonly provider?: string;
     readonly model?: string;
@@ -66,6 +68,33 @@ export declare function windowSourceLabel(window: AcpWindow): string;
  * Returns null when the host exposes no projection or disclosed no window.
  */
 export declare function projectedContextWindow(agent: Agent): number | null;
+/**
+ * Read the LIVE model route from the session's last `request/context` event.
+ * After a mid-session model switch `agent.options` is a stale snapshot (it
+ * names the PREVIOUS route), so the per-route output cap must be resolved
+ * against this live route instead — otherwise the cap lags one switch behind
+ * (a 32K cap from a just-left model subtracted from the new model's window).
+ * Returns null before the session has recorded any route, so callers fall
+ * back to `agent.options`. Never throws, like `probeModelWindow`: the caller
+ * runs inside `agent/pre-step`, which has no surrounding try.
+ */
+export declare function liveRoute(agent: Agent): {
+    provider: string;
+    model: string;
+} | null;
+/**
+ * The route the per-route output cap and the compression provenance must be
+ * resolved against, in ONE place: the session's live `request/context` route,
+ * falling back to `agent.options` only before the session has recorded any
+ * route. `windowFor` (src/index.ts), the `compress` tool (src/tools.ts) and
+ * `/acp compress` (src/commands.ts) all need this exact pair; three hand-copied
+ * copies is precisely how a stale-route bug gets fixed in one call site and
+ * left behind in the others.
+ */
+export declare function routeFor(agent: Agent): {
+    provider: string;
+    model: string;
+};
 /** The model window plus the adapter's per-request output cap, in one probe. */
 export interface ModelWindowProbe {
     /** The model's total context window in tokens, when disclosed. */
