@@ -28,19 +28,28 @@ DSH 会话里 `image` / `file` 块没有字符内容，而引擎的每一层都�
 | --- | --- |
 | `src/messages.ts` | `extractText` 对 `image` / `file` 块（任意嵌套深度，含 `tool-result` 的 `content`）生成占位符 `[image <mediaType> <name?> <WxH> <size>]` / `[file <name> <size>]`；`formatBytes`、`attachmentPlaceholder`（形状不符时返回 null，贡献空串而不造假数据）；`countAttachmentBlocks` / `countAttachments` / `attachmentsOfEvent` 用于统计（生产路径不分配对象） |
 | `src/region.ts` | `MediaPriceOf` 类型 + `SeqCompressibleRange.images/files`；`compressibleSegmentsOf` 接受 `mediaPriceOf`，对**含媒体的 seq** 才调用一次并加到该事件 token 上；范围行渲染 `[+N images \| +M files]` |
-| `src/host-tokens.ts` | `TokenMeterLike` 增加 `imageStructuralTokens` / `fileStructuralTokens`；`mediaPriceViaMeter(session, ctx)` 读宿主 meter 的路由结构价（只列含媒体的 seq，meter 缺失/抛错时返回空 Map，静默降级） |
+| `src/host-tokens.ts` | `TokenMeterLike` 只声明宿主真实暴露的两个价格（`tokens` / `heuristicTokens`）；`mediaPriceViaMeter(session, ctx)` 读它们的**差值**（= 路由多收的部分；只列差值为正的 seq，meter 缺失/抛错时返回空 Map，静默降级）；`hostMediaStructuralPrice(blocks)` 镜像宿主的 `estimateStructuralBlock`，作为"路由未声明视觉价"时的固定结构价兜底 |
 | `src/nudge.ts` | `mediaSuffixOf` + `meterMediaPriceResolver(agent, session)`；`rangeTable` / `buildNudgeText` / `adaptKernelNudgeToSeq` / `renderNudgeFromTemplates` 贯穿 `mediaPriceOf` |
 | `src/prompts.ts` | 范围表行模板新增 `{media}` 槽位（默认模板同步） |
 | `src/tools.ts` | `acp_status` 在表面含媒体时补一行标尺说明：压力行是 provider 口径（含图片/文件的路由价），上面的分解是纯文本估算 —— 无媒体时保持内核报告原样 |
 
 ## 为什么价格来自 meter 而不是文本估算
 
-没有文本估算器能算出图片的 token：`defaultCountTokens` 只认字符。宿主 token-meter 已经把媒体按**路由结构价**（`imageStructuralTokens` / `fileStructuralTokens`，由 provider adapter 声明的视觉价与附件元数据得出）单独记账，引擎直接读它，就不再需要猜。这是展示口径（nudge 百分比、范围表排序）；写入宿主事件的影子价格（`shadowedTokenCount`）仍然遵守规则 12 的宿主词汇 —— 三处写入点的口径未被本次改动触碰。
+没有文本估算器能算出图片的 token：`defaultCountTokens` 只认字符。宿主 token-meter 的节点只暴露两个价格：`tokens`（当前路由下的请求压力——媒体出现时带 provider adapter 声明的视觉价，否则就是固定启发式）和 `heuristicTokens`（与路由无关的固定启发式，影子价格账本用的就是它）。两者之差就是**路由多收的那部分**，也正是宿主自己用于触发/保留/范围选择的口径，所以范围表读它才与宿主一致。
+
+但差值在**所有适配器都不声明视觉价时恒为 0**（今天的生产适配器都是这样，pinned 测试 meter 也是），只读差值会让图片重新变成"免费"。因此引擎额外叠加 `hostMediaStructuralPrice`：宿主固定启发式对 image/file 引用收的结构价（镜像 `estimateStructuralBlock`），这是"这张图至少值多少"的下界。两者相加才是展示价。
+
+这是展示口径（nudge 百分比、范围表排序）；写入宿主事件的影子价格（`shadowedTokenCount`）仍然遵守规则 12 的宿主词汇 —— 三处写入点的口径未被本次改动触碰。
+
+### 已知限制
+
+`acp_status` 的 uncompressed 明细（drilldown 的行内 token）由内核渲染，内核只接受 `countTokens(text: string) => number`，拿不到 seq 也就无法按 seq 注入媒体价，因此**明细行仍是纯文本口径**。表面含媒体时 `acp_status` 会补一行标尺说明，模型据此知道压力行（provider 口径）与明细行（文本口径）为何不同。内核侧给 countTokens 加 seq/块上下文是上游议题。
 
 ## 验证
 
-- `npm run typecheck` 干净；`npm test` **324/324**（新增 `tests/media-visibility.test.ts` 6 个用例）。
-- 变异验证（故意改回旧行为必须变红）：删掉 `extractText` 的占位分支 → 2 个用例红；把媒体价从 token 累加里去掉 → 1 个用例红（断言比较"同一区间 +1500 vs +0"的差值，最初的 `>= 1500` 写法在去掉价格时仍然通过，已被替换）；去掉 `acp_status` 的标尺说明 → 1 个用例红。
+- `npm run typecheck` 干净；`npm test` 全绿（新增 `tests/media-visibility.test.ts` 8 个用例）。
+- 变异验证（故意改回旧行为必须变红）：删掉 `extractText` 的占位分支 → 2 个用例红；把路由差值从 token 累加里去掉 → 1 个用例红（断言比较"同一区间 +1500 vs +0"的差值，最初的 `>= 1500` 写法在去掉价格时仍然通过，已被替换）；去掉 `hostMediaStructuralPrice` 兜底 → 1 个用例红（`bare.tokens - spanText` 变成 0）；去掉 `acp_status` 的标尺说明 → 1 个用例红。
+- 价格读错字段的教训（独立 review 抓到）：第一版 `mediaPriceViaMeter` 读 `nodes[seq].imageStructuralTokens + fileStructuralTokens` —— 这两个字段在发布的 `TokenSurfaceNode` 上**根本不存在**，生产里恒为 0、整个计价半边是死代码，而当时的测试自己造了同样的字段，所以"绿着死"。现在测试用真实节点形状（`{ seq, tokens, heuristicTokens }`）断言差值，字段一旦再写错就会红。
 - 测试夹具教训：范围表会保护"最近 5 个 surface 节点 + 最后一条真实 user 消息"，4 个节点的会话**一个可压区间都没有**（静默产生 0 个范围），因此媒体夹具用 15 个节点、图片放在前段。
 
 ## 边界与未做的事

@@ -24,6 +24,7 @@ import {
   classifySurfaceEvent,
   extractEventText,
   attachmentsOfEvent,
+  mediaBlocksOfEvent,
   extractText,
   isAgentInstructionsRow,
   isCheckpointNode,
@@ -31,7 +32,7 @@ import {
   toolCallIdOfResultEvent,
   withSummaryFramePrefix,
 } from './messages.ts'
-import { hostPriceEvent } from './host-tokens.ts'
+import { hostMediaStructuralPrice, hostPriceEvent } from './host-tokens.ts'
 import { eventAtOf, sessionEventsOf } from './session-events.ts'
 import { decodeAcpBlockLedger, encodeAcpBlockLedger, type AcpBlockLedgerPayload } from './block-ledger.ts'
 
@@ -1115,11 +1116,17 @@ function compressibleSegmentsOf(
       continue
     }
     // Text is priced with the kernel's CJK-aware counter; image/file blocks add
-    // the host's routed surcharge, because no text estimator can see them and a
-    // span that looked free was ranked last by the model (issue #117). The
-    // callback is only consulted for a seq that really carries an attachment.
+    // a media price on top, because no text estimator can see them and a span
+    // that looked free was ranked last by the model (issue #117). The routed
+    // surcharge (meter) and the fixed structural estimate (host heuristic) are
+    // ADDED: the meter reports no surcharge at all on every adapter that
+    // declares no visual price, and an absent surcharge must never make a
+    // picture look free. The callback is only consulted for a seq that really
+    // carries an attachment.
     const attachments = attachmentsOfEvent(event)
-    const mediaPrice = attachments.images + attachments.files > 0 ? (mediaPriceOf?.(seq) ?? 0) : 0
+    const mediaPrice = attachments.images + attachments.files > 0
+      ? (mediaPriceOf?.(seq) ?? 0) + hostMediaStructuralPrice(mediaBlocksOfEvent(event))
+      : 0
     const tokens = defaultCountTokens(extractEventText(event)) + mediaPrice
     const isTool = isToolEvent(event)
     if (current === null) {

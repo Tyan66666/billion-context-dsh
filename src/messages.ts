@@ -306,15 +306,41 @@ function countAttachments(content: unknown, counts: { images: number; files: num
  * estimate (issue #117).
  */
 export function attachmentsOfEvent(event: SessionEvent): { images: number; files: number } {
+  return countAttachmentBlocks(contentBlocksOfEvent(event))
+}
+
+/**
+ * The image/file blocks themselves (not just their counts), in document order.
+ * The compressible-range rows price these with the fixed-heuristic media price
+ * when the meter reports no routed surcharge, so a media-bearing span is never
+ * shown as free (issue #117).
+ */
+export function mediaBlocksOfEvent(event: SessionEvent): readonly unknown[] {
+  const blocks: unknown[] = []
+  collectMediaBlocks(contentBlocksOfEvent(event), blocks)
+  return blocks
+}
+
+function collectMediaBlocks(content: unknown, out: unknown[]): void {
+  if (!Array.isArray(content)) return
+  for (const block of content) {
+    if (block === null || typeof block !== 'object') continue
+    const b = block as { type?: unknown; content?: unknown }
+    if (b.type === 'image' || b.type === 'file') out.push(block)
+    else if (Array.isArray(b.content)) collectMediaBlocks(b.content, out)
+  }
+}
+
+/** Where one surface event keeps its typed content blocks (never text). */
+function contentBlocksOfEvent(event: SessionEvent): unknown {
   switch (event.type) {
     case 'user/message':
-      return countAttachmentBlocks((event.data as { content?: unknown }).content)
+      return (event.data as { content?: unknown }).content
     case 'assistant/message':
-      return countAttachmentBlocks((event.data as { message?: { content?: unknown } }).message?.content)
     case 'tool/result':
-      return countAttachmentBlocks((event.data as { message?: { content?: unknown } }).message?.content)
+      return (event.data as { message?: { content?: unknown } }).message?.content
     default:
-      return { images: 0, files: 0 }
+      return undefined
   }
 }
 
