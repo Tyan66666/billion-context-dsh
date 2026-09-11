@@ -126,3 +126,85 @@ test('issue #136: the host-owned system prompt node is never offered as compress
   const resolved = resolveSurfaceRange(session, systemSeq, 4)
   assert.ok(resolved.start > systemSeq, 'resolution never includes the system node')
 })
+
+test('issue #136: a system prompt NOT at seq 0 stays out of the surface (mid-session injection)', () => {
+  // The host can inject a system node mid-session (e.g. a runtime prompt
+  // refresh). The engine's table skip is seq-agnostic — the system node must
+  // never appear in a compressible range regardless of where it sits.
+  const session = Session.create('surfaceop-system-mid')
+  appendTurn(session, 1)                                     // seq 0
+  appendUser(session, longText('q1', 1))                  // seq 1
+  appendToolCall(session, 'checking the docs', 'call_1')  // seq 2
+  appendToolResult(session, 'done', 'call_1')             // seq 3
+  // Mid-session system injection lands at seq 4.
+  session.append('system/message', { message: createSystemMessage('Runtime refresh.', 'test-plugin') }, { surfaceOp: 'append' })
+  const sysSeq = session.surface.nodes[3]!
+  assert.equal(sysSeq, 4, 'the system node is surface node index 3, seq 4')
+  appendUser(session, longText('q2', 2))                  // seq 5
+
+  const ranges = buildCompressibleSeqRanges(session, { preserveRecent: 0 })
+  // The system node splits the surface: seqs 1-3 and 5 each form ranges,
+  // never a span crossing through the system node.
+  for (const range of ranges) {
+    assert.ok(range.start !== sysSeq && range.end !== sysSeq, 'the system node is not a range edge')
+    assert.ok(range.start > sysSeq || range.end < sysSeq, 'no range straddles the system node')
+  }
+  const allSeqs = ranges.flatMap((r) => [r.start, r.end])
+  assert.ok(!allSeqs.includes(sysSeq), 'the system seq appears in no range edge')
+})
+
+test('issue #136: live-path resolution has an explicit system-node guard (defense in depth)', () => {
+  // Regression for the review note: resolveSurfaceRange previously excluded
+  // system nodes only INCIDENTALLY (hasPlainRef's default branch returns
+  // false). The explicit guard is now part of cleanBefore/cleanAfter, so a
+  // range whose edge falls on a system node snaps past it.
+  const session = Session.create('surfaceop-live-guard')
+  appendTurn(session, 1)                                     // seq 0
+  appendUser(session, longText('q1', 1))                  // seq 1
+  session.append('system/message', { message: createSystemMessage('Mid.', 'test-plugin') }, { surfaceOp: 'append' })
+  const sysSeq = session.surface.nodes[1]!
+  assert.equal(sysSeq, 2, 'the system node is surface node index 1, seq 2')
+  appendUser(session, longText('q2', 2))                  // seq 3
+
+  // Requesting a span that starts ON the system node must resolve to a
+  // live, compressible remainder — never return the system node as an edge.
+  const resolved = resolveSurfaceRange(session, sysSeq, 3)
+  assert.ok(resolved.start !== sysSeq, 'the resolved start is not the system node')
+  assert.ok(resolved.end !== sysSeq, 'the resolved end is not the system node')
+  assert.ok(resolved.start > sysSeq, 'resolution shifts past the system node')
+})
+
+test('issue #136: stale-range recovery skips system nodes in the live remainder', () => {
+  // Gap 1 from the #137 review: recoverStaleRange filters system nodes
+  // explicitly (region.ts recoverStaleRange), but no test pinned it — a stale
+  // span whose live remainder includes a system node must snap to the
+  // remaining conversation, never return the system node as an edge.
+  const session = Session.create('surfaceop-stale-system')
+  appendTurn(session, 1)                                     // seq 0
+  appendUser(session, longText('q1', 1))                  // seq 1
+  appendToolCall(session, 'checking the docs', 'call_1')  // seq 2
+  appendToolResult(session, 'done', 'call_1')             // seq 3
+  appendUser(session, longText('q2', 2))                  // seq 4
+  session.append('system/message', { message: createSystemMessage('Mid.', 'test-plugin') }, { surfaceOp: 'append' })
+  const sysSeq = session.surface.nodes[4]!
+  assert.equal(sysSeq, 5, 'the system node is surface node index 4, seq 5')
+  appendUser(session, longText('q3', 3))                  // seq 6
+
+  // Shadow seqs 1..4 (the pre-system conversation) into a block.
+  runCompactionTransaction(session, {
+    start: 1,
+    end: 4,
+    shadowedSeqs: [1, 2, 3, 4],
+    summary: [{ type: 'text', text: 'First block summary with plenty of detail.' }],
+    shadowedTokenCount: 1000,
+    provider: 'p',
+    model: 'm',
+  })
+  // Surface: [checkpoint, system@5, 6]. A stale span 1..6 recovers to the
+  // live remainder — seq 6 only, with the system node skipped.
+  const resolved = resolveSurfaceRange(session, 1, 6)
+  assert.equal(resolved.start, 6, 'recovery lands on the live user seq, past the system node')
+  assert.equal(resolved.end, 6)
+  assert.ok(resolved.recovered === true, 'the span was recovered from stale edges')
+  assert.notEqual(resolved.start, sysSeq, 'the system node is never a recovered edge')
+})

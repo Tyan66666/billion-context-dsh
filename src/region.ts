@@ -271,10 +271,25 @@ export function resolveSurfaceRange(
     throw new Error(`billion-context-dsh: reversed range ${start}..${end}`)
   }
   // A boundary must be BOTH tool-pairing-balanced AND carry a bare-seq ref.
-  const cleanBefore = (index: number): boolean =>
-    toolPairingBalancedBefore(session, nodes[index]!) && hasPlainRef(session, nodes[index]!)
-  const cleanAfter = (index: number): boolean =>
-    toolPairingBalancedAfter(session, nodes[index]!) && hasPlainRef(session, nodes[index]!)
+  // A boundary must be BOTH tool-pairing-balanced AND carry a bare-seq ref,
+  // and never a host system prompt. The system check is explicit, not
+  // incidental: `hasPlainRef` happens to return false for `system/message`,
+  // but riding that default would silently invert if the projection ever
+  // learns to emit a bare-seq ref for system nodes.
+  const cleanBefore = (index: number): boolean => {
+    const event = eventAtOf(session, nodes[index]!)
+    return event !== undefined
+      && !isSystemNode(event)
+      && toolPairingBalancedBefore(session, nodes[index]!)
+      && hasPlainRef(session, nodes[index]!)
+  }
+  const cleanAfter = (index: number): boolean => {
+    const event = eventAtOf(session, nodes[index]!)
+    return event !== undefined
+      && !isSystemNode(event)
+      && toolPairingBalancedAfter(session, nodes[index]!)
+      && hasPlainRef(session, nodes[index]!)
+  }
   let startIdx = requestedStartIdx
   let endIdx = requestedEndIdx
   // First pass: nudge inward to the nearest clean cuts.
@@ -545,7 +560,15 @@ function isCheckpointNode(event: SessionEvent): boolean {
   return source?.plugin === 'compact'
 }
 
-/** Whether a surface user message is a prune tombstone written by hideSurfaceSeqs. */
+/**
+ * Whether a surface user message was authored by this engine (plugin
+ * `billion-context-dsh`): both the empty prune tombstones written by
+ * `hideSurfaceSeqs` AND the compress call/result hiding nodes (which carry
+ * real tool-result text). The name is historical — it is NOT limited to
+ * empty tombstones; it matches any plugin-authored user turn, which is the
+ * intent (the last-user scan must skip every synthetic node, regardless of
+ * whether it carries text).
+ */
 function isPruneTombstone(event: SessionEvent): boolean {
   if (event.type !== 'user/message') return false
   const source = (event.data as { source?: { plugin?: string } }).source

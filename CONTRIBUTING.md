@@ -9,6 +9,7 @@ npm install
 npm run typecheck   # strict TypeScript check
 npm test            # unit tests (node --import tsx --test)
 npm run build       # tsup bundle
+npm run test:e2e   # end-to-end host regression (scripts/e2e/)
 ```
 
 - No `as any`, no `@ts-ignore`; tests use ESM static imports.
@@ -42,7 +43,7 @@ PR titles are enforced by CI (`.github/workflows/pr-lint.yml`, rule in `scripts/
 1. Branch off `main` (`git switch -c <your-branch> main`).
 2. Commit freely inside the branch.
 3. Open the PR with a **title** following the convention above — it becomes the main-branch commit message.
-4. CI must be green: `ci` (typecheck + test + build) and `pr-title` (title check) are required to merge.
+4. CI must be green: `ci` (typecheck + test + build) and `pr-title` (title check) are required to merge. The `e2e` job (end-to-end host harness, `.github/workflows/e2e.yml`) also reports on every PR; it is not yet in main's branch protection — the maintainer can add it as a third required check.
 5. Merging is **human-only**. Per AGENTS.md §5, an Agent must never merge any PR.
 
 ## `dist/` build artifacts (you never touch them)

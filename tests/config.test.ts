@@ -85,13 +85,14 @@ test('config: a lowered over-limit threshold triggers the nudge', () => {
   const lastNudgeTurn = new Map<string, number>()
   const agent = fakeAgent(session)
 
-  const withDefaults = buildNudge(agent, envOf({ modelContextLimit: 300000 }), lastNudgeTurn)
+  const withDefaults = buildNudge(agent, envOf({ modelContextLimit: 300000 }), lastNudgeTurn, new Map())
   assert.equal(withDefaults, null, '61% usage is growth-gated below the default 75% line')
 
   const withLowMax = buildNudge(
     agent,
     envOf({ modelContextLimit: 300000, nudgeMaxContextLimitPct: 0.5 }),
     lastNudgeTurn,
+    new Map(),
   )
   assert.ok(withLowMax !== null, 'lowering the over-limit threshold to 50% forces the nudge')
   assert.equal(withLowMax!.emergency, false)
