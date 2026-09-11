@@ -17,6 +17,7 @@ import type { AcpStateStore } from './state.ts';
 import { type KernelConfigInput } from './config.ts';
 import { type AcpWindow } from './window.ts';
 import { type ResolvedPrompts } from './prompts.ts';
+import type { SettingsCommandSurface } from './settings.ts';
 export interface ToolEnvironment extends KernelConfigInput {
     readonly kernel: CompressionCore;
     readonly store: AcpStateStore;
@@ -31,6 +32,12 @@ export interface ToolEnvironment extends KernelConfigInput {
      * (strict providers reject that sequence with HTTP 400).
      */
     readonly compressCallIdsToHide?: Set<string>;
+    /**
+     * Read/write access to the runtime settings layer for `/acp config`.
+     * Absent surfaces (never expected — the engine always builds one) would
+     * degrade the command to advice text.
+     */
+    readonly settingsCommand?: SettingsCommandSurface;
 }
 /**
  * Resolve the effective context window for a tool or command run: probe the
