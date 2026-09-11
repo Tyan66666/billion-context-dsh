@@ -57,7 +57,7 @@ jobs:
       # This comparison assumes deterministic builds across platforms: the
       # committed dist/ is built locally (macOS) while CI rebuilds on
       # ubuntu-latest. It holds because the toolchain is lockfile-pinned
-      # (typescript / tsup / esbuild, acp-kernel 0.0.29 inlined) and the
+      # (typescript / tsup / esbuild, acp-kernel 0.0.63 inlined) and the
       # sourcemap carries relative paths only. If a future toolchain change
       # introduces platform-dependent bytes or CRLF output, this check will
       # false-positive — treat that as a build-determinism regression to

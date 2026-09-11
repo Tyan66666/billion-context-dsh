@@ -10,7 +10,7 @@ import { makeTools, type ToolEnvironment } from '../src/tools.ts'
 import { blockRegistry, rebuildBlockLedger, sliceDecompressPage, DEFAULT_DECOMPRESS_PAGE, DEFAULT_DECOMPRESS_PAGE_CHARS } from '../src/region.ts'
 import { rangeTable } from '../src/nudge.ts'
 import { SUMMARY_FRAME_PREFIX } from '../src/messages.ts'
-import { appendTurn, appendToolResult, appendToolCall, appendMultiToolCall, appendUser, appendAssistant, buildTextSession, buildShortTextSession, longText } from './helpers.ts'
+import { appendTurn, appendToolResult, appendToolCall, appendMultiToolCall, appendUser, appendAssistant, buildTextSession, buildShortTextSession, longText, wholeSurfaceRangeView } from './helpers.ts'
 
 function makeEnv(limit = 128000): ToolEnvironment {
   return {
@@ -1008,7 +1008,7 @@ test('M3: compress shadows multi-tool-call messages inside a clean range', async
 test('M3: nudge range-table edges compress successfully (plain-ref boundaries)', async () => {
   const env = makeEnv()
   const session = buildMultiCallSession()
-  const table = rangeTable(session)
+  const table = rangeTable(session, wholeSurfaceRangeView(session))
   const match = /seq (\d+)\.\.(\d+)/.exec(table)
   assert.ok(match, 'range table renders a compressible span')
   const startSeq = Number(match![1])

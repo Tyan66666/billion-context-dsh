@@ -311,7 +311,7 @@ rangeTable: {
 }
 ```
 
-渲染映射:`surface` = `surfaceSummary(session)`;行级 `start/end/count/tokens` 来自 `buildCompressibleSeqRanges(session).slice(0, 6)` 的每一项;`title` 的 `{count}` = 显示行数(截断后)。
+渲染映射:`surface` = `surfaceSummary(session)`;行级 `start/end/count/tokens` 来自 `buildCompressibleSeqRanges(session, kernelView).slice(0, 6)` 的每一项;`title` 的 `{count}` = 显示行数(截断后)。
 
 **装配规则(I1,字节恒等的细节):**
 

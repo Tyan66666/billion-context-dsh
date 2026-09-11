@@ -23,7 +23,13 @@ import { createUserMessage, type UserMessage } from '@deepseek-ai/dsh-llm'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { AcpStateStore } from './state.ts'
 import { allLogMessages, eventsToCoreMessages, isCheckpointNode, surfaceEventsOf } from './messages.ts'
-import { buildCompressibleSeqRanges, findOpenTurn, summarySeqOfKernelBlock, surfaceSummary } from './region.ts'
+import {
+  buildCompressibleSeqRanges,
+  findOpenTurn,
+  summarySeqOfKernelBlock,
+  surfaceSummary,
+  type KernelRangeView,
+} from './region.ts'
 import { sessionEventsOf } from './session-events.ts'
 import { kernelConfigFor, type KernelConfigInput } from './config.ts'
 import { DEFAULT_RESOLVED, renderTemplate, type ResolvedPrompts } from './prompts.ts'
@@ -94,18 +100,32 @@ export function resolveTokenCount(agent: Agent, coreMessages: CoreMessage[]): nu
 }
 
 /**
+ * The kernel's decision and live state in the shape the range table needs.
+ *
+ * The kernel owns the compressible geometry (`nudge.compressibleRanges`); the
+ * ref map turns a kernel ref back into a surface seq. Both objects come from
+ * the SAME turn — the map must be the one `processTurn` just returned, never a
+ * rehydrated store state, or the refs point at ids this surface does not have.
+ */
+function kernelRangeViewOf(nudge: NudgeDecision, state: CompressionState): KernelRangeView {
+  return { ranges: nudge.compressibleRanges ?? [], refs: state.messageRefs }
+}
+
+/**
  * Render the compressible-range table as seq refs for the model.
- * Computed directly from the surface (not the kernel's ref map, which can
- * drift and hide large tool results) — see buildCompressibleSeqRanges.
- * UPSTREAM: this self-computation is a labeled workaround for kernel
- * ref-map drift after surface replacements (AGENTS.md rule 11) — drop it and
- * use kernel compressibleRanges once the drift is fixed upstream.
+ *
+ * The spans are the kernel's own (`compressibleRanges`, translated to surface
+ * seqs) with the host guards applied on top — see buildCompressibleSeqRanges.
+ * This function used to self-compute them from the surface as a labeled
+ * `UPSTREAM:` workaround for kernel ref-map drift; that drift is fixed upstream
+ * (acp-kernel #207) and the workaround is gone (rule 11).
  */
 export function rangeTable(
   session: import('@deepseek-ai/dsh-session').Session,
+  kernelView: KernelRangeView,
   prompts: ResolvedPrompts = DEFAULT_RESOLVED,
 ): string {
-  const ranges = buildCompressibleSeqRanges(session).slice(0, 6)
+  const ranges = buildCompressibleSeqRanges(session, kernelView).slice(0, 6)
   // 零范围:整块省略(保留现状的提前返回与 nudge 尾部 '\n')。
   if (ranges.length === 0) return ''
   const lines = ranges.map((range) =>
@@ -274,7 +294,7 @@ export function buildNudge(
     }
   }
 
-  const text = buildNudgeText(nudge, emergency, session, env.prompts)
+  const text = buildNudgeText(nudge, emergency, session, kernelRangeViewOf(nudge, turn.state), env.prompts)
   const message = createUserMessage({
     content: [{ type: 'text', text }],
     source: { kind: 'plugin', plugin: 'acp-nudge' },
@@ -299,16 +319,17 @@ export function buildNudgeText(
   nudge: NudgeDecision,
   emergency: boolean,
   session: import('@deepseek-ai/dsh-session').Session,
+  kernelView: KernelRangeView,
   prompts: ResolvedPrompts = DEFAULT_RESOLVED,
 ): string {
   // A host override of any nudge slot → template rendering (config.prompts
   // keeps its v0.1.9 contract: custom copy wins). Only the pristine default
   // reference reaches the kernel path.
   if (prompts.nudge !== DEFAULT_RESOLVED.nudge) {
-    return renderNudgeFromTemplates(nudge, emergency, session, prompts)
+    return renderNudgeFromTemplates(nudge, emergency, session, kernelView, prompts)
   }
   const rendered = renderNudgeText(nudge)
-  return adaptKernelNudgeToSeq(rendered.text, nudge, session, prompts)
+  return adaptKernelNudgeToSeq(rendered.text, nudge, session, kernelView, prompts)
 }
 
 /**
@@ -329,6 +350,7 @@ function adaptKernelNudgeToSeq(
   text: string,
   nudge: NudgeDecision,
   session: import('@deepseek-ai/dsh-session').Session,
+  kernelView: KernelRangeView,
   prompts: ResolvedPrompts,
 ): string {
   // B6：先摘掉哲学/规则段（它们住在系统提示与工具描述里），再做 seq 适配
@@ -345,7 +367,7 @@ function adaptKernelNudgeToSeq(
   // Replace the ref-ID range table (mNNNNN) with the surface-seq table.
   // A zero-range table leaves the kernel's own "[No specific ranges detected]"
   // notice intact — it is a better prompt than an empty table.
-  const seqTable = rangeTable(session, prompts)
+  const seqTable = rangeTable(session, kernelView, prompts)
   if (seqTable !== '') out = replaceRangesStr(out, seqTable)
   return out
 }
@@ -418,6 +440,7 @@ function renderNudgeFromTemplates(
   nudge: NudgeDecision,
   emergency: boolean,
   session: import('@deepseek-ai/dsh-session').Session,
+  kernelView: KernelRangeView,
   prompts: ResolvedPrompts,
 ): string {
   // Cap the reported percentage at 100: a broken measurement (e.g. response
@@ -473,7 +496,7 @@ function renderNudgeFromTemplates(
     parts.push('', tierRules)
   } else {
     // Range table for non-tier nudges (DSH-specific: seq-based, not ref-ID-based).
-    parts.push(rangeTable(session, prompts))
+    parts.push(rangeTable(session, kernelView, prompts))
   }
 
   // Batch-compress tip (from kernel's nudge-text.ts style).

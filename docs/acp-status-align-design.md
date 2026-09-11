@@ -86,7 +86,7 @@ ACP status — session <id>
 
 ## 3. 上游基准（kernel 真实渲染结果）
 
-用 acp-kernel **0.0.29**（移植版锁定版本，`package.json:53`）真实运行 `processTurn` + `buildStatusReport` + `handleStatus` 拼装逻辑，模型工具无参调用返回逐字文本：
+用 acp-kernel **0.0.29**（**本节写作时**的 pin —— 2026-09 的 issue #122 已把 pin 升到 **0.0.63**，本节断言在新内核上仍全绿）真实运行 `processTurn` + `buildStatusReport` + `handleStatus` 拼装逻辑，模型工具无参调用返回逐字文本：
 
 ### 3.1 无压缩（大会话）
 

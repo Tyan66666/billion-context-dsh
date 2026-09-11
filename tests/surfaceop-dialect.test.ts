@@ -27,7 +27,7 @@ import {
   runCompactionTransaction,
   stripOrphanedSurfaceToolMessages,
 } from '../src/region.ts'
-import { appendTurn, appendToolCall, appendToolResult, appendUser, longText } from './helpers.ts'
+import { appendTurn, appendToolCall, appendToolResult, appendUser, longText, wholeSurfaceRangeView } from './helpers.ts'
 
 /** turn + user + tool-call + tool/result + user → surface [1 user, 2 call, 3 result, 4 user]. */
 function buildPairSession(): Session {
@@ -117,7 +117,7 @@ test('issue #136: the host-owned system prompt node is never offered as compress
     /node 0 holds the system prompt/,
   )
 
-  const ranges = buildCompressibleSeqRanges(session, { preserveRecent: 0 })
+  const ranges = buildCompressibleSeqRanges(session, wholeSurfaceRangeView(session), { preserveRecent: 0 })
   assert.equal(ranges.length, 1, 'the system node splits off nothing — the rest forms one range')
   assert.deepEqual({ start: ranges[0]!.start, end: ranges[0]!.end }, { start: 2, end: 4 })
 
@@ -142,7 +142,7 @@ test('issue #136: a system prompt NOT at seq 0 stays out of the surface (mid-ses
   assert.equal(sysSeq, 4, 'the system node is surface node index 3, seq 4')
   appendUser(session, longText('q2', 2))                  // seq 5
 
-  const ranges = buildCompressibleSeqRanges(session, { preserveRecent: 0 })
+  const ranges = buildCompressibleSeqRanges(session, wholeSurfaceRangeView(session), { preserveRecent: 0 })
   // The system node splits the surface: seqs 1-3 and 5 each form ranges,
   // never a span crossing through the system node.
   for (const range of ranges) {

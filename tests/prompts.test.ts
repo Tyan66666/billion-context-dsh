@@ -20,7 +20,7 @@ import {
   renderTemplate,
   resolvePrompts,
 } from '../src/prompts.ts'
-import { buildTextSession } from './helpers.ts'
+import { buildTextSession, wholeSurfaceRangeView } from './helpers.ts'
 import AcpCompactionEngine, { AcpCompactionEngine as Named } from '../src/index.ts'
 
 function fakeAgent(session: import('@deepseek-ai/dsh-session').Session): Agent {
@@ -100,7 +100,8 @@ test('M4/prompts 1: default system prompt contains key sections in correct order
 })
 
 test('M4/prompts 2: default normal nudge — efficiency note + tip, guidance moved OUT (B6)', () => {
-  const text = buildNudgeText(fakeDecision(7, false), false, buildTextSession(4))
+  const session = buildTextSession(4)
+  const text = buildNudgeText(fakeDecision(7, false), false, session, wholeSurfaceRangeView(session))
   // Frame: kernel EFFICIENCY_NOTE verbatim (no "Context usage is at X%" statement)
   assert.ok(text.startsWith('This is an efficiency nudge to compress early and keep context lean — not an overflow warning.'), 'frame starts with efficiency note')
   assert.ok(!text.includes('Context usage is at'), 'no "Context usage is at" usage statement in the nudge')
@@ -120,7 +121,7 @@ test('M4/prompts 2b: default nudge renders through the kernel renderNudgeText pa
   // kernel's renderNudgeText (EFFICIENCY_NOTE / breakdown / HOW_TO_COMPRESS_RULES /
   // tip verbatim) with ONLY the ref-ID rangesStr replaced by our seq table.
   const session = buildTextSession(12)
-  const text = buildNudgeText(fakeDecision(50, false), false, session)
+  const text = buildNudgeText(fakeDecision(50, false), false, session, wholeSurfaceRangeView(session))
   // Kernel frame + tip verbatim；B6 起哲学/规则段被摘掉（改住系统提示）
   assert.ok(text.startsWith('This is an efficiency nudge to compress early and keep context lean — not an overflow warning.'), 'kernel EFFICIENCY_NOTE frame')
   assert.ok(!text.includes('HOW TO COMPRESS'), 'B6：规则段不在 nudge')
@@ -138,7 +139,8 @@ test('M4/prompts 2b: default nudge renders through the kernel renderNudgeText pa
 })
 
 test('M4/prompts 3: default emergency nudge — ⚠️ frame + HOW_TO_COMPRESS_RULES + seq example', () => {
-  const text = buildNudgeText(fakeDecision(96, true), true, buildTextSession(4))
+  const session = buildTextSession(4)
+  const text = buildNudgeText(fakeDecision(96, true), true, session, wholeSurfaceRangeView(session))
   // Frame: emergency style（B6 起哲学/规则段摘出，只留动作指令）
   assert.ok(text.startsWith('⚠️ Context limit reached — compress now. Prioritize consumed tool outputs.'), 'emergency frame starts with compress now')
   assert.ok(!text.includes('Compression Philosophy:'), 'B6：哲学段不在 emergency nudge')
@@ -153,9 +155,11 @@ test('M4/prompts 3: default emergency nudge — ⚠️ frame + HOW_TO_COMPRESS_R
 })
 
 test('M4/prompts 4: range table snapshot (with ranges) and zero-range early return', () => {
-  assert.equal(rangeTable(buildTextSession(4)), '')
+  const empty = buildTextSession(4)
+  assert.equal(rangeTable(empty, wholeSurfaceRangeView(empty)), '')
+  const paged = buildTextSession(12)
   assert.equal(
-    rangeTable(buildTextSession(12)),
+    rangeTable(paged, wholeSurfaceRangeView(paged)),
     `\nSurface: 12 nodes, seqs 1..12
 Compressible ranges (1, oldest first; exact surface seqs — usable as-is):
   - seq 1..7 — 7 messages, ~7227 tokens [tool 0% | text 100%]
@@ -269,7 +273,8 @@ test('M4/prompts 6: partial overrides merge per key; key/group null falls back t
 
 test('M4/prompts 7: nudge normal template substitutes {pct}', () => {
   const prompts = resolvePrompts({ nudge: { normal: '上下文使用率 {pct}%' } })
-  const text = buildNudgeText(fakeDecision(7, false), false, buildTextSession(4), prompts)
+  const session = buildTextSession(4)
+  const text = buildNudgeText(fakeDecision(7, false), false, session, wholeSurfaceRangeView(session), prompts)
   assert.ok(text.startsWith('上下文使用率 7%'))
 })
 
@@ -307,8 +312,8 @@ test('M4/prompts 10: empty guidance removes the line cleanly (frame + newline + 
   })
   // B6：默认 frame 不再内嵌哲学段（哲学住系统提示）
   const frame = 'Efficiency nudge: compress consumed ranges early to keep context lean — not an overflow warning. A stronger alert appears only if the context is actually full.'
-  const text = buildNudgeText(fakeDecision(7, false), false, session, prompts)
-  assert.equal(text, `${frame}\n${rangeTable(session)}`)
+  const text = buildNudgeText(fakeDecision(7, false), false, session, wholeSurfaceRangeView(session), prompts)
+  assert.equal(text, `${frame}\n${rangeTable(session, wholeSurfaceRangeView(session))}`)
   assert.ok(!text.includes('HOW TO COMPRESS'))
   assert.ok(!text.includes('Compress all ranges'))
 })
@@ -337,7 +342,8 @@ test('M4/prompts 11: tier line renders (0 tokens) when pending is missing (B2 fa
       pendingT3: 0,
     } as never,
   }
-  const text = buildNudgeText(decision, false, buildTextSession(12))
+  const session = buildTextSession(12)
+  const text = buildNudgeText(decision, false, session, wholeSurfaceRangeView(session))
   assert.match(text, /Tier 2: 1 tier-1 block\(s\) distillable \(0 tokens\)/)
   assert.doesNotMatch(text, /\( tokens\)/)
 })
@@ -378,12 +384,12 @@ test('M4/prompts 13: Chinese override smoke (i18n scenario)', () => {
     systemPrompt: '主动上下文剪枝 —— 模型驱动。\n{philosophy}\n{howToCompressRules}\n压缩工具:compress/decompress/search_context/acp_status。',
   })
   const session = buildTextSession(12)
-  const text = buildNudgeText(fakeDecision(7, false), false, session, prompts)
+  const text = buildNudgeText(fakeDecision(7, false), false, session, wholeSurfaceRangeView(session), prompts)
   assert.ok(text.includes('上下文使用率 7%'))
   assert.ok(text.includes('表面:12 nodes, seqs 1..12'))
   assert.ok(text.includes('可压缩范围(仅供参考):'))
   assert.ok(text.includes('💡 一次调用压缩多个范围'))
-  const emerg = buildNudgeText(fakeDecision(96, true), true, session, prompts)
+  const emerg = buildNudgeText(fakeDecision(96, true), true, session, wholeSurfaceRangeView(session), prompts)
   assert.ok(emerg.includes('上下文已达上限'))
   const sys = renderSystemPrompt(prompts)
   assert.ok(sys.includes('主动上下文剪枝'))

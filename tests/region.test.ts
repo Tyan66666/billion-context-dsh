@@ -20,7 +20,7 @@ import {
   shadowedSeqsOf,
   stripOrphanedSurfaceToolMessages,
 } from '../src/region.ts'
-import { appendTurn, appendToolCall, appendToolResult, appendMultiToolCall, appendUser, appendAssistant, buildTextSession, longText } from './helpers.ts'
+import { appendTurn, appendToolCall, appendToolResult, appendMultiToolCall, appendUser, appendAssistant, buildTextSession, longText, wholeSurfaceRangeView } from './helpers.ts'
 
 test('M2: AcpStateStore initialises one state per session', () => {
   const store = new AcpStateStore()
@@ -477,7 +477,7 @@ test('M5: stripOrphanedSurfaceToolMessages removes orphan results and orphan cal
   )
   // The pairing cache is healthy again and the surface yields compressible spans.
   assert.doesNotThrow(() => resolveSurfaceRange(session, 1, session.surface.nodes[session.surface.nodes.length - 1]!))
-  assert.doesNotThrow(() => buildCompressibleSeqRanges(session, { preserveRecent: 0 }), 'orphan cleanup leaves the range table computable')
+  assert.doesNotThrow(() => buildCompressibleSeqRanges(session, wholeSurfaceRangeView(session), { preserveRecent: 0 }), 'orphan cleanup leaves the range table computable')
 })
 
 test('M5: buildCompressibleSeqRanges carries kernel-parity toolPct and oldest-first order', () => {
@@ -494,7 +494,7 @@ test('M5: buildCompressibleSeqRanges carries kernel-parity toolPct and oldest-fi
   appendToolCall(session, longText('call', 4), 'call_1', 1, 3)   // seq 5 — tool
   appendToolResult(session, longText('result', 5), 'call_1', 1, 4) // seq 6 — tool
 
-  const ranges = buildCompressibleSeqRanges(session, { preserveRecent: 0 })
+  const ranges = buildCompressibleSeqRanges(session, wholeSurfaceRangeView(session), { preserveRecent: 0 })
   assert.equal(ranges.length, 2, 'protected user message splits the surface into two ranges')
   assert.equal(ranges[0]!.toolPct, 0, 'text-only range reports toolPct 0')
   assert.equal(ranges[1]!.toolPct, Math.round((2 / 3) * 100), '2-tool-of-3-msg range reports the tool share (67)')
@@ -570,7 +570,7 @@ test('M5: stripOrphanedSurfaceToolMessages prunes legacy broken pairs (call → 
   assert.equal(after.length, 4, 'the two user messages plus the two prune notes remain visible')
   assert.ok(!after.some((message) => message.role === 'tool'), 'no orphaned tool result remains')
   assert.ok(!after.some((message) => message.role === 'assistant' && message.content.some((block) => (block as { type?: string }).type === 'tool-call')), 'no orphaned tool-call remains')
-  assert.doesNotThrow(() => buildCompressibleSeqRanges(session, { preserveRecent: 0 }), 'the healed surface is range-solvable')
+  assert.doesNotThrow(() => buildCompressibleSeqRanges(session, wholeSurfaceRangeView(session), { preserveRecent: 0 }), 'the healed surface is range-solvable')
 })
 
 test('M5: stripOrphanedSurfaceToolMessages keeps healthy multi-call pairs', () => {

@@ -25,7 +25,7 @@ import { ACP_SYSTEM_PROMPT } from '../src/system-prompt.ts'
 import { DEFAULT_PROMPTS, resolvePrompts } from '../src/prompts.ts'
 import { decodeAcpBlockLedger } from '../src/block-ledger.ts'
 import { eventAtOf, sessionEventsOf } from '../src/session-events.ts'
-import { buildTextSession } from './helpers.ts'
+import { buildTextSession, wholeSurfaceRangeView } from './helpers.ts'
 
 const tx = (session: Session, extra: Partial<CompactionTransactionInput> = {}) => runCompactionTransaction(session, {
   start: 1,
@@ -75,7 +75,7 @@ test('B6-1 nudge 正文（不含范围表）≤300 B', () => {
     breakdown: { usage: 0.5, growth: 0, growthReference: 0, effectiveThreshold: 0, nudgeGrowthTokens: 50000, growthFloor: 20000, currentTokens: 50000, referenceTokens: 50000 } as never,
     contextBreakdown: { system: 1000, tool: 2000, summaries: 0, code: 0, text: 3000 },
   } as never
-  const text = buildNudgeText(decision, false, session)
+  const text = buildNudgeText(decision, false, session, wholeSurfaceRangeView(session))
   const body = text.split('Surface:')[0]!.trim()
   assert.ok(Buffer.byteLength(body, 'utf8') <= 300, `正文=${Buffer.byteLength(body, 'utf8')}B ≤ 300B`)
   assert.match(body, /efficiency nudge/i, '仍保留「该压缩了」的框')
@@ -96,7 +96,7 @@ test('B6-2 哲学段与规则段移出 nudge、仍留在系统提示里（移出
     breakdown: { usage: 0.5, growth: 0, growthReference: 0, effectiveThreshold: 0, nudgeGrowthTokens: 50000, growthFloor: 20000, currentTokens: 50000, referenceTokens: 50000 } as never,
     contextBreakdown: { system: 1000, tool: 2000, summaries: 0, code: 0, text: 3000 },
   } as never
-  const text = buildNudgeText(decision, false, session)
+  const text = buildNudgeText(decision, false, session, wholeSurfaceRangeView(session))
   assert.match(text, /efficiency nudge/i, 'nudge 仍带效率框')
   assert.ok(text.includes('Context breakdown:'), 'nudge 仍带上下文分解行')
   assert.equal(text.includes('Compression Philosophy:'), false, '哲学段已从 nudge 摘除')
@@ -106,7 +106,7 @@ test('B6-2 哲学段与规则段移出 nudge、仍留在系统提示里（移出
 test('B6-4 模板路径（宿主覆盖任一 nudge 槽）同样摘指引段（独立复核发现的软缺口）', () => {
   const session = buildTextSession(12)
   const prompts = resolvePrompts({ nudge: { tip: '自定义尾注' } })
-  const text = buildNudgeText({ shouldInject: true, reason: 'probe', compressibleRanges: [], tierTargetBlocks: [], contextUsage: 0.5, tier: null, contextBreakdown: { system: 1000, tool: 2000, summaries: 0, code: 0, text: 3000 } } as never, false, session, prompts)
+  const text = buildNudgeText({ shouldInject: true, reason: 'probe', compressibleRanges: [], tierTargetBlocks: [], contextUsage: 0.5, tier: null, contextBreakdown: { system: 1000, tool: 2000, summaries: 0, code: 0, text: 3000 } } as never, false, session, wholeSurfaceRangeView(session), prompts)
   const body = text.split('Surface:')[0]!.trim()
   assert.equal(text.includes('Compression Philosophy:'), false, '模板路径也不含哲学段')
   assert.equal(text.includes('HOW TO COMPRESS'), false, '模板路径也不含规则段')

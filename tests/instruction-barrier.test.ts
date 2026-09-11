@@ -36,7 +36,7 @@ import { buildCompressibleSeqRanges, guardedSurfaceSeqsOf, newestInstructionSeqs
 import { guardedRowsInSpan, makeTools, protectedRowRejectionNote, type ToolEnvironment } from '../src/tools.ts'
 import { AcpStateStore } from '../src/state.ts'
 import { sessionEventsOf } from '../src/session-events.ts'
-import { appendTurn, appendUser, appendAssistant, appendToolCall, appendToolResult, buildTextSession, longText } from './helpers.ts'
+import { appendTurn, appendUser, appendAssistant, appendToolCall, appendToolResult, buildTextSession, longText, wholeSurfaceRangeView } from './helpers.ts'
 
 /** The exact source shape the host stamps on injected AGENTS.md rows. */
 function instructionSource(scope: string, version: string): Record<string, unknown> {
@@ -133,7 +133,7 @@ test('PR1: the range table splits at instruction rows — no offered range conta
   appendUser(session, longText('q2', 4))
   appendAssistant(session, longText('a2', 5), 1, 5)
 
-  const ranges = buildCompressibleSeqRanges(session, { preserveRecent: 0 })
+  const ranges = buildCompressibleSeqRanges(session, wholeSurfaceRangeView(session), { preserveRecent: 0 })
   assert.ok(ranges.length >= 2, `segments split at the instruction row (got ${ranges.length})`)
   for (const range of ranges) {
     assert.ok(range.start > barrierSeq || range.end < barrierSeq, `range ${range.start}..${range.end} must not contain barrier seq ${barrierSeq}`)
@@ -167,7 +167,7 @@ test('PR1: the barrier (not the newest-row pin) excludes NON-newest instruction 
   assert.ok(!pinned.has(staleSeq), 'the stale copy is NOT pinned — the barrier alone must exclude it')
   assert.ok(!pinned.has(catalogSeq), 'a skill catalog is NOT pinned — the barrier alone must exclude it')
 
-  const ranges = buildCompressibleSeqRanges(session, { preserveRecent: 0 })
+  const ranges = buildCompressibleSeqRanges(session, wholeSurfaceRangeView(session), { preserveRecent: 0 })
   const covers = (seq: number): boolean => ranges.some((range) => range.start <= seq && seq <= range.end)
   assert.ok(!covers(staleSeq), `no offered range may contain the stale instruction row (seq ${staleSeq})`)
   assert.ok(!covers(catalogSeq), `no offered range may contain the skill-catalog row (seq ${catalogSeq})`)
@@ -194,7 +194,7 @@ test('PR1: engine-authored metadata rows stay foldable — a nudge echo never sp
     'metadata',
     'a nudge echo is engine-authored metadata, never a barrier',
   )
-  const ranges = buildCompressibleSeqRanges(session, { preserveRecent: 0 })
+  const ranges = buildCompressibleSeqRanges(session, wholeSurfaceRangeView(session), { preserveRecent: 0 })
   assert.ok(
     ranges.some((range) => range.start <= echoSeq && echoSeq <= range.end),
     `a range must fold ACROSS the nudge echo (seq ${echoSeq}) — metadata rows are not barriers`,
@@ -214,7 +214,7 @@ test('PR1: tail-scan regression — the REAL last user message is protected, not
   // The OLD scan walked backward for "the last user/message that is not a
   // checkpoint" — on this surface that is the injected row, so the injected
   // row sat protected while the real user message stayed compressible.
-  const ranges = buildCompressibleSeqRanges(session, { preserveRecent: 0 })
+  const ranges = buildCompressibleSeqRanges(session, wholeSurfaceRangeView(session), { preserveRecent: 0 })
   const covers = (seq: number): boolean => ranges.some((range) => range.start <= seq && seq <= range.end)
   assert.ok(!covers(realLastUser), `the real last user turn (seq ${realLastUser}) must be protected`)
   for (const range of ranges) {
@@ -454,14 +454,14 @@ test('PR1: host CONTENT plugin rows fold like main — neither policy nor the us
     assert.equal(classifySurfaceEvent(sessionEventsOf(session)[seq]!), 'real', `${plugin} folds like real content`)
     assert.equal(isRealUserTurn(sessionEventsOf(session)[seq]!), false, `${plugin} must never win the protected tail`)
   }
-  const ranges = buildCompressibleSeqRanges(session, { preserveRecent: 0 })
+  const ranges = buildCompressibleSeqRanges(session, wholeSurfaceRangeView(session), { preserveRecent: 0 })
   const covers = (seq: number): boolean => ranges.some((range) => range.start <= seq && seq <= range.end)
   assert.ok(contentRows.every(({ seq }) => covers(seq)), 'folding them is not silently disabled — main compressed these')
 
   // The conservative default is untouched: a plugin nobody audited is a barrier.
   const unknown = appendPluginRow(session, { kind: 'plugin', plugin: 'future-unknown' })
   assert.equal(classifySurfaceEvent(sessionEventsOf(session)[unknown]!), 'instruction')
-  const after = buildCompressibleSeqRanges(session, { preserveRecent: 0 })
+  const after = buildCompressibleSeqRanges(session, wholeSurfaceRangeView(session), { preserveRecent: 0 })
   assert.ok(!after.some((range) => range.start <= unknown && unknown <= range.end), 'an unknown plugin still acts as a barrier')
 })
 
