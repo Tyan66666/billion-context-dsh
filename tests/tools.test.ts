@@ -95,6 +95,29 @@ test('M3: compress lands a durable block, shrinks the surface, and uses the effe
   assert.deepEqual(modelContextLimits, [1000000], 'compress gives the kernel the auto-detected window, not the 128K fallback')
 })
 
+test('M3: compress stamps the summary with the LIVE route, not stale agent.options', async () => {
+  // A mid-session model switch: the session's last request/context event names
+  // the CURRENT route while the agent's options still hold the just-left one.
+  // Reading provenance from agent.options mislabels the summary — the same
+  // stale read the window cap had, which this PR fixes for the window only.
+  const env = makeEnv()
+  const session = buildTextSession(12)
+  session.append('request/context', { provider: 'live-provider', model: 'live-model' })
+  const compress = toolOf(env, 'compress')
+  await compress.execute({
+    content: [{
+      startSeq: 1,
+      endSeq: 5,
+      summary: 'Authentication system: JWT access tokens with 15 minute expiry, refresh tokens in Redis with 30 day TTL, login flow in src/auth/login.ts with sliding-window rate limiting at 10 requests per minute per IP address.',
+    }],
+  } as never, fakeExec(session))
+
+  const summaryEvent = session.snapshotEvents().find((event) => event.type === 'compaction/summary')
+  assert.ok(summaryEvent, 'compaction/summary landed')
+  assert.equal((summaryEvent.data as { provider?: string }).provider, 'live-provider', 'the summary carries the LIVE provider')
+  assert.equal((summaryEvent.data as { model?: string }).model, 'live-model', 'the summary carries the LIVE model')
+})
+
 test('M3: successful compress registers its call id for post-result pair hiding', async () => {
   const env = makeEnv()
   const session = buildTextSession(12)

@@ -9,7 +9,7 @@
 在 Node 22 下用项目自带 `node_modules/acp-kernel` 直接运行完整生命周期（`/tmp/acp-engine-probe*.mjs` 系列探针）：
 
 | 阶段 | 结果 |
-|---|---|
+| --- | --- |
 | `defaultConfig(limit)` 生成合法配置 | ✅ |
 | `processTurn` 分配 ref 标签（`<acp tokens="15" type="text">m00001</acp>`） | ✅ |
 | 紧急 nudge 决策（usage ≥80% 注入） | ✅ |
@@ -107,7 +107,7 @@ PROBE OK
 ### 关键设计决策（每项都有验证依据）
 
 | # | 决策 | 验证依据 |
-|---|---|---|
+| --- | --- | --- |
 | D1 | **ref 机制**：放弃内存打 `<acp>` 标签，改用"seq 即 ref"，nudge/注入消息携带 seq→内容映射表 | V4：无内存改写钩子；V2 架构事实 4 |
 | D2 | **压缩落地**：模型 `compress` 工具 → durable `surfaceOp: {op:'replace'}` 遮蔽范围，摘要 = 模型写的 summary（正是 ACP 省 token 的卖点，无需二次 LLM 摘要调用） | V2、V5 |
 | D3 | **decompress**：读取日志原始事件，replace 回原文 | V5 |
@@ -120,7 +120,7 @@ PROBE OK
 ### 里程碑（每步可独立验证）
 
 | 里程碑 | 内容 | 验证方式 |
-|---|---|---|
+| --- | --- | --- |
 | M0 | 包骨架 + seam 挂载 | **已完成（V7 探针即原型）** |
 | M1 | 消息适配层：Session 事件 ↔ acp-kernel CoreMessage（user/assistant/tool-call/tool-result 投影，参考 `src/messages.ts` 的 `entriesToCoreMessages`/`projectMessage`） | 单测 + 日志回放 |
 | M2 | 块状态持久化（日志事件 schema + load/merge） | 单测（重启恢复） |
@@ -143,7 +143,7 @@ PROBE OK
 在真实部署（DSH web profile + `acp` preset，Rectangle 项目的一个长会话）中验证时，压缩闭环暴露了 6 个问题，全部在 v0.1.1 修复（[Release v0.1.1](https://github.com/Tyan66666/billion-context-dsh/releases/tag/v0.1.1)）：
 
 | # | 现象 | 根因 | 修复 |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | 1 | `acp_status` 显示 `tokens compressed: 0`（多个大块） | 写事务时 `shadowedTokenCount` 写死 0 | 压缩时按实际遮蔽消息估算并写入账本 |
 | 2 | nudge 显示 `230%` 荒谬占用 | 用了 token-meter 的 `totalTokens`（请求+响应压力，含响应预估） | 改用 `surfaceTokens`（纯输入侧），显示 cap 100% |
 | 3 | 估算对中文失准 | 用了 `estimateTokensFast`（纯 4 字符/token） | 改用 acp-kernel 的 `defaultCountTokens`（CJK 1 字符/token + 其他 4 字符/token，与 billion-context-pi 一致）——**后续演进（issue #54 / AGENTS.md 规则 12）**：`defaultCountTokens` 仅限内部估算与展示（nudge 百分比、账本、压缩结果文案）；写入宿主事件的 `shadowedTokenCount` 必须用宿主扁平 4 字符/token 词汇（`ctx.tokenMeter.measure` 优先，`src/host-tokens.ts` 镜像兜底）——中文密集会话曾因用 `defaultCountTokens` 计价 claim 被宿主账本扣穿而永久卡死（见 docs/shadow-price-host-vocabulary-design.md） |
