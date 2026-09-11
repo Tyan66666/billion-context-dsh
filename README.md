@@ -247,6 +247,7 @@ src/
 ├── messages.ts     # M1: 会话事件 ↔ acp-kernel CoreMessage 投影
 ├── state.ts        # M2: 每会话内核状态
 ├── region.ts       # M5: 持久化区域事务 + 日志重建块账本
+├── block-ledger.ts # M5 支持：tier/lineage 字段编码进 compaction/summary 的 rawOutput（绝不作顶层成员，issue #141）
 ├── tools.ts        # M3: compress / decompress / search_context / acp_status
 ├── nudge.ts        # M4: 内核压力决策 → 注入的建议式 nudge
 ├── system-prompt.ts# M4: 一次性 ACP 指引段（让 nudge 保持简短）

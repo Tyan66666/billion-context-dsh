@@ -250,6 +250,7 @@ src/
 ├── messages.ts     # M1: session events ↔ acp-kernel CoreMessage projection
 ├── state.ts        # M2: per-session kernel state
 ├── region.ts       # M5: durable region transaction + log-rebuilt block ledger
+├── block-ledger.ts # M5 support: tier/lineage fields encoded inside compaction/summary rawOutput, never top-level (issue #141)
 ├── tools.ts        # M3: compress / decompress / search_context / acp_status
 ├── nudge.ts        # M4: kernel pressure decision → injected advisory nudge
 ├── system-prompt.ts# M4: one-time ACP guidance section (keeps nudges short)
