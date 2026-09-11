@@ -44,7 +44,7 @@ import { acpCommand } from './commands.ts'
 import { buildNudge, EMERGENCY_NUDGE_MAX_PER_TURN } from './nudge.ts'
 import { ACP_SYSTEM_PROMPT_ORDER } from './system-prompt.ts'
 import { renderSystemPrompt, resolvePrompts, type AcpPrompts, type ResolvedPrompts } from './prompts.ts'
-import { DEFAULT_CONTEXT_WINDOW, probeModelWindow, projectedContextWindow, type AcpWindow } from './window.ts'
+import { DEFAULT_CONTEXT_WINDOW, probeModelWindow, projectedContextWindow, routeFor, type AcpWindow } from './window.ts'
 import { deferCompressPairHide, stripOrphanedSurfaceToolMessages } from './region.ts'
 
 export { AcpStateStore } from './state.ts'
@@ -395,8 +395,10 @@ export class AcpCompactionEngine extends CompactionEngine {
     if (this.config.modelContextLimit !== undefined) {
       return { limit: this.config.modelContextLimit, source: 'explicit' }
     }
-    const provider = agent.options.provider ?? ''
-    const model = agent.options.model ?? ''
+    // The per-route output cap must be looked up against the session's LIVE
+    // route or it lags one switch behind (a stale agent.options snapshot names
+    // the PREVIOUS route) — routeFor owns that fallback chain for every caller.
+    const { provider, model } = routeFor(agent)
     const key = `${provider}\0${model}`
     // Projection source first: it reflects the live route (agent.options is a
     // stale snapshot after a model switch), and it is not cached here because
@@ -406,10 +408,10 @@ export class AcpCompactionEngine extends CompactionEngine {
     if (this.config.autoModelContextLimit) {
       const projected = projectedContextWindow(agent)
       if (projected !== null) {
-        // The window comes from the live projection; the output cap still
-        // comes from the (cached) model probe — the projection schema carries
-        // no cap. After a mid-session switch agent.options names the
-        // PREVIOUS route, so the cap is the best available, not the live one.
+        // The window comes from the live projection; the output cap comes from
+        // the (cached) model probe for the LIVE route — the projection schema
+        // carries no cap, so the cap follows the live provider/model resolved
+        // above (agent.options only as the pre-first-request fallback).
         const cap = await this.outputCapFor(agent, provider, model)
         return this.applyReservation({ limit: projected, source: 'projection', provider, model }, cap)
       }
