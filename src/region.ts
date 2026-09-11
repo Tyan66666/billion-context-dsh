@@ -23,6 +23,7 @@ import { defaultCountTokens } from 'acp-kernel'
 import { extractEventText, extractText, toolCallIdOfResultEvent } from './messages.ts'
 import { hostPriceEvent } from './host-tokens.ts'
 import { eventAtOf, sessionEventsOf } from './session-events.ts'
+import { decodeAcpBlockLedger, encodeAcpBlockLedger, type AcpBlockLedgerPayload } from './block-ledger.ts'
 
 /**
  * A surface sequence number as the INSTALLED `dsh-session` sees it. Since the
@@ -366,35 +367,18 @@ export interface CompactionTransactionInput {
   readonly effectiveMessageIds?: readonly string[]
 }
 
-/**
- * ACP tier extension fields carried on `compaction/summary` events. The
- * upstream dsh-compaction event type does not know them, so reads and writes
- * go through this precise intersection (never `any`).
- */
-export interface AcpCompactionSummaryFields {
-  /** Compression tier (1/2/3) — 1 = message range, 2 = distills tier-1, 3 = distills tier-2. */
-  readonly tier?: 1 | 2 | 3
-  /** Short block label (kernel `CompressionBlock.topic`) — the acp_status block title. */
-  readonly topic?: string
-  /** The acp-kernel block id (`bN`) created for this transaction. */
-  readonly kernelBlockId?: string
-  /** Durable compaction ids of the blocks distilled into this one. */
-  readonly parentBlockIds?: readonly string[]
-  /**
-   * The kernel block's direct message ids (raw CoreMessage ids) at creation —
-   * recorded so a restarted engine rehydrates the SAME coverage (a tier-2
-   * block's coverage is its parents' originals, not the checkpoint node).
-   */
-  readonly directMessageIds?: readonly string[]
-  /** The kernel block's effective message ids (raw CoreMessage ids) at creation. */
-  readonly effectiveMessageIds?: readonly string[]
-}
-
 type CompactionSummaryData = SessionEventMap['compaction/summary']
 
-/** Read a `compaction/summary` event's data including the ACP tier extension fields. */
-export function readCompactionSummary(event: SessionEvent): CompactionSummaryData & AcpCompactionSummaryFields {
-  return event.data as CompactionSummaryData & AcpCompactionSummaryFields
+/**
+ * Read a `compaction/summary` event's data. The six ACP tier/lineage fields are
+ * no longer top-level members (issue #141): post-fix writers carry them in the
+ * admitted optional `rawOutput` member (decode via {@link decodeAcpBlockLedger}),
+ * while logs written by pre-fix engines still carry them as top-level members —
+ * so the returned type also intersects with {@link AcpBlockLedgerPayload}, letting
+ * readers fall back to the legacy shape. Never `any`.
+ */
+export function readCompactionSummary(event: SessionEvent): CompactionSummaryData & AcpBlockLedgerPayload {
+  return event.data as CompactionSummaryData & AcpBlockLedgerPayload
 }
 
 /**
@@ -430,14 +414,11 @@ export function runCompactionTransaction(
 
   try {
     seqs.push(session.append('compaction/start', { compactionId, turn }).seq)
-    seqs.push(session.append('compaction/summary', {
-      compactionId,
-      summary: input.summary,
-      shadowedRange: { start: input.start, end: input.end },
-      shadowedSeqs: [...input.shadowedSeqs],
-      shadowedTokenCount: input.shadowedTokenCount,
-      provider: input.provider,
-      model: input.model,
+    // The six tier/lineage fields ride in the admitted optional `rawOutput`
+    // member (namespaced JSON via encodeAcpBlockLedger), NOT as top-level
+    // members: the frozen released-v0 reader rejects any non-admitted member and
+    // would brick the log on host upgrade (issue #141). See src/block-ledger.ts.
+    const ledgerPayload: AcpBlockLedgerPayload = {
       tier: input.tier ?? 1,
       ...(input.kernelBlockId === undefined ? {} : { kernelBlockId: input.kernelBlockId }),
       ...(input.topic === undefined ? {} : { topic: input.topic }),
@@ -446,7 +427,17 @@ export function runCompactionTransaction(
         : { parentBlockIds: [...input.parentBlockIds] }),
       ...(input.directMessageIds === undefined ? {} : { directMessageIds: [...input.directMessageIds] }),
       ...(input.effectiveMessageIds === undefined ? {} : { effectiveMessageIds: [...input.effectiveMessageIds] }),
-    } as CompactionSummaryData & AcpCompactionSummaryFields).seq)
+    }
+    seqs.push(session.append('compaction/summary', {
+      compactionId,
+      summary: input.summary,
+      shadowedRange: { start: input.start, end: input.end },
+      shadowedSeqs: [...input.shadowedSeqs],
+      shadowedTokenCount: input.shadowedTokenCount,
+      provider: input.provider,
+      model: input.model,
+      rawOutput: encodeAcpBlockLedger(ledgerPayload),
+    } as CompactionSummaryData).seq)
 
     const message = createUserMessage({
       content: input.summary,
@@ -510,22 +501,37 @@ export function rebuildBlockLedger(events: readonly SessionEvent[]): AcpBlockLed
         if (original !== undefined) shadowedTokenCount += defaultCountTokens(extractEventText(original))
       }
     }
-    const tier = data.tier === 2 || data.tier === 3 ? data.tier : 1
-    const parentBlockIds: string[] = Array.isArray(data.parentBlockIds) ? [...data.parentBlockIds] : []
-    const directMessageIds: string[] | undefined = Array.isArray(data.directMessageIds) ? [...data.directMessageIds] : undefined
-    const effectiveMessageIds: string[] | undefined = Array.isArray(data.effectiveMessageIds) ? [...data.effectiveMessageIds] : undefined
+    // Block-ledger fields: prefer the rawOutput-embedded payload (post-fix
+    // writers + normalizer-recovered files); fall back to the legacy top-level
+    // members written by pre-fix engines onto v3 logs (which are not bricked) so
+    // in-flight sessions keep their tier/lineage across the upgrade.
+    // decodeAcpBlockLedger never throws and returns {} when no valid payload is present.
+    const embedded = decodeAcpBlockLedger(data.rawOutput)
+    const tier: 1 | 2 | 3 = embedded.tier ?? (data.tier === 2 || data.tier === 3 ? data.tier : 1)
+    const parentBlockIds: string[] = embedded.parentBlockIds
+      ? [...embedded.parentBlockIds]
+      : (Array.isArray(data.parentBlockIds) ? [...data.parentBlockIds] : [])
+    const directMessageIds: string[] | undefined = embedded.directMessageIds
+      ? [...embedded.directMessageIds]
+      : (Array.isArray(data.directMessageIds) ? [...data.directMessageIds] : undefined)
+    const effectiveMessageIds: string[] | undefined = embedded.effectiveMessageIds
+      ? [...embedded.effectiveMessageIds]
+      : (Array.isArray(data.effectiveMessageIds) ? [...data.effectiveMessageIds] : undefined)
+    const topic: string | undefined = embedded.topic ?? (typeof data.topic === 'string' ? data.topic : undefined)
+    const kernelBlockId: string | undefined = embedded.kernelBlockId
+      ?? (typeof data.kernelBlockId === 'string' ? data.kernelBlockId : undefined)
     const summarySeq = summarySeqOfCompaction(events, data.compactionId)
     ledger.push({
       blockId: data.compactionId,
       summary: extractText(data.summary),
-      ...(typeof data.topic === 'string' ? { topic: data.topic } : {}),
+      ...(topic === undefined ? {} : { topic }),
       shadowedSeqs: [...data.shadowedSeqs],
       shadowedTokenCount,
       start: data.shadowedRange.start,
       end: data.shadowedRange.end,
       tier,
       parentBlockIds,
-      ...(typeof data.kernelBlockId === 'string' ? { kernelBlockId: data.kernelBlockId } : {}),
+      ...(kernelBlockId === undefined ? {} : { kernelBlockId }),
       ...(summarySeq === null ? {} : { summarySeq }),
       ...(directMessageIds === undefined ? {} : { directMessageIds }),
       ...(effectiveMessageIds === undefined ? {} : { effectiveMessageIds }),
