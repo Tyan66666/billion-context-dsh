@@ -55,15 +55,15 @@ async function statusText(env: ToolEnvironment, agent: Agent): Promise<string> {
   ]
   // Name the active preset (if any) with the thresholds it resolved to: the whole
   // point of a preset is that the user sees at a glance which tier is in effect.
-  // These are the resolved `env` values, so an explicit override on top of the
-  // preset shows through — but a same-name key in `coreOverrides.nudge` does NOT:
-  // that one lands inside `kernelConfigFor` and the nudge decision further down
-  // uses it, so this line can understate the threshold actually in force.
+  // The three numbers mirror kernelConfigFor's merge order — a same-name key in
+  // `coreOverrides.nudge` lands AFTER these env values there, so reading only the
+  // env values would print a lower number than the one actually in force.
   if (env.preset !== undefined) {
+    const ov = env.coreOverrides?.nudge
     const pct = (value?: number): string => `${Math.round((value ?? 0) * 100)}%`
     lines.push(
       `  preset: ${env.preset} (${PRESETS[env.preset].label})`
-      + ` [min ${pct(env.nudgeMinContextLimitPct)} · max ${pct(env.nudgeMaxContextLimitPct)} · emergency ${pct(env.nudgeEmergencyThresholdPct)}]`,
+      + ` [min ${pct(ov?.minContextLimitPct ?? env.nudgeMinContextLimitPct)} · max ${pct(ov?.maxContextLimitPct ?? env.nudgeMaxContextLimitPct)} · emergency ${pct(ov?.emergencyThresholdPct ?? env.nudgeEmergencyThresholdPct)}]`,
     )
   }
   // A failed probe falls back to the 128K default AND is cached for the

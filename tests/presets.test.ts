@@ -264,13 +264,37 @@ test('config: /acp status names the preset with the thresholds it resolved to', 
 
   assert.equal(result.kind, 'success')
   const text = (result as { text: string }).text
-  // The panel prints the composition-time env values, so an explicit override on
-  // top of the preset shows through — the whole point of the display line. It can
-  // NOT see a same-name key in coreOverrides.nudge (that lands in kernelConfigFor);
-  // the README states that limitation, and the kernelConfigFor test above pins the
-  // precedence the panel cannot show.
+  // The panel prints the thresholds actually in force: an explicit override on
+  // top of the preset shows through (the whole point of the display line), and
+  // with no coreOverrides.nudge the resolved preset values are what lands in
+  // kernelConfigFor anyway.
   assert.match(
     text,
     /\n {2}preset: efficient \(trim more often — favors low token usage over keeping full history\) \[min 40% · max 60% · emergency 78%\]/,
+  )
+})
+
+test('config: /acp status preset line mirrors a same-name key in coreOverrides.nudge', async () => {
+  // kernelConfigFor spreads coreOverrides.nudge LAST, so its keys are the ones
+  // actually in force — the panel must print those, not the lower preset values.
+  // Minimal single-key override (the shape a real composition row uses); the two
+  // keys absent from it must still show the preset-resolved values.
+  const agent = fakeAgent(midSession())
+  const base = nudgeEnvFor('efficient')
+  const result = await acpCommand({
+    ...base,
+    coreOverrides: { nudge: { maxContextLimitPct: 0.95 } },
+  }).handler({
+    commandId: 'cmd-test' as never,
+    agent,
+    rawInput: 'status',
+    signal: new AbortController().signal,
+  } as never)
+
+  assert.equal(result.kind, 'success')
+  const text = (result as { text: string }).text
+  assert.match(
+    text,
+    /\n {2}preset: efficient \(trim more often — favors low token usage over keeping full history\) \[min 40% · max 95% · emergency 78%\]/,
   )
 })

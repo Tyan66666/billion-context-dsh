@@ -241,7 +241,7 @@ DSH 的每个模型请求都派生自其 append-only 会话日志（*surface*）
 
 - **只填未设的阈值**：`preset` 仅填充你没有显式设置的 `nudge*ContextLimitPct`；同时写了 `preset` 和某个阈值时，该阈值以你的显式值为准（优先级 显式 > preset > 默认）。
 - **不碰其他旋钮**：`modelContextLimit`、`autoNudge`、`prompts`、`coreOverrides` 完全不受影响；`coreOverrides.nudge` 仍最后落地、同名键最高优先。
-- **查看当前档位**：`/acp status` 会打印生效的 `preset` 及其解析后的三个阈值（含你在其上做的显式覆盖）。注意这一行读的是构造期解析出的 env 值——`coreOverrides.nudge` 的同名键在 `kernelConfigFor` 内部才落地，**不会**反映在这一行上（此时该行显示的数字低于真实生效值）。
+- **查看当前档位**：`/acp status` 会打印生效的 `preset` 及其**真实生效的**三个阈值——这一行镜像 `kernelConfigFor` 的合并顺序，所以你在其上做的显式覆盖、以及 `coreOverrides.nudge` 里的同名键都会如实显示。
 - **拼错即报错**：未知名称在引擎构造期直接抛错并列出合法值（与自定义提示词模板同一约定），不会静默回退默认。注意 bundle 行本身不带 `config`，`preset` 只能由你自己的同 id `compaction-acp` 行提供；该行构造失败即挂载失败，profile 会在你修好配置前一直起不来（fail-fast 的既定行为）。
 - **运行时热切换**：预设目前走组合配置（安装 / `cordis.patch.yml`）；待 #75 的 settings.yaml 热加载落地后，可在 `/acp config` 里改。本 PR 先让它在组合层可用。
 - **反向窗口直接报错**：与显式阈值合并后若出现 `min > max`、`max > emergency` 或 `min > emergency`（例如 `preset: 'preserve'` 配 `nudgeMaxContextLimitPct: 0.5`），引擎在构造期抛错并列出三个值。内核对这种配置只打警告、不会拒绝，所以这道校验由引擎在 `resolveAcpConfig` 里补上。

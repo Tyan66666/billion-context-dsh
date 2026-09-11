@@ -6,6 +6,7 @@
 > - **P3**：未知名称在引擎构造期抛错并列出合法值（与自定义提示词模板同一 fail-fast 约定），不静默回退默认。
 > - **P4**：`preset` 是**展示字段**——进 env 仅供 `/acp status` 命名当前档位，永不进 `kernelConfigFor`；真正喂给内核的是解析后的三个 pct。
 > - **P5**：落在**组合配置层**（安装 / `cordis.patch.yml`），今天即可用；settings.yaml 热加载暴露 `preset` 别名待 #75 Phase 1 落地后跟进。
+> - **R1（PR review 跟进）**：`/acp status` 的 preset 行原来只读构造期解析出的 env 值，`coreOverrides.nudge` 的同名键不会反映在上面（显示值低于真实生效值）。已改为镜像 `kernelConfigFor` 的合并顺序显示三个阈值——该行数字即真实生效值；新增回归测试钉住。
 >
 > **范围说明：** 原始需求里的 `growthRatio`（内核已有 `nudge.growthRatio`，可经 `coreOverrides` 调）与 `protectedLastMessages`（≈ 内核 `preserveRecentMessages`）**不是本项目的一等旋钮**，是否采纳为命名键 / UI 项属维护者决策，本次未擅自并入预设（见 §6）。
 
@@ -69,7 +70,7 @@ return {
 - `ToolEnvironment`（`src/tools.ts`）新增 `readonly preset?: PresetName`，引擎构造时填 `this.config.preset`。**它不进 `kernelConfigFor`**——真正驱动 nudge 决策的是解析后的三个 pct（经 `kernelConfigFor(env)` 进入 `buildNudge` / 工具路径）。preset 只是让 `/acp status` 能说出「现在跑的是哪一档」。
 - `/acp status`（`src/commands.ts` `statusText`）在有 preset 时追加一行：
   `preset: <name> (<label>) [min X% · max Y% · emergency Z%]`
-  括号里的三个值读的是**构造期解析后的 env 值**，所以你在 preset 之上做的显式覆盖会如实显示；但 `coreOverrides.nudge` 的同名键在 `kernelConfigFor` 内部才落地，**这一行看不到它**——此时显示值会低于真实生效值（已知的展示口径缺口，README 已如实标注）。
+  括号里的三个值**镜像 `kernelConfigFor` 的合并顺序**（`coreOverrides.nudge` 同名键 > env 解析值），所以你在 preset 之上做的显式覆盖与 `coreOverrides.nudge` 的同名键都会如实显示——该行数字即真实生效值，不存在低估口径。
 
 ## 6. 明确不做的事（留给 owner）
 
