@@ -220,7 +220,7 @@ DSH 的每个模型请求都派生自其 append-only 会话日志（*surface*）
 | `nudgeMinContextLimitPct` | 内核默认 `0.45` | Nudge 窗口下界（用量占比）——仅作配置校验，增长路径的触发没有百分比下限——与 billion-context-pi 相同的默认值 |
 | `nudgeMaxContextLimitPct` | engine 默认 `0.70`（内核/pi 默认 `0.75`） | 过限线：超过此值则无论增长与否都触发 nudge——刻意低于宿主 compaction-basic 的 80% 自动压缩线，保证强制 nudge 先触发；显式配置优先（`coreOverrides.nudge` 同名键优先级更高，见下） |
 | `nudgeEmergencyThresholdPct` | engine 默认 `0.85`（内核/pi 默认 `0.95`） | 紧急 nudge（绕过每轮去重，但每个 user turn 最多注入 3 次——issue #108）——从 `0.95` 下调：95% 时模型已无操作空间且会被 80% 自动压缩线遮蔽；显式配置优先（`coreOverrides.nudge` 同名键优先级更高，见下） |
-| `preset` | — | （可选）一句话选择 nudge 的激进程度：`preserve` / `relaxed` / `balanced` / `efficient` / `aggressive`（详见下文「预设」）。只填充你**未显式设置**的三个 nudge 阈值，优先级 显式值 > `preset` > engine 默认；未知名称在构造期报错。不影响其他键（`modelContextLimit` / `autoNudge` / `prompts` / `coreOverrides`） |
+| `preset` | — | （可选）一句话选择 nudge 的激进程度：`preserve` / `relaxed` / `balanced` / `efficient` / `aggressive`（详见下文「预设」）。只填充你**未显式设置**的三个 nudge 阈值，优先级 显式值 > `preset` > engine 默认；未知名称在构造期报错，与显式阈值合并后若窗口反向（`min` / `max` / `emergency` 顺序错误）同样在构造期报错。不影响其他键（`modelContextLimit` / `autoNudge` / `prompts` / `coreOverrides`） |
 | `coreOverrides` | — | 任何其他 acp-kernel `Config` 覆盖（billion-context-pi 的 `coreOverrides` 逃生口）。合并顺序：内核默认 → 顶层 pct 配置 → `coreOverrides.nudge` 最后落地——同名键以它为准 |
 | `autoTools` | `true` | 在 `ctx.tools` 注册四个模型工具 |
 | `autoCommand` | `true` | 在 `ctx.commands` 注册 `/acp` 命令 |
@@ -241,9 +241,12 @@ DSH 的每个模型请求都派生自其 append-only 会话日志（*surface*）
 
 - **只填未设的阈值**：`preset` 仅填充你没有显式设置的 `nudge*ContextLimitPct`；同时写了 `preset` 和某个阈值时，该阈值以你的显式值为准（优先级 显式 > preset > 默认）。
 - **不碰其他旋钮**：`modelContextLimit`、`autoNudge`、`prompts`、`coreOverrides` 完全不受影响；`coreOverrides.nudge` 仍最后落地、同名键最高优先。
-- **查看当前档位**：`/acp status` 会打印生效的 `preset` 及其解析后的三个阈值（含你在其上做的显式覆盖）。
-- **拼错即报错**：未知名称在引擎构造期直接抛错并列出合法值（与自定义提示词模板同一约定），不会静默回退默认。
+- **查看当前档位**：`/acp status` 会打印生效的 `preset` 及其解析后的三个阈值（含你在其上做的显式覆盖）。注意这一行读的是构造期解析出的 env 值——`coreOverrides.nudge` 的同名键在 `kernelConfigFor` 内部才落地，**不会**反映在这一行上（此时该行显示的数字低于真实生效值）。
+- **拼错即报错**：未知名称在引擎构造期直接抛错并列出合法值（与自定义提示词模板同一约定），不会静默回退默认。注意 bundle 行本身不带 `config`，`preset` 只能由你自己的同 id `compaction-acp` 行提供；该行构造失败即挂载失败，profile 会在你修好配置前一直起不来（fail-fast 的既定行为）。
 - **运行时热切换**：预设目前走组合配置（安装 / `cordis.patch.yml`）；待 #75 的 settings.yaml 热加载落地后，可在 `/acp config` 里改。本 PR 先让它在组合层可用。
+- **反向窗口直接报错**：与显式阈值合并后若出现 `min > max`、`max > emergency` 或 `min > emergency`（例如 `preset: 'preserve'` 配 `nudgeMaxContextLimitPct: 0.5`），引擎在构造期抛错并列出三个值。内核对这种配置只打警告、不会拒绝，所以这道校验由引擎在 `resolveAcpConfig` 里补上。
+- **与宿主 80% 线赛跑的是 `max`**：每一档的触发点由 `max` 决定；`preserve` / `relaxed` 的 emergency（0.93 / 0.90）高于宿主 compaction-basic 的 80% 线，只是超过它之后的标签升级，宿主先压缩时不会到达。
+- **`min` 目前不影响运行时决策**：当前内核只在 `validateConfig` 里读它（`nudgeMinContextLimitPct` 的说明同此），所以同一档之间的实际差异来自 `max` 与 `emergency`。
 - **两个暂未纳入的旋钮**：原始需求里的 `growthRatio`（内核已有 `nudge.growthRatio`，可经 `coreOverrides` 调）和 `protectedLastMessages`（≈ 内核 `preserveRecentMessages`）目前不是本项目的一等旋钮；是否采纳为命名键 / UI 项由维护者决定，未擅自并入预设。
 
 ## 开发

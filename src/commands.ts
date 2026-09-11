@@ -53,10 +53,12 @@ async function statusText(env: ToolEnvironment, agent: Agent): Promise<string> {
     `  estimated context: ${estimated} / ${limit} (${Math.round((estimated / limit) * 100)}%)`,
     windowLine,
   ]
-  // Name the active preset (if any) with its effective thresholds: the whole
-  // point of a preset is that the user sees at a glance which tier is in effect
-  // and exactly what it resolved to (an explicit override on top of the preset
-  // shows through here too, since these read the resolved env values).
+  // Name the active preset (if any) with the thresholds it resolved to: the whole
+  // point of a preset is that the user sees at a glance which tier is in effect.
+  // These are the resolved `env` values, so an explicit override on top of the
+  // preset shows through — but a same-name key in `coreOverrides.nudge` does NOT:
+  // that one lands inside `kernelConfigFor` and the nudge decision further down
+  // uses it, so this line can understate the threshold actually in force.
   if (env.preset !== undefined) {
     const pct = (value?: number): string => `${Math.round((value ?? 0) * 100)}%`
     lines.push(

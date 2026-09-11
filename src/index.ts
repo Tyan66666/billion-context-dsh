@@ -143,6 +143,9 @@ export interface AcpConfig {
    * preset > engine default and a partial override on top of a preset still
    * wins. An unknown name fails engine construction (fail-fast). No effect on
    * any other knob (`modelContextLimit`, `autoNudge`, prompts, coreOverrides).
+   * An unknown name fails construction, and so does a merged window that ends up
+   * inverted (min > max, max > emergency or min > emergency — the kernel itself
+   * only warns about that, see `assertNudgeThresholdOrder`).
    */
   readonly preset?: PresetName
   /**
@@ -190,7 +193,16 @@ const DEFAULT_CONFIG: AcpConfig = {
 }
 
 export function resolveAcpConfig(config: Partial<AcpConfig> = {}): AcpConfig {
-  const base = { ...DEFAULT_CONFIG, ...config }
+  const resolved = resolvePresetThresholds({ ...DEFAULT_CONFIG, ...config }, config)
+  assertNudgeThresholdOrder(resolved)
+  return resolved
+}
+
+/**
+ * Apply `config.preset`, if one was given: an unknown name throws here at
+ * construction, and the preset fills ONLY the thresholds the caller left unset.
+ */
+function resolvePresetThresholds(base: AcpConfig, config: Partial<AcpConfig>): AcpConfig {
   if (base.preset === undefined) return base
   // Fail fast on an unknown preset name (same contract as prompt-template
   // validation): a typo must break construction, never silently fall back to
@@ -206,6 +218,37 @@ export function resolveAcpConfig(config: Partial<AcpConfig> = {}): AcpConfig {
     nudgeMinContextLimitPct: config.nudgeMinContextLimitPct ?? preset.nudgeMinContextLimitPct,
     nudgeMaxContextLimitPct: config.nudgeMaxContextLimitPct ?? preset.nudgeMaxContextLimitPct,
     nudgeEmergencyThresholdPct: config.nudgeEmergencyThresholdPct ?? preset.nudgeEmergencyThresholdPct,
+  }
+}
+
+/**
+ * Construction-time guard on the resolved nudge thresholds.
+ *
+ * The kernel tolerates an inverted window: `validateConfig` only *warns* when a
+ * turn runs ("Thresholds may not fire correctly"), it never rejects the config.
+ * That leaves a silent trap on this feature — combining a preset with a single
+ * explicit override is the whole point of the precedence rule, and it can
+ * produce e.g. `preset: 'preserve'` (min 0.55) + `nudgeMaxContextLimitPct:
+ * 0.5`, where the over-limit line sits below… and an emergency line above it
+ * fires first, inverting what the user asked for. We own this merge, so we
+ * reject the merged result loudly instead of shipping a window that quietly
+ * does something else.
+ *
+ * Only values that are actually set are compared: an omitted `min` falls back
+ * to the kernel default (0.45) inside the kernel, and mirroring that constant
+ * here would duplicate kernel state we deliberately do not track.
+ */
+function assertNudgeThresholdOrder(config: AcpConfig): void {
+  const { nudgeMinContextLimitPct: min, nudgeMaxContextLimitPct: max, nudgeEmergencyThresholdPct: emergency } = config
+  const describe = `min ${min ?? 'kernel default'} / max ${max ?? 'kernel default'} / emergency ${emergency ?? 'kernel default'}`
+  if (min !== undefined && max !== undefined && min > max) {
+    throw new Error(`nudge thresholds are inverted (${describe}) — nudgeMinContextLimitPct must be <= nudgeMaxContextLimitPct`)
+  }
+  if (max !== undefined && emergency !== undefined && max > emergency) {
+    throw new Error(`nudge thresholds are inverted (${describe}) — nudgeMaxContextLimitPct must be <= nudgeEmergencyThresholdPct`)
+  }
+  if (min !== undefined && emergency !== undefined && min > emergency) {
+    throw new Error(`nudge thresholds are inverted (${describe}) — nudgeMinContextLimitPct must be <= nudgeEmergencyThresholdPct`)
   }
 }
 

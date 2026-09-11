@@ -54,7 +54,8 @@ export interface NudgePreset {
 
 /**
  * The five tiers. Every row satisfies the kernel invariant
- * `min ≤ max ≤ emergency` (acp-kernel `validateConfig` rejects the reverse), and
+ * `min ≤ max ≤ emergency` (the kernel only WARNS on the reverse — it never rejects
+ * the config, so `resolveAcpConfig` rejects an inverted merged triple itself), and
  * all three values move monotonically toward "compress sooner" as you go down
  * the list. Values are fractions of the context window, not token counts.
  */

@@ -7,7 +7,8 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import { kernelConfigFor } from '../src/config.ts'
 import { buildNudge } from '../src/nudge.ts'
 import { AcpStateStore } from '../src/state.ts'
-import { resolveAcpConfig } from '../src/index.ts'
+import { AcpCompactionEngine, resolveAcpConfig } from '../src/index.ts'
+import { acpCommand } from '../src/commands.ts'
 import { PRESETS, PRESET_NAMES, isPresetName, resolvePreset, type PresetName } from '../src/presets.ts'
 import { appendTurn, appendUser } from './helpers.ts'
 
@@ -19,7 +20,9 @@ test('presets: every tier obeys the kernel invariant min <= max <= emergency, wi
     assert.ok(p.nudgeMinContextLimitPct > 0 && p.nudgeMinContextLimitPct < 1, `${name}: min in (0,1)`)
     assert.ok(p.nudgeMaxContextLimitPct > 0 && p.nudgeMaxContextLimitPct < 1, `${name}: max in (0,1)`)
     assert.ok(p.nudgeEmergencyThresholdPct > 0 && p.nudgeEmergencyThresholdPct < 1, `${name}: emergency in (0,1)`)
-    // acp-kernel validateConfig rejects the reverse; a preset must never ship an invalid row.
+    // The kernel only *warns* about a reversed window (`validateConfig` never rejects a
+    // config), so a preset must never ship an invalid row AND the engine's own merge
+    // must not be able to produce one.
     assert.ok(p.nudgeMinContextLimitPct <= p.nudgeMaxContextLimitPct, `${name}: min <= max`)
     assert.ok(p.nudgeMaxContextLimitPct <= p.nudgeEmergencyThresholdPct, `${name}: max <= emergency`)
   }
@@ -35,6 +38,22 @@ test('presets: tiers form a monotonic spectrum (each step toward "aggressive" lo
     assert.ok(later.nudgeMaxContextLimitPct < earlier.nudgeMaxContextLimitPct, `max drops ${PRESET_NAMES[i - 1]} -> ${PRESET_NAMES[i]}`)
     assert.ok(later.nudgeEmergencyThresholdPct < earlier.nudgeEmergencyThresholdPct, `emergency drops ${PRESET_NAMES[i - 1]} -> ${PRESET_NAMES[i]}`)
   }
+})
+
+test('presets: every tier pins its exact three thresholds (the README table is a contract)', () => {
+  // The invariant + monotonic tests above would all survive a silent value tweak
+  // (e.g. aggressive.min 0.30 -> 0.35), yet the README documents these numbers as
+  // the feature's contract for users tuning a deployment. Pin all fifteen literally.
+  assert.deepEqual(
+    PRESET_NAMES.map((name) => [name, PRESETS[name].nudgeMinContextLimitPct, PRESETS[name].nudgeMaxContextLimitPct, PRESETS[name].nudgeEmergencyThresholdPct]),
+    [
+      ['preserve', 0.55, 0.78, 0.93],
+      ['relaxed', 0.5, 0.75, 0.9],
+      ['balanced', 0.45, 0.7, 0.85],
+      ['efficient', 0.4, 0.6, 0.78],
+      ['aggressive', 0.3, 0.5, 0.7],
+    ],
+  )
 })
 
 test('presets: PRESET_NAMES covers exactly the five PRESETS keys, in documented order', () => {
@@ -98,8 +117,8 @@ test('config: a preset fills all three nudge thresholds when none are set explic
 })
 
 test('config: explicit threshold wins over the preset (precedence explicit > preset > default)', () => {
-  const resolved = resolveAcpConfig({ preset: 'aggressive', nudgeMaxContextLimitPct: 0.9 })
-  assert.equal(resolved.nudgeMaxContextLimitPct, 0.9, 'explicit max overrides the preset')
+  const resolved = resolveAcpConfig({ preset: 'aggressive', nudgeMaxContextLimitPct: 0.6 })
+  assert.equal(resolved.nudgeMaxContextLimitPct, 0.6, 'explicit max overrides the preset')
   // The other two still come from the preset.
   assert.equal(resolved.nudgeMinContextLimitPct, PRESETS.aggressive.nudgeMinContextLimitPct)
   assert.equal(resolved.nudgeEmergencyThresholdPct, PRESETS.aggressive.nudgeEmergencyThresholdPct)
@@ -117,6 +136,29 @@ test('config: unknown preset name fails resolution loudly (fail-fast, no silent 
     () => resolveAcpConfig({ preset: 'maximum' as PresetName }),
     /unknown preset "maximum" — valid presets: preserve, relaxed, balanced, efficient, aggressive/,
   )
+})
+
+test('config: an unknown preset fails engine CONSTRUCTION, not the first turn', () => {
+  // resolveAcpConfig is only one caller; the engine is what a composition row
+  // instantiates, so pin the failure at that boundary too (a typo in a
+  // `compaction-acp` row takes the whole profile down — intentional fail-fast).
+  assert.throws(
+    () => new AcpCompactionEngine(new Context(), { preset: 'maximum' as PresetName }),
+    /unknown preset "maximum" — valid presets: preserve, relaxed, balanced, efficient, aggressive/,
+  )
+})
+
+test('config: an explicit override that inverts a preset window fails at construction', () => {
+  // The kernel tolerates this: validateConfig only console.warns ("Thresholds may
+  // not fire correctly"). Left alone, `preset: 'preserve'` (min 0.55) + max 0.5
+  // ships a window whose over-limit line sits under the emergency line, so the
+  // emergency path fires first and the tier does not mean what it says.
+  assert.throws(
+    () => resolveAcpConfig({ preset: 'preserve', nudgeMaxContextLimitPct: 0.5 }),
+    /nudge thresholds are inverted \(min 0\.55 \/ max 0\.5 \/ emergency 0\.93\) — nudgeMinContextLimitPct must be <= nudgeMaxContextLimitPct/,
+  )
+  // The same override at or above min still resolves (a preset is a starting point).
+  assert.equal(resolveAcpConfig({ preset: 'preserve', nudgeMaxContextLimitPct: 0.6 }).nudgeMaxContextLimitPct, 0.6)
 })
 
 test('config: omitting the preset leaves today\'s behavior byte-for-byte intact', () => {
@@ -149,6 +191,25 @@ test('config: the preset-resolved thresholds reach kernelConfigFor unchanged', (
   assert.equal(kernelConfig.nudge.growthRatio, defaultConfig(128000).nudge.growthRatio)
 })
 
+test('config: a same-name key in coreOverrides.nudge outranks the preset (documented last merge)', () => {
+  const resolved = resolveAcpConfig({ preset: 'efficient' })
+  const fromPreset = kernelConfigFor({
+    modelContextLimit: 128000,
+    nudgeMaxContextLimitPct: resolved.nudgeMaxContextLimitPct,
+  })
+  assert.equal(fromPreset.nudge.maxContextLimitPct, PRESETS.efficient.nudgeMaxContextLimitPct, 'the preset decides max by default')
+
+  // A real deployment writes a full nudge object in its composition row; the
+  // engine spreads it last, so its keys win over both the kernel default and the
+  // preset-resolved pct (README documents this precedence).
+  const overridden = kernelConfigFor({
+    modelContextLimit: 128000,
+    nudgeMaxContextLimitPct: resolved.nudgeMaxContextLimitPct,
+    coreOverrides: { nudge: { ...defaultConfig(128000).nudge, maxContextLimitPct: 0.95 } },
+  })
+  assert.equal(overridden.nudge.maxContextLimitPct, 0.95, 'coreOverrides.nudge lands last')
+})
+
 // --- End-to-end: the preset actually changes the nudge decision -------------
 
 function fakeAgent(session: Session): Agent {
@@ -177,9 +238,9 @@ function nudgeEnvFor(preset?: PresetName) {
   }
 }
 
-test('config: an aggressive-tier preset makes the nudge fire where the default tier stays quiet', () => {
-  // At ~61% usage: below the balanced 0.70 line (growth-gated, fresh state ->
-  // no nudge) but above the efficient 0.60 line (over-limit -> fires).
+test('config: a lower tier lowers the over-limit line — efficient fires where balanced stays quiet', () => {
+  // At ~61% usage: below the balanced max 0.70 line (and below its min, so the
+  // growth gate keeps it quiet) but above the efficient max 0.60 line, which fires
   const agent = fakeAgent(midSession())
 
   const quiet = buildNudge(agent, nudgeEnvFor('balanced'), new Map<string, number>())
@@ -188,4 +249,28 @@ test('config: an aggressive-tier preset makes the nudge fire where the default t
   const loud = buildNudge(agent, nudgeEnvFor('efficient'), new Map<string, number>())
   assert.ok(loud !== null, 'efficient (max 0.60) fires the over-limit nudge at ~61% usage')
   assert.equal(loud!.emergency, false, '61% is above max but below the emergency line')
+})
+
+// --- Display: /acp status names the tier ------------------------------------
+
+test('config: /acp status names the preset with the thresholds it resolved to', async () => {
+  const agent = fakeAgent(midSession())
+  const result = await acpCommand(nudgeEnvFor('efficient')).handler({
+    commandId: 'cmd-test' as never,
+    agent,
+    rawInput: 'status',
+    signal: new AbortController().signal,
+  } as never)
+
+  assert.equal(result.kind, 'success')
+  const text = (result as { text: string }).text
+  // The panel prints the composition-time env values, so an explicit override on
+  // top of the preset shows through — the whole point of the display line. It can
+  // NOT see a same-name key in coreOverrides.nudge (that lands in kernelConfigFor);
+  // the README states that limitation, and the kernelConfigFor test above pins the
+  // precedence the panel cannot show.
+  assert.match(
+    text,
+    /\n {2}preset: efficient \(trim more often — favors low token usage over keeping full history\) \[min 40% · max 60% · emergency 78%\]/,
+  )
 })
