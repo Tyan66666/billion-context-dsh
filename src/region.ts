@@ -13,28 +13,24 @@
 
 import { randomUUID } from 'node:crypto'
 import type { Session, SessionEvent, SessionEventMap } from '@deepseek-ai/dsh-session'
-import { CompactionId, compactCheckpointSource } from '@deepseek-ai/dsh-compaction'
-// UPSTREAM (issue #124): dsh-compaction@0.1.2-rc.1's toolPairingBalanced*
-// helpers read the removed `session.events` API and crash on every 0.1.2
-// host. Use the local mirror (src/tool-pairing.ts) until the host fix ships,
-// then delete src/tool-pairing.ts and restore the host helpers here.
-import { toolPairingBalancedAfter, toolPairingBalancedBefore } from './tool-pairing.ts'
-import { createAssistantMessage, createUserMessage, type ContentBlock } from '@deepseek-ai/dsh-llm'
+// toolPairingBalanced* come from the host package: the published seam reads
+// only eventAt / surface.replaceGeneration, present on every supported
+// session version. The issue #124 local-mirror workaround is gone (see
+// docs/dsh-porting-verification.md); tests/tool-pairing-host.test.ts guards it.
+import { CompactionId, compactCheckpointSource, toolPairingBalancedAfter, toolPairingBalancedBefore } from '@deepseek-ai/dsh-compaction'
+import { createUserMessage, type ContentBlock } from '@deepseek-ai/dsh-llm'
 import { defaultCountTokens } from 'acp-kernel'
 import { extractEventText, extractText, toolCallIdOfResultEvent } from './messages.ts'
 import { hostPriceEvent } from './host-tokens.ts'
 import { eventAtOf, sessionEventsOf } from './session-events.ts'
 
 /**
- * A surface sequence number as the INSTALLED `dsh-session` sees it. On the
- * alpha line dsh-session brands these as `SessionSeq` (a branded `number`,
- * see dsh-session types.d.ts); on the rc.6 baseline they are plain `number`.
- * Deriving the element type from `Session['surface']` keeps this module
- * type-correct against BOTH without naming the alpha-only brand — which does
- * not exist on rc.6, so naming it would break the rc.6 baseline typecheck.
- * `as SurfaceSeq` below is the single admission point: a plain `number` that a
- * caller (model ref, ledger field) produces is admitted as a surface seq only
- * at the exact write/index site that the installed dsh-session brands.
+ * A surface sequence number as the INSTALLED `dsh-session` sees it. Since the
+ * 0.1.5 baseline dsh-session brands these as `SessionSeq` (a branded
+ * `number`). Deriving the element type from `Session['surface']` avoids
+ * naming the brand directly; `as SurfaceSeq` is the single admission point —
+ * a plain `number` produced by a caller (model ref, ledger field) is admitted
+ * as a surface seq only at the exact write/index site the session brands.
  */
 type SurfaceSeq = Session['surface']['nodes'][number]
 
@@ -173,7 +169,8 @@ type StaleRangeRecovery =
  *     span. Block checkpoint nodes are deliberately excluded: distilling a
  *     block on a STALE reference would silently change block structure the
  *     model never intended to touch — distillation requires targeting a live
- *     checkpoint seq directly.
+ *     checkpoint seq directly. Host system-prompt nodes (`system/message`)
+ *     are excluded too — protected fixed overhead, not compressible content.
  */
 function recoverStaleRange(session: Session, start: number, end: number): StaleRangeRecovery {
   if (eventAtOf(session, start) === undefined || eventAtOf(session, end) === undefined) {
@@ -183,7 +180,10 @@ function recoverStaleRange(session: Session, start: number, end: number): StaleR
   const liveInside = session.surface.nodes
     .filter((seq) => seq >= start && seq <= end)
     .sort((a, b) => a - b)
-  const plain = liveInside.filter((seq) => !isCheckpointNode(eventAtOf(session, seq)!))
+  const plain = liveInside.filter((seq) => {
+    const event = eventAtOf(session, seq)!
+    return !isCheckpointNode(event) && !isSystemNode(event)
+  })
   if (plain.length === 0) {
     const coveringBlockIds = rebuildBlockLedger(sessionEventsOf(session))
       .filter((entry) => entry.shadowedSeqs.some((seq) => seq >= start && seq <= end))
@@ -271,10 +271,25 @@ export function resolveSurfaceRange(
     throw new Error(`billion-context-dsh: reversed range ${start}..${end}`)
   }
   // A boundary must be BOTH tool-pairing-balanced AND carry a bare-seq ref.
-  const cleanBefore = (index: number): boolean =>
-    toolPairingBalancedBefore(session, nodes[index]!) && hasPlainRef(session, nodes[index]!)
-  const cleanAfter = (index: number): boolean =>
-    toolPairingBalancedAfter(session, nodes[index]!) && hasPlainRef(session, nodes[index]!)
+  // A boundary must be BOTH tool-pairing-balanced AND carry a bare-seq ref,
+  // and never a host system prompt. The system check is explicit, not
+  // incidental: `hasPlainRef` happens to return false for `system/message`,
+  // but riding that default would silently invert if the projection ever
+  // learns to emit a bare-seq ref for system nodes.
+  const cleanBefore = (index: number): boolean => {
+    const event = eventAtOf(session, nodes[index]!)
+    return event !== undefined
+      && !isSystemNode(event)
+      && toolPairingBalancedBefore(session, nodes[index]!)
+      && hasPlainRef(session, nodes[index]!)
+  }
+  const cleanAfter = (index: number): boolean => {
+    const event = eventAtOf(session, nodes[index]!)
+    return event !== undefined
+      && !isSystemNode(event)
+      && toolPairingBalancedAfter(session, nodes[index]!)
+      && hasPlainRef(session, nodes[index]!)
+  }
   let startIdx = requestedStartIdx
   let endIdx = requestedEndIdx
   // First pass: nudge inward to the nearest clean cuts.
@@ -437,8 +452,13 @@ export function runCompactionTransaction(
       content: input.summary,
       source: compactCheckpointSource(compactionId),
     })
+    // The replace op MUST use the 0.1.5 field names: dsh-session's validator
+    // accepts exactly { op, startSeq, endSeq } (exactly three keys) and rejects
+    // the pre-0.1.5 { op, start, end } dialect with "invalid replace surfaceOp"
+    // (issue #136). Both validators force exactly-three-keys, so a single
+    // dialect is the only option — hence the peer floor at 0.1.5-alpha.1.
     seqs.push(session.append('user/message', message, {
-      surfaceOp: { op: 'replace', start: input.start as SurfaceSeq, end: input.end as SurfaceSeq },
+      surfaceOp: { op: 'replace', startSeq: input.start as SurfaceSeq, endSeq: input.end as SurfaceSeq },
       sourceEventSeqs: [...input.shadowedSeqs] as SurfaceSeq[],
     }).seq)
 
@@ -540,6 +560,32 @@ function isCheckpointNode(event: SessionEvent): boolean {
   return source?.plugin === 'compact'
 }
 
+/**
+ * Whether a surface user message was authored by this engine (plugin
+ * `billion-context-dsh`): both the empty prune tombstones written by
+ * `hideSurfaceSeqs` AND the compress call/result hiding nodes (which carry
+ * real tool-result text). The name is historical — it is NOT limited to
+ * empty tombstones; it matches any plugin-authored user turn, which is the
+ * intent (the last-user scan must skip every synthetic node, regardless of
+ * whether it carries text).
+ */
+function isPruneTombstone(event: SessionEvent): boolean {
+  if (event.type !== 'user/message') return false
+  const source = (event.data as { source?: { plugin?: string } }).source
+  return source?.plugin === 'billion-context-dsh'
+}
+
+/**
+ * Whether a surface node is a host-owned system prompt (`system/message`, new
+ * in dsh-session 0.1.5). The host protects it — replacing node 0 throws
+ * ("node 0 holds the system prompt …"), and its content is fixed overhead, not
+ * conversation — so it must never be offered as compressible nor count as
+ * still-live content when a stale range snaps back.
+ */
+function isSystemNode(event: SessionEvent): boolean {
+  return event.type === 'system/message'
+}
+
 /** Tool-call ids carried by one assistant surface message. */
 function toolCallIdsOfEvent(event: SessionEvent): string[] {
   if (event.type !== 'assistant/message') return []
@@ -555,31 +601,21 @@ function toolCallIdsOfEvent(event: SessionEvent): string[] {
 }
 
 /**
- * Provider/model to stamp on a synthetic empty assistant pruning node.
+ * Durable model-free prune: append `compaction/prune` as the shadow price,
+ * then replace the given surface seqs with a user message. dsh-session 0.1.5+
+ * allows only user/message (and system/message) replacements to cite source
+ * events — assistant/message FORBIDS `sourceEventSeqs` because it embeds its
+ * own provider stream — so there is no invisible replacement node anymore:
+ * every hidden span becomes a user message. Callers with meaningful text pass
+ * it (compress call/result hiding keeps the tool outcome visible to the
+ * model); callers without get the fixed prune note. The originals remain in
+ * the append-only log.
  */
-function assistantProviderModel(event: SessionEvent): { provider: string; model: string } {
-  if (event.type === 'assistant/message') {
-    const message = (event.data as { message?: { source?: { provider?: unknown; model?: unknown } } }).message
-    return {
-      provider: typeof message?.source?.provider === 'string' ? message.source.provider : 'billion-context-dsh',
-      model: typeof message?.source?.model === 'string' ? message.source.model : 'surface-prune',
-    }
-  }
-  return { provider: 'billion-context-dsh', model: 'surface-prune' }
-}
+export const PRUNE_NOTE = '(removed by context management)'
 
-/**
- * Durable model-free prune: append `compaction/prune` as the shadow price, then
- * replace the given surface seqs with either a user message carrying `text`
- * (used for compress call/result hiding, so the model still sees the tool
- * outcome) or an EMPTY assistant message (used for orphan cleanup, which DSH
- * derives to nothing). The originals remain in the append-only log.
- */
 function hideSurfaceSeqs(
   session: Session,
   seqs: readonly number[],
-  provider: string,
-  model: string,
   text?: string,
   priceEvent: (event: SessionEvent) => number = hostPriceEvent,
 ): void {
@@ -599,22 +635,12 @@ function hideSurfaceSeqs(
     shadowedSeqs: [...seqs] as SurfaceSeq[],
     shadowedTokenCount,
   })
-  if (text !== undefined) {
-    session.append('user/message', createUserMessage({
-      content: [{ type: 'text', text }],
-      source: { kind: 'plugin', plugin: 'billion-context-dsh' },
-    }), {
-      surfaceOp: { op: 'replace', start: start as SurfaceSeq, end: end as SurfaceSeq },
-      sourceEventSeqs: [...seqs] as SurfaceSeq[],
-    })
-    return
-  }
-  session.append('assistant/message', {
-    turn: findOpenTurn(sessionEventsOf(session)) ?? 0,
-    step: 0,
-    message: createAssistantMessage({ content: [], source: { provider, model } }),
-  }, {
-    surfaceOp: { op: 'replace', start: start as SurfaceSeq, end: end as SurfaceSeq },
+  const body = text !== undefined && text.trim().length > 0 ? text : PRUNE_NOTE
+  session.append('user/message', createUserMessage({
+    content: [{ type: 'text', text: body }],
+    source: { kind: 'plugin', plugin: 'billion-context-dsh' },
+  }), {
+    surfaceOp: { op: 'replace', startSeq: start as SurfaceSeq, endSeq: end as SurfaceSeq },
     sourceEventSeqs: [...seqs] as SurfaceSeq[],
   })
 }
@@ -660,10 +686,9 @@ export function hideCompressToolPair(session: Session, callId: string, resultSeq
   // Only hide an actually adjacent pair; never shadow unrelated messages that
   // happen to sit between a stale call and result.
   if (startIdx < 0 || endIdx < 0 || endIdx - startIdx !== 1) return false
-  const { provider, model } = assistantProviderModel(events[callSeq]!)
   const resultEvent = events[resolvedResultSeq]
   const resultText = resultEvent === undefined ? '' : extractEventText(resultEvent)
-  hideSurfaceSeqs(session, [callSeq, resolvedResultSeq], provider, model, resultText.trim().length > 0 ? resultText : undefined)
+  hideSurfaceSeqs(session, [callSeq, resolvedResultSeq], resultText)
   return true
 }
 
@@ -763,10 +788,8 @@ export function stripOrphanedSurfaceToolMessages(
   const hidden = [...hiddenSet].sort((a, b) => a - b)
   let count = 0
   for (const seq of hidden) {
-    const event = eventAtOf(session, seq)
-    if (event === undefined) continue
-    const { provider, model } = assistantProviderModel(event)
-    hideSurfaceSeqs(session, [seq], provider, model)
+    if (eventAtOf(session, seq) === undefined) continue
+    hideSurfaceSeqs(session, [seq])
     count += 1
   }
   return count
@@ -849,7 +872,10 @@ export function buildCompressibleSeqRanges(
   }
   for (let index = nodes.length - 1; index >= 0; index -= 1) {
     const event = eventAtOf(session, nodes[index]!)
-    if (event?.type === 'user/message' && !isCheckpointNode(event)) {
+    // Prune tombstones are not user turns — skip them so orphan cleanup that
+    // leaves a tombstone at the tail of history cannot steal protection from
+    // the real last user message.
+    if (event?.type === 'user/message' && !isCheckpointNode(event) && !isPruneTombstone(event)) {
       protectedSeqs.add(nodes[index]!)
       break
     }
@@ -862,7 +888,7 @@ export function buildCompressibleSeqRanges(
   }
   for (const seq of nodes) {
     const event = eventAtOf(session, seq)
-    if (event === undefined || protectedSeqs.has(seq) || isCheckpointNode(event)) {
+    if (event === undefined || protectedSeqs.has(seq) || isCheckpointNode(event) || isSystemNode(event)) {
       flush()
       continue
     }

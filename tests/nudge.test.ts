@@ -230,7 +230,7 @@ test('M4: buildNudgeText renders the distillable tier-2 line with surface seqs',
   }
   const text = buildNudgeText(decision, false, session)
   assert.match(text, /Tier 2: 1 tier-1 block\(s\) distillable \(4750 tokens\)/)
-  const summarySeq = rebuildBlockLedger(session.events)[0]!.summarySeq
+  const summarySeq = rebuildBlockLedger(session.snapshotEvents())[0]!.summarySeq
   assert.ok(summarySeq !== undefined, 'the checkpoint seq is derivable from the log')
   assert.match(text, new RegExp(`seqs ${summarySeq}`), 'the line carries the surface seq of the block summary node')
 })

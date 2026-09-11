@@ -2664,7 +2664,8 @@ var LruMap = class extends Map {
 
 // src/region.ts
 import { randomUUID } from "crypto";
-import { CompactionId, compactCheckpointSource } from "@deepseek-ai/dsh-compaction";
+import { CompactionId, compactCheckpointSource, toolPairingBalancedAfter, toolPairingBalancedBefore } from "@deepseek-ai/dsh-compaction";
+import { createUserMessage } from "@deepseek-ai/dsh-llm";
 
 // src/session-events.ts
 function sessionEventsOf(session) {
@@ -2677,78 +2678,6 @@ function eventAtOf(session, seq) {
   if (typeof eventAt === "function") return eventAt.call(session, seq);
   return session.events[seq];
 }
-
-// src/tool-pairing.ts
-var balanceCacheBySession = /* @__PURE__ */ new WeakMap();
-function eventDelta(event) {
-  if (event.type === "tool/result") return -1;
-  if (event.type === "assistant/message") {
-    const content = event.data.message?.content;
-    if (!Array.isArray(content)) return 0;
-    let calls = 0;
-    for (const block of content) {
-      if (block !== null && typeof block === "object" && block.type === "tool-call") calls += 1;
-    }
-    return calls;
-  }
-  return 0;
-}
-function eventForSeq(session, seq) {
-  const event = eventAtOf(session, seq);
-  if (event === void 0 || event.seq !== seq) {
-    throw new Error(`tool-pairing balance: surface seq ${seq} has no matching session event (corrupt surface)`);
-  }
-  return event;
-}
-function extendCache(session, cache2, seqs) {
-  const processed = cache2.cutBalanced.length - 1;
-  const tail = seqs.slice(processed);
-  const pendingCuts = [];
-  let inProgressToolCalls = cache2.inProgressToolCalls;
-  for (const seq of tail) {
-    inProgressToolCalls += eventDelta(eventForSeq(session, seq));
-    if (inProgressToolCalls < 0) {
-      throw new Error(`tool-pairing balance: tool/result at surface seq ${seq} has no matching tool-call (corrupt surface)`);
-    }
-    pendingCuts.push(inProgressToolCalls === 0);
-  }
-  tail.forEach((seq, offset) => cache2.indexBySeq.set(seq, processed + offset));
-  cache2.cutBalanced = cache2.cutBalanced.concat(pendingCuts);
-  cache2.inProgressToolCalls = inProgressToolCalls;
-  return cache2;
-}
-function balanceCache(session) {
-  const seqs = session.surface.nodes;
-  const generation = session.surface.replaceGeneration;
-  const cached = balanceCacheBySession.get(session);
-  if (cached === void 0 || cached.generation !== generation || cached.cutBalanced.length - 1 > seqs.length) {
-    const rebuilt = extendCache(session, {
-      generation,
-      cutBalanced: [true],
-      indexBySeq: /* @__PURE__ */ new Map(),
-      inProgressToolCalls: 0
-    }, seqs);
-    balanceCacheBySession.set(session, rebuilt);
-    return rebuilt;
-  }
-  if (cached.cutBalanced.length - 1 < seqs.length) return extendCache(session, cached, seqs);
-  return cached;
-}
-function cutBalance(cache2, seq, offset) {
-  const index = cache2.indexBySeq.get(seq);
-  const balanced = index === void 0 ? void 0 : cache2.cutBalanced[index + offset];
-  if (balanced === void 0) throw new Error(`tool-pairing balance: surface seq ${seq} not found`);
-  return balanced;
-}
-function toolPairingBalancedBefore(session, seq) {
-  return cutBalance(balanceCache(session), seq, 0);
-}
-function toolPairingBalancedAfter(session, seq) {
-  return cutBalance(balanceCache(session), seq, 1);
-}
-
-// src/region.ts
-import { createAssistantMessage, createUserMessage } from "@deepseek-ai/dsh-llm";
 
 // src/messages.ts
 function extractText(content) {
@@ -3016,7 +2945,10 @@ function recoverStaleRange(session, start, end) {
     return { kind: "unresolvable", failedEdge };
   }
   const liveInside = session.surface.nodes.filter((seq) => seq >= start && seq <= end).sort((a, b) => a - b);
-  const plain = liveInside.filter((seq) => !isCheckpointNode(eventAtOf(session, seq)));
+  const plain = liveInside.filter((seq) => {
+    const event = eventAtOf(session, seq);
+    return !isCheckpointNode(event) && !isSystemNode(event);
+  });
   if (plain.length === 0) {
     const coveringBlockIds = rebuildBlockLedger(sessionEventsOf(session)).filter((entry) => entry.shadowedSeqs.some((seq) => seq >= start && seq <= end)).map((entry) => entry.blockId);
     return { kind: "already-compressed", coveringBlockIds };
@@ -3058,8 +2990,14 @@ function resolveSurfaceRange(session, start, end) {
   if (start > end) {
     throw new Error(`billion-context-dsh: reversed range ${start}..${end}`);
   }
-  const cleanBefore = (index) => toolPairingBalancedBefore(session, nodes[index]) && hasPlainRef(session, nodes[index]);
-  const cleanAfter = (index) => toolPairingBalancedAfter(session, nodes[index]) && hasPlainRef(session, nodes[index]);
+  const cleanBefore = (index) => {
+    const event = eventAtOf(session, nodes[index]);
+    return event !== void 0 && !isSystemNode(event) && toolPairingBalancedBefore(session, nodes[index]) && hasPlainRef(session, nodes[index]);
+  };
+  const cleanAfter = (index) => {
+    const event = eventAtOf(session, nodes[index]);
+    return event !== void 0 && !isSystemNode(event) && toolPairingBalancedAfter(session, nodes[index]) && hasPlainRef(session, nodes[index]);
+  };
   let startIdx = requestedStartIdx;
   let endIdx = requestedEndIdx;
   while (startIdx <= endIdx && !cleanBefore(startIdx)) {
@@ -3136,7 +3074,7 @@ function runCompactionTransaction(session, input) {
       source: compactCheckpointSource(compactionId)
     });
     seqs.push(session.append("user/message", message, {
-      surfaceOp: { op: "replace", start: input.start, end: input.end },
+      surfaceOp: { op: "replace", startSeq: input.start, endSeq: input.end },
       sourceEventSeqs: [...input.shadowedSeqs]
     }).seq);
     seqs.push(session.append("compaction/end", { compactionId, turn }).seq);
@@ -3206,6 +3144,14 @@ function isCheckpointNode(event) {
   const source = event.data.source;
   return source?.plugin === "compact";
 }
+function isPruneTombstone(event) {
+  if (event.type !== "user/message") return false;
+  const source = event.data.source;
+  return source?.plugin === "billion-context-dsh";
+}
+function isSystemNode(event) {
+  return event.type === "system/message";
+}
 function toolCallIdsOfEvent(event) {
   if (event.type !== "assistant/message") return [];
   const content = event.data.message?.content;
@@ -3218,17 +3164,8 @@ function toolCallIdsOfEvent(event) {
   }
   return ids;
 }
-function assistantProviderModel(event) {
-  if (event.type === "assistant/message") {
-    const message = event.data.message;
-    return {
-      provider: typeof message?.source?.provider === "string" ? message.source.provider : "billion-context-dsh",
-      model: typeof message?.source?.model === "string" ? message.source.model : "surface-prune"
-    };
-  }
-  return { provider: "billion-context-dsh", model: "surface-prune" };
-}
-function hideSurfaceSeqs(session, seqs, provider, model, text, priceEvent = hostPriceEvent) {
+var PRUNE_NOTE = "(removed by context management)";
+function hideSurfaceSeqs(session, seqs, text, priceEvent = hostPriceEvent) {
   if (seqs.length === 0) return;
   const start = seqs[0];
   const end = seqs[seqs.length - 1];
@@ -3242,22 +3179,12 @@ function hideSurfaceSeqs(session, seqs, provider, model, text, priceEvent = host
     shadowedSeqs: [...seqs],
     shadowedTokenCount
   });
-  if (text !== void 0) {
-    session.append("user/message", createUserMessage({
-      content: [{ type: "text", text }],
-      source: { kind: "plugin", plugin: "billion-context-dsh" }
-    }), {
-      surfaceOp: { op: "replace", start, end },
-      sourceEventSeqs: [...seqs]
-    });
-    return;
-  }
-  session.append("assistant/message", {
-    turn: findOpenTurn(sessionEventsOf(session)) ?? 0,
-    step: 0,
-    message: createAssistantMessage({ content: [], source: { provider, model } })
-  }, {
-    surfaceOp: { op: "replace", start, end },
+  const body = text !== void 0 && text.trim().length > 0 ? text : PRUNE_NOTE;
+  session.append("user/message", createUserMessage({
+    content: [{ type: "text", text: body }],
+    source: { kind: "plugin", plugin: "billion-context-dsh" }
+  }), {
+    surfaceOp: { op: "replace", startSeq: start, endSeq: end },
     sourceEventSeqs: [...seqs]
   });
 }
@@ -3288,10 +3215,9 @@ function hideCompressToolPair(session, callId, resultSeq) {
   const startIdx = nodes.indexOf(callSeq);
   const endIdx = nodes.indexOf(resolvedResultSeq);
   if (startIdx < 0 || endIdx < 0 || endIdx - startIdx !== 1) return false;
-  const { provider, model } = assistantProviderModel(events[callSeq]);
   const resultEvent = events[resolvedResultSeq];
   const resultText = resultEvent === void 0 ? "" : extractEventText(resultEvent);
-  hideSurfaceSeqs(session, [callSeq, resolvedResultSeq], provider, model, resultText.trim().length > 0 ? resultText : void 0);
+  hideSurfaceSeqs(session, [callSeq, resolvedResultSeq], resultText);
   return true;
 }
 function stripOrphanedSurfaceToolMessages(session, inFlightCallIds = /* @__PURE__ */ new Set()) {
@@ -3359,10 +3285,8 @@ function stripOrphanedSurfaceToolMessages(session, inFlightCallIds = /* @__PURE_
   const hidden = [...hiddenSet].sort((a, b) => a - b);
   let count = 0;
   for (const seq of hidden) {
-    const event = eventAtOf(session, seq);
-    if (event === void 0) continue;
-    const { provider, model } = assistantProviderModel(event);
-    hideSurfaceSeqs(session, [seq], provider, model);
+    if (eventAtOf(session, seq) === void 0) continue;
+    hideSurfaceSeqs(session, [seq]);
     count += 1;
   }
   return count;
@@ -3400,7 +3324,7 @@ function buildCompressibleSeqRanges(session, opts = {}) {
   }
   for (let index = nodes.length - 1; index >= 0; index -= 1) {
     const event = eventAtOf(session, nodes[index]);
-    if (event?.type === "user/message" && !isCheckpointNode(event)) {
+    if (event?.type === "user/message" && !isCheckpointNode(event) && !isPruneTombstone(event)) {
       protectedSeqs.add(nodes[index]);
       break;
     }
@@ -3413,7 +3337,7 @@ function buildCompressibleSeqRanges(session, opts = {}) {
   };
   for (const seq of nodes) {
     const event = eventAtOf(session, seq);
-    if (event === void 0 || protectedSeqs.has(seq) || isCheckpointNode(event)) {
+    if (event === void 0 || protectedSeqs.has(seq) || isCheckpointNode(event) || isSystemNode(event)) {
       flush();
       continue;
     }

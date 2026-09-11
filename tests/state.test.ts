@@ -55,7 +55,7 @@ test('M2: kernel blocks rehydrate from the log with tier and original coverage',
   const session = buildTextSession(12)
   const compress = toolOf(env, 'compress')
   await compress.execute({ content: [{ startSeq: 1, endSeq: 5, summary: TIER_SUMMARY }] } as never, fakeExec(session))
-  const summarySeq = rebuildBlockLedger(session.events)[0]!.summarySeq!
+  const summarySeq = rebuildBlockLedger(session.snapshotEvents())[0]!.summarySeq!
   await compress.execute({ content: [{ startSeq: summarySeq, endSeq: summarySeq, summary: TIER_SUMMARY }] } as never, fakeExec(session))
 
   // A FRESH store (restarted engine) rebuilds the kernel state from the log.
@@ -79,9 +79,9 @@ test('M2: rehydrated blocks stay anchorable — tier 3 works after a restart', a
   const session = buildTextSession(12)
   const compress = toolOf(env, 'compress')
   await compress.execute({ content: [{ startSeq: 1, endSeq: 5, summary: TIER_SUMMARY }] } as never, fakeExec(session))
-  const summarySeq = rebuildBlockLedger(session.events)[0]!.summarySeq!
+  const summarySeq = rebuildBlockLedger(session.snapshotEvents())[0]!.summarySeq!
   await compress.execute({ content: [{ startSeq: summarySeq, endSeq: summarySeq, summary: TIER_SUMMARY }] } as never, fakeExec(session))
-  const ledger2 = rebuildBlockLedger(session.events)
+  const ledger2 = rebuildBlockLedger(session.snapshotEvents())
   const tier2Seq = ledger2[1]!.summarySeq!
   assert.equal(ledger2[1]!.tier, 2)
 
@@ -93,7 +93,7 @@ test('M2: rehydrated blocks stay anchorable — tier 3 works after a restart', a
   } as never, fakeExec(session))
   assert.match((result as { text: string }).text, /tier 3/, 'the rehydrated tier-2 block anchors after a restart')
 
-  const after = rebuildBlockLedger(session.events)
+  const after = rebuildBlockLedger(session.snapshotEvents())
   assert.equal(after.length, 3)
   assert.equal(after[2]!.tier, 3)
   assert.deepEqual(after[2]!.parentBlockIds, [ledger2[1]!.blockId])
@@ -109,7 +109,7 @@ test('M2: block topic persists through the log — the acp_status block title su
   } as never, fakeExec(session))
 
   // The durable compaction/summary event and the log-rebuilt ledger carry the topic.
-  const ledger = rebuildBlockLedger(session.events)
+  const ledger = rebuildBlockLedger(session.snapshotEvents())
   assert.equal(ledger[0]!.topic, 'auth subsystem')
 
   // A FRESH store (restarted engine) rehydrates the kernel block WITH the
@@ -124,7 +124,7 @@ test('M2: block topic persists through the log — the acp_status block title su
   await toolOf(env, 'compress').execute({
     content: [{ startSeq: 1, endSeq: 5, summary: TIER_SUMMARY }],
   } as never, fakeExec(plain))
-  const plainLedger = rebuildBlockLedger(plain.events)
+  const plainLedger = rebuildBlockLedger(plain.snapshotEvents())
   assert.equal(plainLedger[0]!.topic, undefined)
   const plainState = new AcpStateStore().stateFor(plain)
   assert.equal(plainState.blocks[0]!.topic, undefined)
