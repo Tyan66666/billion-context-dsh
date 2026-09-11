@@ -12,6 +12,7 @@
  */
 import type { Session, SessionEvent, SessionEventMap } from '@deepseek-ai/dsh-session';
 import { type ContentBlock } from '@deepseek-ai/dsh-llm';
+import { type AcpBlockLedgerPayload } from './block-ledger.ts';
 /** One durable ACP block as rebuilt from the session log. */
 export interface AcpBlockLedgerEntry {
     /** The compaction transaction id (stable block identity). */
@@ -118,32 +119,16 @@ export interface CompactionTransactionInput {
     readonly directMessageIds?: readonly string[];
     readonly effectiveMessageIds?: readonly string[];
 }
-/**
- * ACP tier extension fields carried on `compaction/summary` events. The
- * upstream dsh-compaction event type does not know them, so reads and writes
- * go through this precise intersection (never `any`).
- */
-export interface AcpCompactionSummaryFields {
-    /** Compression tier (1/2/3) — 1 = message range, 2 = distills tier-1, 3 = distills tier-2. */
-    readonly tier?: 1 | 2 | 3;
-    /** Short block label (kernel `CompressionBlock.topic`) — the acp_status block title. */
-    readonly topic?: string;
-    /** The acp-kernel block id (`bN`) created for this transaction. */
-    readonly kernelBlockId?: string;
-    /** Durable compaction ids of the blocks distilled into this one. */
-    readonly parentBlockIds?: readonly string[];
-    /**
-     * The kernel block's direct message ids (raw CoreMessage ids) at creation —
-     * recorded so a restarted engine rehydrates the SAME coverage (a tier-2
-     * block's coverage is its parents' originals, not the checkpoint node).
-     */
-    readonly directMessageIds?: readonly string[];
-    /** The kernel block's effective message ids (raw CoreMessage ids) at creation. */
-    readonly effectiveMessageIds?: readonly string[];
-}
 type CompactionSummaryData = SessionEventMap['compaction/summary'];
-/** Read a `compaction/summary` event's data including the ACP tier extension fields. */
-export declare function readCompactionSummary(event: SessionEvent): CompactionSummaryData & AcpCompactionSummaryFields;
+/**
+ * Read a `compaction/summary` event's data. The six ACP tier/lineage fields are
+ * no longer top-level members (issue #141): post-fix writers carry them in the
+ * admitted optional `rawOutput` member (decode via {@link decodeAcpBlockLedger}),
+ * while logs written by pre-fix engines still carry them as top-level members —
+ * so the returned type also intersects with {@link AcpBlockLedgerPayload}, letting
+ * readers fall back to the legacy shape. Never `any`.
+ */
+export declare function readCompactionSummary(event: SessionEvent): CompactionSummaryData & AcpBlockLedgerPayload;
 /**
  * Run one durable compression transaction. Throws on invalid state; on success
  * the four events are in the log and the surface has one summary node.
@@ -163,6 +148,18 @@ export interface SeqCompressibleRange {
     /** Share of messages that are tool messages (tool-call or tool-result), 0-100 — kernel `toolPct` parity. */
     readonly toolPct: number;
 }
+/**
+ * Durable model-free prune: append `compaction/prune` as the shadow price,
+ * then replace the given surface seqs with a user message. dsh-session 0.1.5+
+ * allows only user/message (and system/message) replacements to cite source
+ * events — assistant/message FORBIDS `sourceEventSeqs` because it embeds its
+ * own provider stream — so there is no invisible replacement node anymore:
+ * every hidden span becomes a user message. Callers with meaningful text pass
+ * it (compress call/result hiding keeps the tool outcome visible to the
+ * model); callers without get the fixed prune note. The originals remain in
+ * the append-only log.
+ */
+export declare const PRUNE_NOTE = "(removed by context management)";
 /**
  * Hide one successful `compress` tool's call/result pair after its tool/result
  * has been logged. The durable compaction summary is inserted BEFORE the
@@ -280,31 +277,4 @@ export declare function summarySeqOfKernelBlock(session: Session, kernelBlockId:
  * seqs. Cycle-safe (a block can never be its own ancestor).
  */
 export declare function expandShadowedSeqs(session: Session, blockId: string): number[];
-/**
- * Default decompress page size (#112): a block shadowing hundreds of
- * messages used to be returned whole in ONE tool result — big enough to
- * flood the context window or get silently trimmed by the host's
- * tool-result pruner before the model ever saw the tail. One page per call
- * keeps every recovery usable; `offset` walks the rest.
- */
-export declare const DEFAULT_DECOMPRESS_PAGE = 100;
-export interface DecompressPage {
-    /** Offset actually applied (clamped to >= 0). */
-    offset: number;
-    /** Limit actually applied (clamped to >= 1). */
-    limit: number;
-    /** Total shadowed messages in the block (tier-expanded). */
-    total: number;
-    /** This page's shadowed seqs, in expansion order. */
-    seqs: number[];
-    /** True when no further page follows this one. */
-    exhausted: boolean;
-}
-/**
- * Slice a block's expanded shadowed-seq list into one page. Seqs whose
- * original carries no text still occupy a slot, so page boundaries stay
- * stable across calls; out-of-range/negative values clamp instead of
- * failing (optional convenience params, not semantic boundaries).
- */
-export declare function sliceDecompressPage(expanded: number[], offset: number, limit: number): DecompressPage;
 export {};

@@ -1,6 +1,6 @@
 # 影子价格必须说宿主的 token 语言（shadow-price-host-vocabulary-design）
 
-> 状态：已落地（PR #56，issue #54）。本文记录**决策过程与为什么**；AGENTS.md 规则 12 是规范本身；docs/dsh-porting-verification.md 有 UPSTREAM 追踪行。
+> 状态：已落地（PR #56，issue #54；计价基准补丁 issue #103）。本文记录**决策过程与为什么**；AGENTS.md 规则 12 是规范本身；docs/dsh-porting-verification.md 有 UPSTREAM 追踪行。
 
 ## 1. 事故背景（issue #54）
 
@@ -27,7 +27,8 @@ session `session-3aa366c3`（Obsidian 面试笔记，中文密集）在两次 `c
 
 ```ts
 const meter = ctx?.get?.('tokenMeter')   // 宿主 compaction-basic 同款（this.ctx.tokenMeter）
-const nodes = meter.measure(session).nodes  // [{seq, tokens}] — 宿主在 append 时记的价
+const nodes = meter.measure(session).nodes  // 0.1.2+：{seq, tokens, heuristicTokens}；旧版单 tokens
+// 按固定启发价读：heuristicTokens ?? tokens（issue #103，见下）
 const claim = seqs.reduce((sum, seq) => sum + bySeq.get(seq)!, 0)
 ```
 
@@ -35,6 +36,8 @@ const claim = seqs.reduce((sum, seq) => sum + bySeq.get(seq)!, 0)
 - **宿主未来改估算器（如 CJK-aware / BPE）自动跟随**——镜像不需要同步。
 - 与宿主 compaction-basic 同一条代码路径，生产验证过。
 - `try/catch` 兜底：`measure` 对无 `step/start` 的 log 会 THROW（`token meter: assistant/message at seq N has no matching step/start event`），任何异常回退镜像。
+
+**计价基准 = 节点的固定启发价，不是路由价（issue #103）**：DSH 0.1.2 起 `measure()` 的 `TokenSurfaceNode` 是双字段——`tokens`（请求压力价：`route-pricing.js` `priceSurface` 按测量到的路由重定价，图片块带上路由声明的视觉价，触发/保留/选区都读它）与 `heuristicTokens`（固定启发价，0.1.2 文档明确 *"The shadow-price protocol prices replacements with this value"*）。宿主账本累计 append 用的仍是 `estimateMessage` 固定启发价；0.1.2 之前只有单 `tokens` 字段，它本身就是固定启发价。所以 claim 读 `node.heuristicTokens ?? node.tokens`——两个形状都落在账本基准上。0.2.19 的 bug：图片路由计价配置下 sum 路由 `node.tokens` → claim 虚报图片视觉价 → `deltaTokens = summary − claim` 扣穿 → `messageTokens` 负（issue #103：截图 session 压缩后每轮 zod `"Too small: expected number to be >=0"`，负数持久进 `session_projcache` → session 永久卡死，需手动清缓存）。#54 修的是估算器词汇不匹配（CJK），#103 是同一账本被**第二条通道**扣穿——图片路由重定价；两者同形：claim 必须说账本记账用的那个价格。**刻意不改**：nudge 的 `surfaceTokens` 回退（规则 2）读路由价——那是显示/触发词汇，不是事件货币，保持现状。
 
 ### 3.2 兜底（默认）：本地镜像（fallback DEFAULT 必须是镜像，绝不 `defaultCountTokens`）
 
@@ -61,13 +64,15 @@ const claim = seqs.reduce((sum, seq) => sum + bySeq.get(seq)!, 0)
 
 ### 3.4 测试（L3）
 
-真实 `TokenMeter` + `SessionProjectionRegistry` 端到端（`tests/shadow-price.test.ts`，5 测试）：
+真实 `TokenMeter` + `SessionProjectionRegistry` 端到端（`tests/shadow-price.test.ts`，7 测试）：
 
 - 真实 `ctx.plugin(SessionProjectionRegistry)` + `ctx.plugin(TokenMeter)`，`snapshot(session)` 走真实 `contextBreakdown` 投影（生产抛错的同一 fold）
 - CJK fixture 必须带 `step/start` 事件（真实 `measure` 对无 step 的 log 会 THROW）
 - 断言：claim == meter 价、镜像 == claim、投影非负且 == `measure().surfaceTokens`、旧 `defaultCountTokens` claim 会打穿账本（#54 算术复现）
 - **不做本地 fold 复刻作 oracle**：宿主 fold 不可导入，自复刻证明不了宿主不崩
 - 覆盖三条写入路径（compress 工具 / /acp compress / prune）
+- **#103 回归**：图片 fixture（真实 `ImageAttachmentRef` 块，`AttachmentId('att-shot-1')` 800×600 png）+ 0.1.2 节点形状的 stub meter——`tokens` = 启发价 + 路由视觉价（4000）、`heuristicTokens` = 真实 meter 自己的启发价（devDep 0.1.0-rc.6 无路由计价，stub 围绕真实启发价模拟 0.1.2 形状）——断言 claim == 启发价合计（== 镜像 == 真实 meter 价）；按路由 `node.tokens` sum 会在测试内扣负（bug 算术复现）；真实 registry fold 非负且 == meter
+- **旧形状兼容**：单 `tokens` 字段 meter（0.1.1- 及更早）claim 照读 `tokens`（它就是固定启发价）
 
 测试基建两个陷阱（已绕过）：
 1. 投影 cell 是**事件驱动**的（`ctx.on('session/event')`），detached 测试 session 无事件流 → `snapshot` 后事务不更新 cell → 需对事务后新增事件手动 `registry.drive(session, event)`

@@ -88,11 +88,34 @@ test('M3: compress lands a durable block, shrinks the surface, and uses the effe
   assert.equal(session.deriveMessages().length, 8)
 
   // The ledger sees the block from the log alone.
-  const ledger = rebuildBlockLedger(session.events)
+  const ledger = rebuildBlockLedger(session.snapshotEvents())
   assert.equal(ledger.length, 1)
   assert.deepEqual(ledger[0]!.shadowedSeqs, [1, 2, 3, 4, 5])
   assert.ok(ledger[0]!.shadowedTokenCount > 0, 'the ledger records real reclaimed tokens, not 0')
   assert.deepEqual(modelContextLimits, [1000000], 'compress gives the kernel the auto-detected window, not the 128K fallback')
+})
+
+test('M3: compress stamps the summary with the LIVE route, not stale agent.options', async () => {
+  // A mid-session model switch: the session's last request/context event names
+  // the CURRENT route while the agent's options still hold the just-left one.
+  // Reading provenance from agent.options mislabels the summary — the same
+  // stale read the window cap had, which this PR fixes for the window only.
+  const env = makeEnv()
+  const session = buildTextSession(12)
+  session.append('request/context', { provider: 'live-provider', model: 'live-model' })
+  const compress = toolOf(env, 'compress')
+  await compress.execute({
+    content: [{
+      startSeq: 1,
+      endSeq: 5,
+      summary: 'Authentication system: JWT access tokens with 15 minute expiry, refresh tokens in Redis with 30 day TTL, login flow in src/auth/login.ts with sliding-window rate limiting at 10 requests per minute per IP address.',
+    }],
+  } as never, fakeExec(session))
+
+  const summaryEvent = session.snapshotEvents().find((event) => event.type === 'compaction/summary')
+  assert.ok(summaryEvent, 'compaction/summary landed')
+  assert.equal((summaryEvent.data as { provider?: string }).provider, 'live-provider', 'the summary carries the LIVE provider')
+  assert.equal((summaryEvent.data as { model?: string }).model, 'live-model', 'the summary carries the LIVE model')
 })
 
 test('M3: successful compress registers its call id for post-result pair hiding', async () => {
@@ -137,7 +160,7 @@ test('M3: compress accepts multiple disjoint ranges in one call, each its own bl
   assert.match(text, /seqs 7\.\.9/)
 
   // Both segments land as independent durable blocks with distinct ids.
-  const ledger = rebuildBlockLedger(session.events)
+  const ledger = rebuildBlockLedger(session.snapshotEvents())
   assert.equal(ledger.length, 2)
   assert.deepEqual(ledger[0]!.shadowedSeqs, [1, 2, 3])
   assert.deepEqual(ledger[1]!.shadowedSeqs, [7, 8, 9])
@@ -160,7 +183,7 @@ test('M3: decompress recovers the shadowed originals read-only', async () => {
     }],
   } as never, fakeExec(session))
 
-  const ledger = rebuildBlockLedger(session.events)
+  const ledger = rebuildBlockLedger(session.snapshotEvents())
   assert.equal(ledger.length, 1)
   const blockId = ledger[0]!.blockId
 
@@ -185,7 +208,7 @@ test('M3: decompress pages a large block by default and walks it with offset', a
     }],
   } as never, fakeExec(session))
 
-  const ledger = rebuildBlockLedger(session.events)
+  const ledger = rebuildBlockLedger(session.snapshotEvents())
   assert.equal(ledger.length, 1)
   const blockId = ledger[0]!.blockId
   const decompress = toolOf(env, 'decompress')
@@ -217,7 +240,7 @@ test('M3: decompress honors an explicit limit and clamps a negative offset', asy
       summary: 'Authentication summary with enough technical detail to satisfy the kernel threshold: JWT, refresh tokens in Redis, login flow with rate limiting, bcrypt cost 12, session revocation on password change.',
     }],
   } as never, fakeExec(session))
-  const blockId = rebuildBlockLedger(session.events)[0]!.blockId
+  const blockId = rebuildBlockLedger(session.snapshotEvents())[0]!.blockId
   const decompress = toolOf(env, 'decompress')
 
   const limited = ((await decompress.execute({ blockId, limit: 2 }, fakeExec(session))) as { text: string }).text
@@ -242,7 +265,7 @@ test('M3: decompress accepts the kernel block ref bN that acp_status shows', asy
     }],
   } as never, fakeExec(session))
 
-  const ledger = rebuildBlockLedger(session.events)
+  const ledger = rebuildBlockLedger(session.snapshotEvents())
   const kernelBlockId = ledger[0]!.kernelBlockId
   assert.match(kernelBlockId!, /^b\d+$/, 'the durable block records its kernel ref')
 
@@ -301,7 +324,7 @@ test('M3: decompress prefers an exact bN over a compaction-id prefix collision',
   // (e.g. "b2abcd12") falls through to the compaction-id prefix match. We
   // assert both directions with the real blocks: "b2" hits the kernel ref;
   // passing a UUID-looking string that is not a kernel ref falls back.
-  const ledger = rebuildBlockLedger(session.events)
+  const ledger = rebuildBlockLedger(session.snapshotEvents())
   const second = ledger[1]!
 
   const decompress = toolOf(env, 'decompress')
@@ -397,7 +420,7 @@ test('M3: search_context on a distilled tier-2 block reports the innermost ownin
   await compress.execute({
     content: [{ startSeq: 1, endSeq: 5, summary: TIER_SUMMARY }],
   } as never, fakeExec(session))
-  const tier1 = rebuildBlockLedger(session.events)[0]!
+  const tier1 = rebuildBlockLedger(session.snapshotEvents())[0]!
   // Distill the tier-1 checkpoint into a tier-2 block.
   await compress.execute({
     content: [{ startSeq: tier1.summarySeq!, endSeq: tier1.summarySeq!, summary: TIER_SUMMARY }],
@@ -526,7 +549,7 @@ test('M3: acp_status breakdown does not double-count the checkpoint summary (P1-
   const summaries = breakdown.match(/([\d.]+K?) summaries/)?.[1] ?? '0'
   assert.ok(summaries !== '0', `summaries counted: got "${summaries}"`)
   // And the summary's token count is exactly what the block ledger reports.
-  const ledger = rebuildBlockLedger(session.events)
+  const ledger = rebuildBlockLedger(session.snapshotEvents())
   const summaryTokens = ledger.reduce((sum, block) => sum + block.shadowedTokenCount, 0)
   assert.ok(summaryTokens > 0, 'ledger records real reclaimed tokens')
 })
@@ -615,7 +638,7 @@ test('M3: compress accepts drilldown mN refs, mapped to the live surface seqs', 
     }],
   } as never, fakeExec(session))
   assert.match((result as { text: string }).text, /Compressed 1 block/)
-  const ledger = rebuildBlockLedger(session.events)
+  const ledger = rebuildBlockLedger(session.snapshotEvents())
   assert.equal(ledger.length, 1, 'the mN-targeted range landed a durable block')
 })
 
@@ -766,7 +789,7 @@ test('M3: compress tolerates the wrapped-arguments form ({ arguments: "..." } do
   const result = await compress.execute(wrapped as never, fakeExec(session))
   const text = (result as { text: string }).text
   assert.match(text, /Compressed 1 block/, 'the wrapped form unwraps and compresses the same content')
-  const ledger = rebuildBlockLedger(session.events)
+  const ledger = rebuildBlockLedger(session.snapshotEvents())
   assert.equal(ledger.length, 1, 'the wrapped form lands the durable block')
 })
 
@@ -776,7 +799,7 @@ test('M3: compress reports a clear error when neither form carries content', asy
   const compress = toolOf(env, 'compress')
   const result = await compress.execute({ arguments: 'not even json' } as never, fakeExec(session))
   assert.match((result as { text: string }).text, /missing content/, 'no content in either form yields the guidance message')
-  assert.equal(rebuildBlockLedger(session.events).length, 0, 'no block lands without content')
+  assert.equal(rebuildBlockLedger(session.snapshotEvents()).length, 0, 'no block lands without content')
 })
 
 test('M3: compress schema gate rejects a range entry missing summary (required field)', async () => {
@@ -798,7 +821,7 @@ test('M3: compress schema gate rejects a range entry missing summary (required f
     /missing required property "content\[0\]\.summary"/,
     'a summary-less range entry fails at the schema gate and names the missing field',
   )
-  assert.equal(rebuildBlockLedger(session.events).length, 0, 'no block lands from a schema-rejected call')
+  assert.equal(rebuildBlockLedger(session.snapshotEvents()).length, 0, 'no block lands from a schema-rejected call')
   const ok = await compress.execute({
     content: [{
       startSeq: 1,
@@ -830,7 +853,7 @@ test('M3: compress schema gate rejects a topic-only entry, naming the missing se
     },
     'a topic-only entry names all three missing fields at the schema gate',
   )
-  assert.equal(rebuildBlockLedger(session.events).length, 0, 'no block lands from a schema-rejected topic-only call')
+  assert.equal(rebuildBlockLedger(session.snapshotEvents()).length, 0, 'no block lands from a schema-rejected topic-only call')
 })
 
 test('M3: compress rejects a summary-less entry in the wrapped { arguments } form too', async () => {
@@ -848,7 +871,7 @@ test('M3: compress rejects a summary-less entry in the wrapped { arguments } for
     /missing required property "content\[0\]\.summary"/,
     'the wrapped form is rejected with the exact field path, not the late kernel error',
   )
-  assert.equal(rebuildBlockLedger(session.events).length, 0, 'no block lands from a wrapped schema-rejected call')
+  assert.equal(rebuildBlockLedger(session.snapshotEvents()).length, 0, 'no block lands from a wrapped schema-rejected call')
   // L1: an empty/whitespace summary counts as missing, not merely present.
   await assert.rejects(
     compress.execute({ arguments: { content: [{ startSeq: 1, endSeq: 5, summary: '   ' }] } } as never, fakeExec(session)),
@@ -870,7 +893,7 @@ test('M3: the wrapped OBJECT arguments form still compresses a full entry', asyn
     arguments: { content: [{ startSeq: 1, endSeq: 5, summary: SUMMARY_SAMPLE }] },
   } as never, fakeExec(session))
   assert.match((result as { text: string }).text, /Compressed 1 block/, 'the wrapped object form unwraps and compresses')
-  assert.equal(rebuildBlockLedger(session.events).length, 1, 'the wrapped object form lands the durable block')
+  assert.equal(rebuildBlockLedger(session.snapshotEvents()).length, 1, 'the wrapped object form lands the durable block')
 })
 
 test('M3: an empty array content is benign — zero blocks, no error', async () => {
@@ -881,7 +904,7 @@ test('M3: an empty array content is benign — zero blocks, no error', async () 
   const compress = toolOf(env, 'compress')
   const result = await compress.execute({ content: [] } as never, fakeExec(session))
   assert.match((result as { text: string }).text, /Compressed 0 block\(s\)/, 'an empty content array is a no-op, not an error')
-  assert.equal(rebuildBlockLedger(session.events).length, 0, 'no block lands from an empty content array')
+  assert.equal(rebuildBlockLedger(session.snapshotEvents()).length, 0, 'no block lands from an empty content array')
 })
 
 /** A session whose second node is a multi-tool-call assistant message. */
@@ -918,7 +941,7 @@ test('M3: compress expands a lone multi-tool-call boundary to the clean pair', a
   } as never, fakeExec(session))
 
   assert.match((result as { text: string }).text, /Compressed 1 block/)
-  const ledger = rebuildBlockLedger(session.events)
+  const ledger = rebuildBlockLedger(session.snapshotEvents())
   assert.equal(ledger.length, 1)
   assert.deepEqual(ledger[0]!.shadowedSeqs, [1, 2, 3, 4])
 })
@@ -939,7 +962,7 @@ test('M3: compress shadows multi-tool-call messages inside a clean range', async
   } as never, fakeExec(session))
 
   assert.match((result as { text: string }).text, /Compressed 1 block/)
-  const ledger = rebuildBlockLedger(session.events)
+  const ledger = rebuildBlockLedger(session.snapshotEvents())
   assert.equal(ledger.length, 1)
   assert.deepEqual(ledger[0]!.shadowedSeqs, [1, 2, 3, 4, 5])
 })
@@ -974,7 +997,7 @@ test('M3: distilling a block summary node produces a tier-2 block', async () => 
     content: [{ startSeq: 1, endSeq: 5, summary: TIER_SUMMARY }],
   } as never, fakeExec(session))
 
-  const ledger = rebuildBlockLedger(session.events)
+  const ledger = rebuildBlockLedger(session.snapshotEvents())
   assert.equal(ledger.length, 1)
   assert.equal(ledger[0]!.tier, 1)
   const summarySeq = ledger[0]!.summarySeq
@@ -990,7 +1013,7 @@ test('M3: distilling a block summary node produces a tier-2 block', async () => 
   assert.match(text, /Compressed 1 block/)
   assert.match(text, /tier 2/, 'the block line reports the distillation tier')
 
-  const after = rebuildBlockLedger(session.events)
+  const after = rebuildBlockLedger(session.snapshotEvents())
   assert.equal(after.length, 2)
   assert.equal(after[1]!.tier, 2)
   assert.deepEqual(after[1]!.shadowedSeqs, [summarySeq], 'the tier-2 block shadows the parent checkpoint node')
@@ -1012,11 +1035,11 @@ test('M3: distilling a tier-2 block produces tier 3', async () => {
   const session = buildTextSession(12)
   const compress = toolOf(env, 'compress')
   await compress.execute({ content: [{ startSeq: 1, endSeq: 5, summary: TIER_SUMMARY }] } as never, fakeExec(session))
-  const ledger1 = rebuildBlockLedger(session.events)
+  const ledger1 = rebuildBlockLedger(session.snapshotEvents())
   const tier1Seq = ledger1[0]!.summarySeq!
   await compress.execute({ content: [{ startSeq: tier1Seq, endSeq: tier1Seq, summary: TIER_SUMMARY }] } as never, fakeExec(session))
 
-  const ledger2 = rebuildBlockLedger(session.events)
+  const ledger2 = rebuildBlockLedger(session.snapshotEvents())
   assert.equal(ledger2.length, 2)
   assert.equal(ledger2[1]!.tier, 2)
   const tier2Seq = ledger2[1]!.summarySeq
@@ -1027,7 +1050,7 @@ test('M3: distilling a tier-2 block produces tier 3', async () => {
   } as never, fakeExec(session))
   assert.match((result as { text: string }).text, /tier 3/)
 
-  const after = rebuildBlockLedger(session.events)
+  const after = rebuildBlockLedger(session.snapshotEvents())
   assert.equal(after.length, 3)
   assert.equal(after[2]!.tier, 3)
   assert.deepEqual(after[2]!.parentBlockIds, [ledger2[1]!.blockId])
@@ -1057,7 +1080,7 @@ test('M3: overlapping batch entries skip the later range with a warning', async 
   assert.match(text, /Skipped range/, 'the overlap is surfaced as a warning')
   assert.match(text, /1 range\(s\) skipped/)
 
-  const ledger = rebuildBlockLedger(session.events)
+  const ledger = rebuildBlockLedger(session.snapshotEvents())
   assert.equal(ledger.length, 1, 'no phantom durable block for the skipped range')
   assert.deepEqual(ledger[0]!.shadowedSeqs, [1, 2, 3])
 })
@@ -1089,7 +1112,7 @@ test('M3: compress remaps a stale range to the still-live remainder', async () =
   assert.match(text, /were already shadowed — compressed the live remainder/)
   assert.match(text, /seqs 6\.\.10/)
 
-  const ledger = rebuildBlockLedger(session.events)
+  const ledger = rebuildBlockLedger(session.snapshotEvents())
   assert.equal(ledger.length, 2, 'the recovered range lands a second block')
   assert.deepEqual(ledger[1]!.shadowedSeqs, [6, 7, 8, 9, 10], 'only the live remainder is shadowed, never the checkpoint')
 })
@@ -1120,7 +1143,7 @@ test('M3: compress reports a fully shadowed range as already compressed, no erro
   assert.match(text, /already compressed/)
   assert.match(text, /decompress to recover/)
 
-  const ledger = rebuildBlockLedger(session.events)
+  const ledger = rebuildBlockLedger(session.snapshotEvents())
   assert.equal(ledger.length, 1, 'no phantom block for the stale re-compression')
 })
 
@@ -1155,7 +1178,7 @@ test('M3: a batch mixing a fresh range and a fully shadowed range lands one bloc
   assert.match(text, /already compressed/)
   assert.match(text, /1 range\(s\) skipped/)
 
-  const ledger = rebuildBlockLedger(session.events)
+  const ledger = rebuildBlockLedger(session.snapshotEvents())
   assert.equal(ledger.length, 2, 'the stale entry never creates a durable block')
   assert.deepEqual(ledger[1]!.shadowedSeqs, [7, 8, 9])
 })
@@ -1167,7 +1190,7 @@ test('M3: a mixed boundary [message..blockSummary] distills and folds extra mess
   // Tier-1 in the middle so the checkpoint lands AFTER older residual nodes.
   await compress.execute({ content: [{ startSeq: 3, endSeq: 7, summary: TIER_SUMMARY }] } as never, fakeExec(session))
 
-  const ledger = rebuildBlockLedger(session.events)
+  const ledger = rebuildBlockLedger(session.snapshotEvents())
   assert.equal(ledger.length, 1)
   const summarySeq = ledger[0]!.summarySeq!
   // Surface: [1, 2, c1, 8, 9, 10, 11, 12] — span [2..c1] crosses the block edge.
@@ -1177,7 +1200,7 @@ test('M3: a mixed boundary [message..blockSummary] distills and folds extra mess
   const text = (result as { text: string }).text
   assert.match(text, /tier 2/, 'a block boundary in the span makes the range distill')
 
-  const after = rebuildBlockLedger(session.events)
+  const after = rebuildBlockLedger(session.snapshotEvents())
   assert.equal(after.length, 2)
   assert.equal(after[1]!.tier, 2)
   assert.deepEqual(after[1]!.shadowedSeqs, [2, summarySeq])
@@ -1213,7 +1236,7 @@ test('M3: a kernel-rejected range does not poison the rest of the compress call'
   const text = (result as { text: string }).text
   assert.match(text, /Compressed 1 block/, 'the healthy range still lands')
   assert.match(text, /protected zone/, 'the rejected range is reported, not fatal')
-  const ledger = rebuildBlockLedger(session.events)
+  const ledger = rebuildBlockLedger(session.snapshotEvents())
   assert.equal(ledger.length, 1, 'exactly the healthy range produced a block')
 })
 
@@ -1244,7 +1267,7 @@ test('M3: issue #60 P3① — the nudge tier seqs (first..last) compress straigh
   assert.match(text, /tier 2/, 'distilling the nudge seqs as one range produces a tier-2 block')
   assert.match(text, /messages shadowed, tier 2/, 'the tier label is always present (issue #60 P1②)')
 
-  const after = rebuildBlockLedger(session.events)
+  const after = rebuildBlockLedger(session.snapshotEvents())
   assert.equal(after.length, 3, 'the two tier-1 blocks plus one tier-2 block')
   assert.equal(after[2]!.tier, 2, 'the distilled block is tier 2')
   assert.deepEqual(after[2]!.parentBlockIds, [after[0]!.blockId, after[1]!.blockId], 'both parents are recorded durably')
@@ -1266,13 +1289,13 @@ test('M3: issue #60 P3② — every compress result reports its tier, including 
   assert.match(text, /Compressed 1 block/)
   assert.match(text, /, tier 1/, 'a plain tier-1 compress reports its tier explicitly — never a silent downgrade')
 
-  const ledger = rebuildBlockLedger(session.events)
+  const ledger = rebuildBlockLedger(session.snapshotEvents())
   assert.equal(ledger[0]!.tier, 1, 'the block really is tier 1')
 
   // Distillation still reports tier 2 (the existing distill tests cover the
   // tier-2 label; this assertion pins the label on the SAME result format).
   await compress.execute({ content: [{ startSeq: 6, endSeq: 8, summary: TIER_SUMMARY }] } as never, fakeExec(session))
-  const ledger2 = rebuildBlockLedger(session.events)
+  const ledger2 = rebuildBlockLedger(session.snapshotEvents())
   const tier1Seq = ledger2[0]!.summarySeq!
   const dist = await compress.execute({
     content: [{ startSeq: tier1Seq, endSeq: tier1Seq, summary: TIER_SUMMARY }],

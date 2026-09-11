@@ -9,6 +9,7 @@ npm install
 npm run typecheck   # strict TypeScript check
 npm test            # unit tests (node --import tsx --test)
 npm run build       # tsup bundle
+npm run test:e2e   # end-to-end host regression (scripts/e2e/)
 ```
 
 - No `as any`, no `@ts-ignore`; tests use ESM static imports.
@@ -42,21 +43,30 @@ PR titles are enforced by CI (`.github/workflows/pr-lint.yml`, rule in `scripts/
 1. Branch off `main` (`git switch -c <your-branch> main`).
 2. Commit freely inside the branch.
 3. Open the PR with a **title** following the convention above — it becomes the main-branch commit message.
-4. CI must be green: `ci` (typecheck + test + build) and `pr-title` (title check) are required to merge.
+4. CI must be green: `ci` (typecheck + test + build) and `pr-title` (title check) are required to merge. The `e2e` job (end-to-end host harness, `.github/workflows/e2e.yml`) also reports on every PR; it is not yet in main's branch protection — the maintainer can add it as a third required check.
 5. Merging is **human-only**. Per AGENTS.md §5, an Agent must never merge any PR.
+
+## `dist/` build artifacts (you never touch them)
+
+`dist/` is committed so git-source installs work with zero build steps (AGENTS.md §5, issue #92) — but it is invisible to your workflow:
+
+- PR branches never carry `dist/` and you never rebuild or commit it. Push freely — the CI dist check does not gate PRs.
+- After every merge that can change the build output (`src/**`, `package.json`, `package-lock.json`, `tsup.config.ts`), `.github/workflows/dist-bot.yml` rebuilds and pushes one fresh-`dist/` commit directly to main as `github-actions[bot]` (main's branch protection has `enforce_admins` disabled and the bot pushes with the maintainer's `DIST_BOT_TOKEN` PAT; humans still land everything via PRs). Your branch is never touched — no bot commits to pull, no dist conflicts.
+- Local `npm run build` is optional (typecheck and tests run off `src/`). Its output may show as a tracked modification of the `dist/` you inherited from main — just don't commit it (`git checkout -- dist` restores).
+- Releases: after merging the release PR, the dist-bot refreshes main's dist if the build output changed; if so, wait for that commit before `gh release create` so the `#<tag>` install carries the final artifacts.
 
 ## Branch protection on main (enabled)
 
 `main` is branch-protected:
 
-- Direct pushes are blocked; all changes land via PRs;
 - PRs must pass the `ci` and `pr-title` status checks;
 - Force pushes and branch deletion are disabled;
-- No reviewer approval required (solo maintainer can't approve their own PR).
+- `enforce_admins` is **disabled** — the maintainer's admin credential may push directly, which is what lets the dist-bot's `DIST_BOT_TOKEN` PAT land its `dist/` commit on main (`.github/workflows/dist-bot.yml`);
+- By convention ALL human changes land via PRs; no reviewer approval required (solo maintainer can't approve their own PR).
 
 ## Releasing
 
-See AGENTS.md §5: `npm version` bump → sync version refs in docs → `npm publish` → `release vX.Y.Z` commit → `gh release create` → Pages rebuilds automatically.
+See AGENTS.md §5: `npm version` bump → sync version refs in docs → `npm publish` → release PR (no dist to carry; after the merge the dist-bot refreshes main's `dist/` if the build output changed) → `gh release create` → Pages rebuilds automatically.
 
 ## Issue triage automation (labels → Roadmap project)
 

@@ -24,7 +24,7 @@ import { allLogMessages, eventsToCoreMessages, extractEventText, surfaceEventsOf
 import { shadowedTokensViaMeter } from './host-tokens.ts'
 import { eventAtOf, sessionEventsOf } from './session-events.ts'
 import { defaultConfig } from 'acp-kernel'
-import { windowSourceLabel } from './window.ts'
+import { routeFor, windowSourceLabel } from './window.ts'
 
 async function statusText(env: ToolEnvironment, agent: Agent): Promise<string> {
   const session = agent.session
@@ -108,14 +108,18 @@ function compressText(env: ToolEnvironment, agent: Agent, args: string[]): strin
   // Price the reclaimed tokens in the HOST's token vocabulary (rule 12):
   // prefer the live meter's per-node prices, fall back to the exact mirror.
   const shadowedTokens = shadowedTokensViaMeter(session, shadowed, agent.ctx)
+  // Provenance follows the LIVE route, not `agent.options`: after a mid-session
+  // model switch the latter is a stale snapshot (the PREVIOUS route), so the
+  // summary node would be stamped with a route the summary did not come from.
+  const { provider, model } = routeFor(agent)
   const { compactionId } = runCompactionTransaction(session, {
     start,
     end,
     shadowedSeqs: shadowed,
     summary: [{ type: 'text', text: summary }],
     shadowedTokenCount: shadowedTokens,
-    provider: agent.options.provider ?? '',
-    model: agent.options.model ?? '',
+    provider,
+    model,
   })
   return `Compressed seqs ${start}..${end} (${shadowed.length} messages) as block ${compactionId.slice(0, 8)}`
 }
