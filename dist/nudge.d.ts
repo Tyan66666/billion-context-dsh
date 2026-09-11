@@ -68,7 +68,7 @@ export declare function rangeTable(session: import('@deepseek-ai/dsh-session').S
  * state (same source `buildStatusReport` uses), and the caller must exclude
  * checkpoint summary nodes from `messages` (they are not in any block's
  * `effectiveMessageIds` and would double-count — mirror of `/acp` status's
- * `isCheckpointEvent` exclusion).
+ * `isCheckpointNode` exclusion).
  */
 export declare function computeSurfaceBreakdown(state: CompressionState, messages: readonly CoreMessage[], total: number, growth: number): ContextBreakdown;
 /**

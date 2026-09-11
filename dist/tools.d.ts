@@ -42,6 +42,40 @@ export interface ToolEnvironment extends KernelConfigInput {
  */
 export declare function resolveEffectiveWindow(env: ToolEnvironment, agent: Agent): Promise<AcpWindow>;
 /**
+ * Pure gate helpers for the compress tool's CURRENT-instruction-row rejection.
+ *
+ * Decision history (issue #71 review): the first draft only WARNED when a
+ * manual compress range swallowed a current injected row (F7), because the
+ * compression is safe and self-healing. The owner reversed that during PR1
+ * review: compressing a CURRENT row has NO legitimate outcome — the host
+ * re-injects the newest AGENTS.md copy unconditionally the moment it leaves
+ * the surface (presence gate, deepseek-harness
+ * packages/context/agent-instructions/src/index.ts:137/:163), so the tokens
+ * come straight back and the call is pure waste — and a hard reject keeps the
+ * manual path consistent with the system-side GC's iron rule (PR2: never
+ * clear a group's newest row). STALE copies stay compressible: removing them
+ * while the newest stays visible is the actual cleanup and triggers no
+ * re-injection. The range table (buildCompressibleSeqRanges) never offers
+ * these rows, so the gate only fires on hand-built ranges.
+ *
+ * `guardedRowsInSpan` is the overlap probe. It takes the POSITIONAL span the
+ * transaction will actually shadow (`shadowedSeqsOf`), never a numeric
+ * `start <= seq <= end` interval: the surface is locally non-monotonic after
+ * earlier replacements (a checkpoint seq spliced ahead of older residual
+ * nodes), so a tier-2 distill of two checkpoints can carry a CURRENT
+ * instruction row numerically inside its edges while the sliced span excludes
+ * it — the interval probe rejected exactly the call the nudge hands the model
+ * (issue #71 review B1). Probing the slice also keeps guard and effect in
+ * agreement: `shadowedSeqsOf` is what the transaction prices and
+ * `assertProvenance` verifies.
+ * `protectedRowRejectionNote` renders the rejection the model sees: it names
+ * the offending seqs AND the compressible slices left in the span, so the model
+ * can re-cut (or split into two calls) instead of retrying the same call.
+ * `guardedSurfaceSeqsOf` supplies the protected set.
+ */
+export declare function guardedRowsInSpan(guarded: ReadonlySet<number>, shadowed: readonly number[]): number[];
+export declare function protectedRowRejectionNote(start: number, end: number, hits: readonly number[], shadowed: readonly number[]): string;
+/**
  * Build the unified SearchDoc[] from the log: one block doc per ledger entry
  * (ref = compactionId, so `decompress({ blockId })` closes the loop) plus one
  * message doc per shadowed ORIGINAL (expanded through distilled parents; each
