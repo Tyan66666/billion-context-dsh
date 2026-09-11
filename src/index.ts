@@ -216,14 +216,17 @@ export class AcpCompactionEngine extends CompactionEngine {
     const ports = this.config.countTokens !== undefined ? { countTokens: this.config.countTokens } : {}
     this.kernel = createCore(ports)
     // The kernel's docFeatures cache (per-doc search features) defaults to an
-    // 8MB source-char cap — sized for multi-session server processes. A DSH
+    // 8MB SOURCE-CHAR cap — sized for multi-session server processes. A DSH
     // profile is single-user and its search corpus (ALL shadowed originals)
     // routinely exceeds 8MB, so the default re-tokenizes the corpus on every
-    // search_context call (issue #133: ~18s/call on a 40MB corpus). 128MB
-    // covers the largest reported session (17.6M shadowed tokens ≈ 70MB text)
-    // with headroom; steady-state feature heap is ~6.3× cached source chars
-    // (measured), so worst case ≈ 800MB — acceptable on a host already
-    // holding session logs of that scale.
+    // search_context call (issue #133: ~18s/call on a 40MB corpus, cold and
+    // warm identical). The cap cannot be tuned DOWN instead — it evicts FIFO
+    // and bills source chars only, so a cap below the corpus caches nothing
+    // (measured: half the corpus → 1.1× on a repeat scan). 128MB covers the
+    // largest reported session (17.6M shadowed tokens ≈ 70MB text). Retained
+    // feature heap is 2.1×–51× the billed chars (content-dependent, measured)
+    // — accepted, since the host already holds a log of that scale; the
+    // arithmetic and the upstream root cause are in AGENTS.md rule 14.
     setDocCacheCap(128 * 1024 * 1024)
     this.store = new AcpStateStore()
 

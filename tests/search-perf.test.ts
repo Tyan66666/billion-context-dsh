@@ -14,6 +14,7 @@ import { Session, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { createUserMessage, createAssistantMessage } from '@deepseek-ai/dsh-llm'
 import { rebuildBlockLedger, runCompactionTransaction } from '../src/region.ts'
 import { buildSearchDocs } from '../src/tools.ts'
+import { sessionEventsOf } from '../src/session-events.ts'
 import { appendUser, buildTextSession } from './helpers.ts'
 
 test('M5: rebuildBlockLedger is memoized per snapshot (issues #109/#133)', () => {
@@ -28,14 +29,14 @@ test('M5: rebuildBlockLedger is memoized per snapshot (issues #109/#133)', () =>
     summary: [{ type: 'text', text: 'second summary detail' }],
     shadowedTokenCount: 200, provider: 'p', model: 'm',
   })
-  const events = session.events
+  const events = sessionEventsOf(session)
   const first = rebuildBlockLedger(events)
   const second = rebuildBlockLedger(events)
   assert.equal(first.length, 2)
   assert.equal(second, first, 'repeated calls on the same snapshot return the cached ledger')
   // a new append produces a new snapshot array → the memo must not leak across
   appendUser(session, 'a new message after the blocks')
-  const third = rebuildBlockLedger(session.events)
+  const third = rebuildBlockLedger(sessionEventsOf(session))
   assert.notEqual(third, first, 'new snapshot rebuilds the ledger')
   assert.equal(third.length, 2, 'append-only log keeps the same blocks')
 })
@@ -100,7 +101,7 @@ function buildPerfSession(events: number, blocks: number): Session {
       },
     }, { surfaceOp: 'append' })
   }
-  const evs = session.events
+  const evs = sessionEventsOf(session)
   const span = Math.floor((turns * per) / blocks)
   let first = 1
   for (let b = 0; b < blocks; b += 1) {

@@ -4,7 +4,7 @@ import {
   ManualCompactionError
 } from "@deepseek-ai/dsh-compaction";
 
-// node_modules/acp-kernel/dist/index.js
+// ../../node_modules/acp-kernel/dist/index.js
 import { createRequire } from "module";
 var REF_WIDTH = 5;
 var MIN_INDEX = 1;
@@ -2458,6 +2458,14 @@ function docFeatures(text) {
   }
   return f;
 }
+function setDocCacheCap(chars) {
+  capChars = Math.max(1, chars);
+  while (cachedChars > capChars && cache.size > 0) {
+    const k = cache.keys().next().value;
+    cachedChars -= k.length;
+    cache.delete(k);
+  }
+}
 var substringAlgorithm = {
   name: "substring",
   description: "Exact substring counting (original baseline). Predictable, no normalization.",
@@ -3088,15 +3096,21 @@ function runCompactionTransaction(session, input) {
   }
   return { compactionId, seqs };
 }
-function summarySeqOfCompaction(events, compactionId) {
+function summarySeqIndex(events) {
+  const index = /* @__PURE__ */ new Map();
   for (const event of events) {
     if (event.type !== "user/message") continue;
     const source = event.data.source;
-    if (source?.plugin === "compact" && source.compactionId === compactionId) return event.seq;
+    const compactionId = source?.plugin === "compact" ? source.compactionId : void 0;
+    if (compactionId !== void 0 && !index.has(compactionId)) index.set(compactionId, event.seq);
   }
-  return null;
+  return index;
 }
+var blockLedgerCache = /* @__PURE__ */ new WeakMap();
 function rebuildBlockLedger(events) {
+  const cached = blockLedgerCache.get(events);
+  if (cached !== void 0 && cached.len === events.length) return cached.ledger;
+  const summarySeqs = summarySeqIndex(events);
   const ledger = [];
   for (const event of events) {
     if (event.type !== "compaction/summary") continue;
@@ -3113,7 +3127,7 @@ function rebuildBlockLedger(events) {
     const parentBlockIds = Array.isArray(data.parentBlockIds) ? [...data.parentBlockIds] : [];
     const directMessageIds = Array.isArray(data.directMessageIds) ? [...data.directMessageIds] : void 0;
     const effectiveMessageIds = Array.isArray(data.effectiveMessageIds) ? [...data.effectiveMessageIds] : void 0;
-    const summarySeq = summarySeqOfCompaction(events, data.compactionId);
+    const summarySeq = summarySeqs.get(data.compactionId) ?? null;
     ledger.push({
       blockId: data.compactionId,
       summary: extractText(data.summary),
@@ -3131,6 +3145,7 @@ function rebuildBlockLedger(events) {
       createdAt: event.time
     });
   }
+  blockLedgerCache.set(events, { len: events.length, ledger });
   return ledger;
 }
 function isToolEvent(event) {
@@ -4288,8 +4303,12 @@ function roleOfEvent(event) {
       return null;
   }
 }
+var searchDocsCache = /* @__PURE__ */ new WeakMap();
 function buildSearchDocs(session) {
-  const ledger = rebuildBlockLedger(sessionEventsOf(session));
+  const events = sessionEventsOf(session);
+  const cached = searchDocsCache.get(events);
+  if (cached !== void 0) return cached;
+  const ledger = rebuildBlockLedger(events);
   const docs = [];
   const claimed = /* @__PURE__ */ new Set();
   for (const block of ledger) {
@@ -4322,6 +4341,7 @@ function buildSearchDocs(session) {
       });
     }
   }
+  searchDocsCache.set(events, docs);
   return docs;
 }
 function handleSearch(_env, rawArgs, exec) {
@@ -4642,6 +4662,7 @@ var AcpCompactionEngine = class extends CompactionEngine {
     this.prompts = resolvePrompts(config.prompts);
     const ports = this.config.countTokens !== void 0 ? { countTokens: this.config.countTokens } : {};
     this.kernel = createCore(ports);
+    setDocCacheCap(128 * 1024 * 1024);
     this.store = new AcpStateStore();
     const env = {
       kernel: this.kernel,

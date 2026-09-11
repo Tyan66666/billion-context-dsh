@@ -10,8 +10,9 @@
  * @module billion-context-dsh/tools
  */
 import { type ToolDefinition } from '@deepseek-ai/dsh-tools';
-import { type CompressionCore } from 'acp-kernel';
+import { type CompressionCore, type SearchDoc } from 'acp-kernel';
 import type { Agent } from '@deepseek-ai/dsh-agent';
+import type { Session } from '@deepseek-ai/dsh-session';
 import type { AcpStateStore } from './state.ts';
 import { type KernelConfigInput } from './config.ts';
 import type { AcpWindow } from './window.ts';
@@ -40,5 +41,15 @@ export interface ToolEnvironment extends KernelConfigInput {
  * for pressure decisions even when auto-detection had found a larger window).
  */
 export declare function resolveEffectiveWindow(env: ToolEnvironment, agent: Agent): Promise<AcpWindow>;
+/**
+ * Build the unified SearchDoc[] from the log: one block doc per ledger entry
+ * (ref = compactionId, so `decompress({ blockId })` closes the loop) plus one
+ * message doc per shadowed ORIGINAL (expanded through distilled parents; each
+ * seq is claimed by the earliest/innermost block that covered it, mirroring
+ * pi's owner map — decompress on that block recovers the original).
+ * Cached per log snapshot (see searchDocsCache). Exported for the issue #133
+ * regression tests (not part of the public API — index.ts re-exports only).
+ */
+export declare function buildSearchDocs(session: Session): SearchDoc[];
 /** Build the four ACP model tools bound to one engine. */
 export declare function makeTools(env: ToolEnvironment): ToolDefinition[];
