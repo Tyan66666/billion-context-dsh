@@ -9,6 +9,7 @@ import { type CompressionCore, type CompressionState, type ContextBreakdown, typ
 import { type UserMessage } from '@deepseek-ai/dsh-llm';
 import type { Agent } from '@deepseek-ai/dsh-agent';
 import { AcpStateStore } from './state.ts';
+import { type KernelRangeView } from './region.ts';
 import { type KernelConfigInput } from './config.ts';
 import { type ResolvedPrompts } from './prompts.ts';
 export declare function stripNudgeGuidance(text: string): string;
@@ -39,13 +40,14 @@ export interface NudgeOutcome {
 export declare function resolveTokenCount(agent: Agent, coreMessages: CoreMessage[]): number;
 /**
  * Render the compressible-range table as seq refs for the model.
- * Computed directly from the surface (not the kernel's ref map, which can
- * drift and hide large tool results) — see buildCompressibleSeqRanges.
- * UPSTREAM: this self-computation is a labeled workaround for kernel
- * ref-map drift after surface replacements (AGENTS.md rule 11) — drop it and
- * use kernel compressibleRanges once the drift is fixed upstream.
+ *
+ * The spans are the kernel's own (`compressibleRanges`, translated to surface
+ * seqs) with the host guards applied on top — see buildCompressibleSeqRanges.
+ * This function used to self-compute them from the surface as a labeled
+ * `UPSTREAM:` workaround for kernel ref-map drift; that drift is fixed upstream
+ * (acp-kernel #207) and the workaround is gone (rule 11).
  */
-export declare function rangeTable(session: import('@deepseek-ai/dsh-session').Session, prompts?: ResolvedPrompts): string;
+export declare function rangeTable(session: import('@deepseek-ai/dsh-session').Session, kernelView: KernelRangeView, prompts?: ResolvedPrompts): string;
 /**
  * Compute a SURFACE-ONLY context breakdown for display, aligned with
  * `acp_status` (kernel `buildStatusReport`/`renderOverview`).
@@ -110,4 +112,4 @@ export declare function buildNudge(agent: Agent, env: NudgeEnvironment, lastNudg
  * When a host overrides any `prompts.nudge` slot, the template path is used so
  * `config.prompts` keeps full control (custom copy wins over kernel defaults).
  */
-export declare function buildNudgeText(nudge: NudgeDecision, emergency: boolean, session: import('@deepseek-ai/dsh-session').Session, prompts?: ResolvedPrompts): string;
+export declare function buildNudgeText(nudge: NudgeDecision, emergency: boolean, session: import('@deepseek-ai/dsh-session').Session, kernelView: KernelRangeView, prompts?: ResolvedPrompts): string;
