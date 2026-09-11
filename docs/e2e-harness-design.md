@@ -44,3 +44,4 @@
 ## 验证（2026-09-07, Node v22.23.2）
 
 `node scripts/e2e/run-e2e.mjs` → 41/41 PASS `e2e PASS`（~2.5s，进程干净退出——runner 显式 `process.exit`，假服务 `close()`+`closeAllConnections()`）。关键观测: basic 5 请求（nudge 在请求 4,5 EMERGENCY; 遮蔽 4518 host-token; prune 隐藏 compress 对; compress 后线请求含 summary、原文消失）; rhythm 7 请求（nudge 仅请求 7）; decompress 7 请求（b1 结果含 'Note 0: the pruning section'，无新 compaction 事件）; acp-status 7 请求（报告含 kernel 段头、`b1`+`Checkpoint seqs`、`Surface:` 锚，不含窗口语义行）。`npm run test:e2e` 同绿。
+- **2026-09-11（wire 级前缀检查，#111/#126）**: `npm run test:e2e` → **54/54 PASS**。新增检查断言的是**假 LLM 收到的请求体原文**——provider 唯一能用来做缓存键的东西——而不是内部投影：原始 envelope（`"messages"` 之前的字节，含 key 顺序与空白）逐字稳定、`tools` 数组逐字稳定、leading message 在请求 2 之后逐字稳定（请求 1 可能早于一次性 ACP 指引注入）、无 compaction 的场景全程 append-only（前一次请求的消息列表必须是后一次请求的逐字前缀）。变异验证：改第 2 个请求 body 的尾部 + `messages[1]` → append-only 检查 FAIL（`request #2 message 1`）；改原始 body 开头 + leading 消息 → envelope 与 leading 检查在 4 个场景全部 FAIL。
