@@ -6,23 +6,27 @@
 
 import type { CommandDefinition } from '@deepseek-ai/dsh-commands'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import { resolveEffectiveWindow, type ToolEnvironment } from './tools.ts'
+import { guardedRowsInSpan, protectedRowRejectionNote, resolveEffectiveWindow, type ToolEnvironment } from './tools.ts'
 import { resolveTokenCount } from './nudge.ts'
 import { kernelConfigFor } from './config.ts'
 import {
   blockIdOfKernelRef,
   blockRefForSummarySeq,
   expandShadowedSeqs,
+  guardedSurfaceSeqsOf,
   rebuildBlockLedger,
   resolveSurfaceRange,
   runCompactionTransaction,
   shadowedSeqsOf,
+  sliceDecompressPage,
+  DEFAULT_DECOMPRESS_PAGE,
+  DEFAULT_DECOMPRESS_PAGE_CHARS,
 } from './region.ts'
 import { allLogMessages, eventsToCoreMessages, extractEventText, surfaceEventsOf } from './messages.ts'
 import { shadowedTokensViaMeter } from './host-tokens.ts'
 import { eventAtOf, sessionEventsOf } from './session-events.ts'
 import { defaultConfig } from 'acp-kernel'
-import { windowSourceLabel } from './window.ts'
+import { routeFor, windowSourceLabel } from './window.ts'
 import { PRESETS } from './presets.ts'
 
 async function statusText(env: ToolEnvironment, agent: Agent): Promise<string> {
@@ -110,28 +114,54 @@ function compressText(env: ToolEnvironment, agent: Agent, args: string[]): strin
   if (blockRefForSummarySeq(session, start) !== null || blockRefForSummarySeq(session, end) !== null) {
     return '/acp compress: the range touches a compressed block summary node — distill it with the compress tool (seq-based batch), not /acp compress'
   }
-  // The RESOLVED edges define the claim span, never the raw inputs:
-  // resolveSurfaceRange may adjust them to a balanced cut, and a raw edge
-  // absent from the surface makes shadowedSeqsOf slice a garbage span that
-  // assertProvenance rejects when the transaction lands (AGENTS.md rule 12).
+  // The same hard reject as the compress tool (src/tools.ts): a CURRENT
+  // injected instruction row cannot be legitimately compressed by ANY caller,
+  // human or model — the host re-injects the newest AGENTS.md copy
+  // unconditionally, so the tokens come straight back and nothing is
+  // reclaimed. Explicit intent does not override that arithmetic; older
+  // copies of the same file stay compressible.
+  // Probe the span that will ACTUALLY be shadowed — the positional slice the
+  // transaction prices and `assertProvenance` verifies — never a numeric
+  // `start <= seq <= end` interval: the surface is locally non-monotonic after
+  // earlier replacements, so a legitimate range can have a current instruction
+  // row numerically inside its edges while the sliced span excludes it (issue
+  // #71 review B1). Resolved edges, not the raw inputs: resolveSurfaceRange may
+  // move them to a balanced cut, and a raw edge absent from the surface makes
+  // shadowedSeqsOf slice a garbage span.
   const shadowed = shadowedSeqsOf(session, start, end)
+  const instructionHits = guardedRowsInSpan(guardedSurfaceSeqsOf(session), shadowed)
+  if (instructionHits.length > 0) {
+    return protectedRowRejectionNote(start, end, instructionHits, shadowed)
+  }
   // Price the reclaimed tokens in the HOST's token vocabulary (rule 12):
   // prefer the live meter's per-node prices, fall back to the exact mirror.
   const shadowedTokens = shadowedTokensViaMeter(session, shadowed, agent.ctx)
+  // Provenance follows the LIVE route, not `agent.options`: after a mid-session
+  // model switch the latter is a stale snapshot (the PREVIOUS route), so the
+  // summary node would be stamped with a route the summary did not come from.
+  const { provider, model } = routeFor(agent)
   const { compactionId } = runCompactionTransaction(session, {
     start,
     end,
     shadowedSeqs: shadowed,
     summary: [{ type: 'text', text: summary }],
     shadowedTokenCount: shadowedTokens,
-    provider: agent.options.provider ?? '',
-    model: agent.options.model ?? '',
+    provider,
+    model,
   })
   return `Compressed seqs ${start}..${end} (${shadowed.length} messages) as block ${compactionId.slice(0, 8)}`
 }
 
+const DECOMPRESS_USAGE = '/acp decompress <blockId> [offset] [limit]'
+
 function decompressText(_env: ToolEnvironment, agent: Agent, args: string[]): string {
-  if (args.length < 1) return '/acp decompress <blockId>'
+  if (args.length < 1) return DECOMPRESS_USAGE
+  const offset = args[1] === undefined ? 0 : Number(args[1])
+  if (!Number.isInteger(offset) || offset < 0) return `${DECOMPRESS_USAGE} — offset must be a non-negative integer`
+  const limit = args[2] === undefined ? DEFAULT_DECOMPRESS_PAGE : Number(args[2])
+  // /acp is human-facing, so it rejects out-of-range values loudly (the model
+  // tool clamps instead); the ceiling matches the tool's hard cap.
+  if (!Number.isInteger(limit) || limit < 1 || limit > DEFAULT_DECOMPRESS_PAGE) return `${DECOMPRESS_USAGE} — limit must be an integer between 1 and ${DEFAULT_DECOMPRESS_PAGE}`
   const session = agent.session
   // Accept the kernel block ref (`bN`) the model tool acp_status shows, as
   // well as the compaction-id prefix (same dual-id resolution as the tool).
@@ -142,10 +172,33 @@ function decompressText(_env: ToolEnvironment, agent: Agent, args: string[]): st
     : ledger.find((entry) => entry.blockId === blockId)
   if (block === undefined) return `block "${args[0]}" not found (see /acp status)`
   // Tier-2/3 blocks shadow parent checkpoint nodes: expand to the originals.
-  const parts = expandShadowedSeqs(session, block.blockId)
+  // Same char-budget paging as the model tool so a normal page stays under the
+  // host pruner threshold; /acp renders bare text (no `[seq N]` prefix), so
+  // renderLen prices the raw message text.
+  const expanded = expandShadowedSeqs(session, block.blockId)
+  const page = sliceDecompressPage(
+    expanded,
+    offset,
+    limit,
+    DEFAULT_DECOMPRESS_PAGE_CHARS,
+    (seq) => extractEventText(eventAtOf(session, seq)!).length,
+  )
+  if (page.seqs.length === 0) {
+    if (page.total === 0) return `Block ${block.blockId} — ${block.summary}\n\n(no recoverable content)`
+    return `block ${block.blockId} has ${page.total} messages; offset ${offset} is past the end — use an offset below ${page.total}`
+  }
+  const parts = page.seqs
     .map((seq) => extractEventText(eventAtOf(session, seq)!))
     .filter((text) => text.length > 0)
-  return `Block ${block.blockId} — ${block.summary}\n\n${parts.join('\n\n') || '(no recoverable content)'}`
+  // Marker + continue hint lead the payload (not trail it) so the "this page
+  // is partial" line survives if the host ever trims an oversized page's middle.
+  const lines = [
+    `Block ${block.blockId} — ${block.summary}`,
+    `[messages ${page.offset + 1}..${page.offset + page.seqs.length} of ${page.total}]`,
+  ]
+  if (!page.exhausted) lines.push(`Continue with: /acp decompress ${block.blockId.slice(0, 8)} ${page.offset + page.seqs.length}`)
+  lines.push('', parts.join('\n\n') || '(no recoverable content)')
+  return lines.join('\n')
 }
 
 /** Register the /acp command (idempotent per engine). */
@@ -154,7 +207,7 @@ export function acpCommand(env: ToolEnvironment): CommandDefinition {
     name: 'acp',
     description:
       'Active Context Pruning — model-driven context compression. '
-      + 'Usage: /acp status | /acp compress <startSeq> <endSeq> <summary> | /acp decompress <blockId>',
+      + 'Usage: /acp status | /acp compress <startSeq> <endSeq> <summary> | /acp decompress <blockId> [offset] [limit]',
     handler: async (invocation) => {
       const raw = invocation.rawInput.trim()
       if (raw === '' || raw === 'status') {

@@ -2458,6 +2458,14 @@ function docFeatures(text) {
   }
   return f;
 }
+function setDocCacheCap(chars) {
+  capChars = Math.max(1, chars);
+  while (cachedChars > capChars && cache.size > 0) {
+    const k = cache.keys().next().value;
+    cachedChars -= k.length;
+    cache.delete(k);
+  }
+}
 var substringAlgorithm = {
   name: "substring",
   description: "Exact substring counting (original baseline). Predictable, no normalization.",
@@ -2635,9 +2643,37 @@ function makePreview(text, query, len) {
   return prefix + text.slice(start, end).trim() + suffix;
 }
 
+// src/lru.ts
+var DEFAULT_SESSION_CACHE_LIMIT = 512;
+var LruMap = class extends Map {
+  maxEntries;
+  constructor(maxEntries) {
+    super();
+    this.maxEntries = Math.max(1, Math.floor(maxEntries));
+  }
+  get(key) {
+    if (!super.has(key)) return void 0;
+    const value = super.get(key);
+    super.delete(key);
+    super.set(key, value);
+    return value;
+  }
+  set(key, value) {
+    super.delete(key);
+    super.set(key, value);
+    while (this.size > this.maxEntries) {
+      const oldest = this.keys().next().value;
+      if (oldest === void 0) break;
+      super.delete(oldest);
+    }
+    return this;
+  }
+};
+
 // src/region.ts
 import { randomUUID } from "crypto";
-import { CompactionId, compactCheckpointSource } from "@deepseek-ai/dsh-compaction";
+import { CompactionId, compactCheckpointSource, toolPairingBalancedAfter, toolPairingBalancedBefore } from "@deepseek-ai/dsh-compaction";
+import { createUserMessage } from "@deepseek-ai/dsh-llm";
 
 // src/session-events.ts
 function sessionEventsOf(session) {
@@ -2650,78 +2686,6 @@ function eventAtOf(session, seq) {
   if (typeof eventAt === "function") return eventAt.call(session, seq);
   return session.events[seq];
 }
-
-// src/tool-pairing.ts
-var balanceCacheBySession = /* @__PURE__ */ new WeakMap();
-function eventDelta(event) {
-  if (event.type === "tool/result") return -1;
-  if (event.type === "assistant/message") {
-    const content = event.data.message?.content;
-    if (!Array.isArray(content)) return 0;
-    let calls = 0;
-    for (const block of content) {
-      if (block !== null && typeof block === "object" && block.type === "tool-call") calls += 1;
-    }
-    return calls;
-  }
-  return 0;
-}
-function eventForSeq(session, seq) {
-  const event = eventAtOf(session, seq);
-  if (event === void 0 || event.seq !== seq) {
-    throw new Error(`tool-pairing balance: surface seq ${seq} has no matching session event (corrupt surface)`);
-  }
-  return event;
-}
-function extendCache(session, cache2, seqs) {
-  const processed = cache2.cutBalanced.length - 1;
-  const tail = seqs.slice(processed);
-  const pendingCuts = [];
-  let inProgressToolCalls = cache2.inProgressToolCalls;
-  for (const seq of tail) {
-    inProgressToolCalls += eventDelta(eventForSeq(session, seq));
-    if (inProgressToolCalls < 0) {
-      throw new Error(`tool-pairing balance: tool/result at surface seq ${seq} has no matching tool-call (corrupt surface)`);
-    }
-    pendingCuts.push(inProgressToolCalls === 0);
-  }
-  tail.forEach((seq, offset) => cache2.indexBySeq.set(seq, processed + offset));
-  cache2.cutBalanced = cache2.cutBalanced.concat(pendingCuts);
-  cache2.inProgressToolCalls = inProgressToolCalls;
-  return cache2;
-}
-function balanceCache(session) {
-  const seqs = session.surface.nodes;
-  const generation = session.surface.replaceGeneration;
-  const cached = balanceCacheBySession.get(session);
-  if (cached === void 0 || cached.generation !== generation || cached.cutBalanced.length - 1 > seqs.length) {
-    const rebuilt = extendCache(session, {
-      generation,
-      cutBalanced: [true],
-      indexBySeq: /* @__PURE__ */ new Map(),
-      inProgressToolCalls: 0
-    }, seqs);
-    balanceCacheBySession.set(session, rebuilt);
-    return rebuilt;
-  }
-  if (cached.cutBalanced.length - 1 < seqs.length) return extendCache(session, cached, seqs);
-  return cached;
-}
-function cutBalance(cache2, seq, offset) {
-  const index = cache2.indexBySeq.get(seq);
-  const balanced = index === void 0 ? void 0 : cache2.cutBalanced[index + offset];
-  if (balanced === void 0) throw new Error(`tool-pairing balance: surface seq ${seq} not found`);
-  return balanced;
-}
-function toolPairingBalancedBefore(session, seq) {
-  return cutBalance(balanceCache(session), seq, 0);
-}
-function toolPairingBalancedAfter(session, seq) {
-  return cutBalance(balanceCache(session), seq, 1);
-}
-
-// src/region.ts
-import { createAssistantMessage, createUserMessage } from "@deepseek-ai/dsh-llm";
 
 // src/messages.ts
 function extractText(content) {
@@ -2852,6 +2816,56 @@ function extractEventText(event) {
       return "";
   }
 }
+function isCheckpointNode(event) {
+  if (event.type !== "user/message") return false;
+  const source = event.data.source;
+  return source?.plugin === "compact";
+}
+var METADATA_PLUGINS = /* @__PURE__ */ new Set([
+  "acp-nudge",
+  // nudge echo (src/nudge.ts)
+  "billion-context-dsh"
+  // compress-pair replacement stub (src/region.ts)
+]);
+var REAL_CONTENT_PLUGINS = /* @__PURE__ */ new Set([
+  "@deepseek-ai/dsh-system-prompt",
+  "user-approval",
+  "tools-ptc"
+]);
+var HOST_INSTRUCTION_KINDS = /* @__PURE__ */ new Set([
+  "agent-instructions",
+  // AGENTS.md injection (hook shape: {kind:'agent-instructions', form:'instructions'})
+  "skill-catalog"
+  // skill catalog (form:'catalog')
+]);
+function isAgentInstructionsRow(event) {
+  if (event.type !== "user/message") return false;
+  const source = event.data.source;
+  if (!source) return false;
+  return source.kind === "agent-instructions" || source.kind === "plugin" && source.plugin === "agent-instructions";
+}
+function classifySurfaceEvent(event) {
+  if (isCheckpointNode(event)) return "checkpoint";
+  if (event.type !== "user/message") return "real";
+  const source = event.data.source;
+  if (!source) return "real";
+  const kind = source.kind;
+  if (kind === "user") return "real";
+  if (kind === "plugin") {
+    if (source.plugin !== void 0 && METADATA_PLUGINS.has(source.plugin)) return "metadata";
+    if (source.plugin !== void 0 && REAL_CONTENT_PLUGINS.has(source.plugin)) return "real";
+    return "instruction";
+  }
+  if (kind !== void 0 && HOST_INSTRUCTION_KINDS.has(kind)) return "instruction";
+  return "real";
+}
+function isRealUserTurn(event) {
+  if (event.type !== "user/message") return false;
+  if (classifySurfaceEvent(event) !== "real") return false;
+  const source = event.data.source;
+  if (source?.plugin !== void 0 && REAL_CONTENT_PLUGINS.has(source.plugin)) return false;
+  return source?.kind !== "subagent-report" && source?.kind !== "subagent-settled";
+}
 
 // src/host-tokens.ts
 import { deriveEventMessage } from "@deepseek-ai/dsh-session";
@@ -2931,6 +2945,55 @@ function shadowedTokensViaMeter(session, seqs, ctx) {
   return shadowedHostTokens(session, seqs);
 }
 
+// src/block-ledger.ts
+var ACP_BLOCK_LEDGER_MARKER = "$dshAcpBlockLedger";
+var ACP_BLOCK_LEDGER_VERSION = 1;
+function isStringArray(value) {
+  return Array.isArray(value) && value.every((item) => typeof item === "string");
+}
+function encodeAcpBlockLedger(payload) {
+  const obj = { [ACP_BLOCK_LEDGER_MARKER]: ACP_BLOCK_LEDGER_VERSION };
+  if (payload.tier !== void 0) obj.tier = payload.tier;
+  if (payload.kernelBlockId !== void 0) obj.kernelBlockId = payload.kernelBlockId;
+  if (payload.topic !== void 0) obj.topic = payload.topic;
+  if (payload.parentBlockIds !== void 0 && payload.parentBlockIds.length > 0) {
+    obj.parentBlockIds = [...payload.parentBlockIds];
+  }
+  if (payload.directMessageIds !== void 0) obj.directMessageIds = [...payload.directMessageIds];
+  if (payload.effectiveMessageIds !== void 0) obj.effectiveMessageIds = [...payload.effectiveMessageIds];
+  return [{ type: "text", text: JSON.stringify(obj) }];
+}
+function decodeAcpBlockLedger(rawOutput) {
+  try {
+    if (!Array.isArray(rawOutput)) return {};
+    for (const block of rawOutput) {
+      if (block === null || typeof block !== "object") continue;
+      const candidate = block;
+      if (candidate.type !== "text" || typeof candidate.text !== "string") continue;
+      let parsed;
+      try {
+        parsed = JSON.parse(candidate.text);
+      } catch {
+        continue;
+      }
+      if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) continue;
+      const record = parsed;
+      if (record[ACP_BLOCK_LEDGER_MARKER] !== ACP_BLOCK_LEDGER_VERSION) continue;
+      const result = {};
+      if (record.tier === 1 || record.tier === 2 || record.tier === 3) result.tier = record.tier;
+      if (typeof record.kernelBlockId === "string") result.kernelBlockId = record.kernelBlockId;
+      if (typeof record.topic === "string") result.topic = record.topic;
+      if (isStringArray(record.parentBlockIds)) result.parentBlockIds = [...record.parentBlockIds];
+      if (isStringArray(record.directMessageIds)) result.directMessageIds = [...record.directMessageIds];
+      if (isStringArray(record.effectiveMessageIds)) result.effectiveMessageIds = [...record.effectiveMessageIds];
+      return result;
+    }
+    return {};
+  } catch {
+    return {};
+  }
+}
+
 // src/region.ts
 function findOpenTurn(events) {
   let open = null;
@@ -2989,7 +3052,10 @@ function recoverStaleRange(session, start, end) {
     return { kind: "unresolvable", failedEdge };
   }
   const liveInside = session.surface.nodes.filter((seq) => seq >= start && seq <= end).sort((a, b) => a - b);
-  const plain = liveInside.filter((seq) => !isCheckpointNode(eventAtOf(session, seq)));
+  const plain = liveInside.filter((seq) => {
+    const event = eventAtOf(session, seq);
+    return !isCheckpointNode(event) && !isSystemNode(event);
+  });
   if (plain.length === 0) {
     const coveringBlockIds = rebuildBlockLedger(sessionEventsOf(session)).filter((entry) => entry.shadowedSeqs.some((seq) => seq >= start && seq <= end)).map((entry) => entry.blockId);
     return { kind: "already-compressed", coveringBlockIds };
@@ -3031,8 +3097,14 @@ function resolveSurfaceRange(session, start, end) {
   if (start > end) {
     throw new Error(`billion-context-dsh: reversed range ${start}..${end}`);
   }
-  const cleanBefore = (index) => toolPairingBalancedBefore(session, nodes[index]) && hasPlainRef(session, nodes[index]);
-  const cleanAfter = (index) => toolPairingBalancedAfter(session, nodes[index]) && hasPlainRef(session, nodes[index]);
+  const cleanBefore = (index) => {
+    const event = eventAtOf(session, nodes[index]);
+    return event !== void 0 && !isSystemNode(event) && toolPairingBalancedBefore(session, nodes[index]) && hasPlainRef(session, nodes[index]);
+  };
+  const cleanAfter = (index) => {
+    const event = eventAtOf(session, nodes[index]);
+    return event !== void 0 && !isSystemNode(event) && toolPairingBalancedAfter(session, nodes[index]) && hasPlainRef(session, nodes[index]);
+  };
   let startIdx = requestedStartIdx;
   let endIdx = requestedEndIdx;
   while (startIdx <= endIdx && !cleanBefore(startIdx)) {
@@ -3089,6 +3161,14 @@ function runCompactionTransaction(session, input) {
   }
   try {
     seqs.push(session.append("compaction/start", { compactionId, turn }).seq);
+    const ledgerPayload = {
+      tier: input.tier ?? 1,
+      ...input.kernelBlockId === void 0 ? {} : { kernelBlockId: input.kernelBlockId },
+      ...input.topic === void 0 ? {} : { topic: input.topic },
+      ...input.parentBlockIds === void 0 || input.parentBlockIds.length === 0 ? {} : { parentBlockIds: [...input.parentBlockIds] },
+      ...input.directMessageIds === void 0 ? {} : { directMessageIds: [...input.directMessageIds] },
+      ...input.effectiveMessageIds === void 0 ? {} : { effectiveMessageIds: [...input.effectiveMessageIds] }
+    };
     seqs.push(session.append("compaction/summary", {
       compactionId,
       summary: input.summary,
@@ -3097,19 +3177,14 @@ function runCompactionTransaction(session, input) {
       shadowedTokenCount: input.shadowedTokenCount,
       provider: input.provider,
       model: input.model,
-      tier: input.tier ?? 1,
-      ...input.kernelBlockId === void 0 ? {} : { kernelBlockId: input.kernelBlockId },
-      ...input.topic === void 0 ? {} : { topic: input.topic },
-      ...input.parentBlockIds === void 0 || input.parentBlockIds.length === 0 ? {} : { parentBlockIds: [...input.parentBlockIds] },
-      ...input.directMessageIds === void 0 ? {} : { directMessageIds: [...input.directMessageIds] },
-      ...input.effectiveMessageIds === void 0 ? {} : { effectiveMessageIds: [...input.effectiveMessageIds] }
+      rawOutput: encodeAcpBlockLedger(ledgerPayload)
     }).seq);
     const message = createUserMessage({
       content: input.summary,
       source: compactCheckpointSource(compactionId)
     });
     seqs.push(session.append("user/message", message, {
-      surfaceOp: { op: "replace", start: input.start, end: input.end },
+      surfaceOp: { op: "replace", startSeq: input.start, endSeq: input.end },
       sourceEventSeqs: [...input.shadowedSeqs]
     }).seq);
     seqs.push(session.append("compaction/end", { compactionId, turn }).seq);
@@ -3123,15 +3198,21 @@ function runCompactionTransaction(session, input) {
   }
   return { compactionId, seqs };
 }
-function summarySeqOfCompaction(events, compactionId) {
+function summarySeqIndex(events) {
+  const index = /* @__PURE__ */ new Map();
   for (const event of events) {
     if (event.type !== "user/message") continue;
     const source = event.data.source;
-    if (source?.plugin === "compact" && source.compactionId === compactionId) return event.seq;
+    const compactionId = source?.plugin === "compact" ? source.compactionId : void 0;
+    if (compactionId !== void 0 && !index.has(compactionId)) index.set(compactionId, event.seq);
   }
-  return null;
+  return index;
 }
+var blockLedgerCache = /* @__PURE__ */ new WeakMap();
 function rebuildBlockLedger(events) {
+  const cached = blockLedgerCache.get(events);
+  if (cached !== void 0 && cached.len === events.length) return cached.ledger;
+  const summarySeqs = summarySeqIndex(events);
   const ledger = [];
   for (const event of events) {
     if (event.type !== "compaction/summary") continue;
@@ -3144,28 +3225,32 @@ function rebuildBlockLedger(events) {
         if (original !== void 0) shadowedTokenCount += defaultCountTokens(extractEventText(original));
       }
     }
-    const tier = data.tier === 2 || data.tier === 3 ? data.tier : 1;
-    const parentBlockIds = Array.isArray(data.parentBlockIds) ? [...data.parentBlockIds] : [];
-    const directMessageIds = Array.isArray(data.directMessageIds) ? [...data.directMessageIds] : void 0;
-    const effectiveMessageIds = Array.isArray(data.effectiveMessageIds) ? [...data.effectiveMessageIds] : void 0;
-    const summarySeq = summarySeqOfCompaction(events, data.compactionId);
+    const embedded = decodeAcpBlockLedger(data.rawOutput);
+    const tier = embedded.tier ?? (data.tier === 2 || data.tier === 3 ? data.tier : 1);
+    const parentBlockIds = embedded.parentBlockIds ? [...embedded.parentBlockIds] : Array.isArray(data.parentBlockIds) ? [...data.parentBlockIds] : [];
+    const directMessageIds = embedded.directMessageIds ? [...embedded.directMessageIds] : Array.isArray(data.directMessageIds) ? [...data.directMessageIds] : void 0;
+    const effectiveMessageIds = embedded.effectiveMessageIds ? [...embedded.effectiveMessageIds] : Array.isArray(data.effectiveMessageIds) ? [...data.effectiveMessageIds] : void 0;
+    const topic = embedded.topic ?? (typeof data.topic === "string" ? data.topic : void 0);
+    const kernelBlockId = embedded.kernelBlockId ?? (typeof data.kernelBlockId === "string" ? data.kernelBlockId : void 0);
+    const summarySeq = summarySeqs.get(data.compactionId) ?? null;
     ledger.push({
       blockId: data.compactionId,
       summary: extractText(data.summary),
-      ...typeof data.topic === "string" ? { topic: data.topic } : {},
+      ...topic === void 0 ? {} : { topic },
       shadowedSeqs: [...data.shadowedSeqs],
       shadowedTokenCount,
       start: data.shadowedRange.start,
       end: data.shadowedRange.end,
       tier,
       parentBlockIds,
-      ...typeof data.kernelBlockId === "string" ? { kernelBlockId: data.kernelBlockId } : {},
+      ...kernelBlockId === void 0 ? {} : { kernelBlockId },
       ...summarySeq === null ? {} : { summarySeq },
       ...directMessageIds === void 0 ? {} : { directMessageIds },
       ...effectiveMessageIds === void 0 ? {} : { effectiveMessageIds },
       createdAt: event.time
     });
   }
+  blockLedgerCache.set(events, { len: events.length, ledger });
   return ledger;
 }
 function isToolEvent(event) {
@@ -3174,10 +3259,8 @@ function isToolEvent(event) {
   const content = event.data.message?.content;
   return Array.isArray(content) && content.some((block) => block?.type === "tool-call");
 }
-function isCheckpointNode(event) {
-  if (event.type !== "user/message") return false;
-  const source = event.data.source;
-  return source?.plugin === "compact";
+function isSystemNode(event) {
+  return event.type === "system/message";
 }
 function toolCallIdsOfEvent(event) {
   if (event.type !== "assistant/message") return [];
@@ -3191,17 +3274,8 @@ function toolCallIdsOfEvent(event) {
   }
   return ids;
 }
-function assistantProviderModel(event) {
-  if (event.type === "assistant/message") {
-    const message = event.data.message;
-    return {
-      provider: typeof message?.source?.provider === "string" ? message.source.provider : "billion-context-dsh",
-      model: typeof message?.source?.model === "string" ? message.source.model : "surface-prune"
-    };
-  }
-  return { provider: "billion-context-dsh", model: "surface-prune" };
-}
-function hideSurfaceSeqs(session, seqs, provider, model, text, priceEvent = hostPriceEvent) {
+var PRUNE_NOTE = "(removed by context management)";
+function hideSurfaceSeqs(session, seqs, text, priceEvent = hostPriceEvent) {
   if (seqs.length === 0) return;
   const start = seqs[0];
   const end = seqs[seqs.length - 1];
@@ -3215,22 +3289,12 @@ function hideSurfaceSeqs(session, seqs, provider, model, text, priceEvent = host
     shadowedSeqs: [...seqs],
     shadowedTokenCount
   });
-  if (text !== void 0) {
-    session.append("user/message", createUserMessage({
-      content: [{ type: "text", text }],
-      source: { kind: "plugin", plugin: "billion-context-dsh" }
-    }), {
-      surfaceOp: { op: "replace", start, end },
-      sourceEventSeqs: [...seqs]
-    });
-    return;
-  }
-  session.append("assistant/message", {
-    turn: findOpenTurn(sessionEventsOf(session)) ?? 0,
-    step: 0,
-    message: createAssistantMessage({ content: [], source: { provider, model } })
-  }, {
-    surfaceOp: { op: "replace", start, end },
+  const body = text !== void 0 && text.trim().length > 0 ? text : PRUNE_NOTE;
+  session.append("user/message", createUserMessage({
+    content: [{ type: "text", text: body }],
+    source: { kind: "plugin", plugin: "billion-context-dsh" }
+  }), {
+    surfaceOp: { op: "replace", startSeq: start, endSeq: end },
     sourceEventSeqs: [...seqs]
   });
 }
@@ -3261,10 +3325,9 @@ function hideCompressToolPair(session, callId, resultSeq) {
   const startIdx = nodes.indexOf(callSeq);
   const endIdx = nodes.indexOf(resolvedResultSeq);
   if (startIdx < 0 || endIdx < 0 || endIdx - startIdx !== 1) return false;
-  const { provider, model } = assistantProviderModel(events[callSeq]);
   const resultEvent = events[resolvedResultSeq];
   const resultText = resultEvent === void 0 ? "" : extractEventText(resultEvent);
-  hideSurfaceSeqs(session, [callSeq, resolvedResultSeq], provider, model, resultText.trim().length > 0 ? resultText : void 0);
+  hideSurfaceSeqs(session, [callSeq, resolvedResultSeq], resultText);
   return true;
 }
 function stripOrphanedSurfaceToolMessages(session, inFlightCallIds = /* @__PURE__ */ new Set()) {
@@ -3332,10 +3395,8 @@ function stripOrphanedSurfaceToolMessages(session, inFlightCallIds = /* @__PURE_
   const hidden = [...hiddenSet].sort((a, b) => a - b);
   let count = 0;
   for (const seq of hidden) {
-    const event = eventAtOf(session, seq);
-    if (event === void 0) continue;
-    const { provider, model } = assistantProviderModel(event);
-    hideSurfaceSeqs(session, [seq], provider, model);
+    if (eventAtOf(session, seq) === void 0) continue;
+    hideSurfaceSeqs(session, [seq]);
     count += 1;
   }
   return count;
@@ -3363,6 +3424,32 @@ function deferCompressPairHide(session, callId, resultSeq, onError) {
     }
   });
 }
+function newestInstructionSeqsOf(session) {
+  const newest = /* @__PURE__ */ new Map();
+  const events = sessionEventsOf(session);
+  for (let seq = 0; seq < events.length; seq += 1) {
+    const event = events[seq];
+    if (event === void 0 || !isAgentInstructionsRow(event)) continue;
+    const source = event.data.source;
+    const changes = Array.isArray(source?.changes) ? source.changes : [];
+    const scopes = changes.map((change) => typeof change?.scope === "string" ? change.scope : "").filter((scope) => scope.length > 0);
+    if (scopes.length === 0) {
+      continue;
+    }
+    for (const scope of scopes) newest.set(scope, seq);
+  }
+  return new Set(newest.values());
+}
+function guardedSurfaceSeqsOf(session) {
+  const guarded = /* @__PURE__ */ new Set();
+  const newestInstructions = newestInstructionSeqsOf(session);
+  for (const seq of session.surface.nodes) {
+    const event = eventAtOf(session, seq);
+    if (event === void 0) continue;
+    if (isAgentInstructionsRow(event) && newestInstructions.has(seq)) guarded.add(seq);
+  }
+  return guarded;
+}
 function buildCompressibleSeqRanges(session, opts = {}) {
   stripOrphanedSurfaceToolMessages(session);
   const nodes = session.surface.nodes;
@@ -3373,11 +3460,12 @@ function buildCompressibleSeqRanges(session, opts = {}) {
   }
   for (let index = nodes.length - 1; index >= 0; index -= 1) {
     const event = eventAtOf(session, nodes[index]);
-    if (event?.type === "user/message" && !isCheckpointNode(event)) {
+    if (event !== void 0 && isRealUserTurn(event)) {
       protectedSeqs.add(nodes[index]);
       break;
     }
   }
+  for (const seq of newestInstructionSeqsOf(session)) protectedSeqs.add(seq);
   const raw = [];
   let cur = null;
   const flush = () => {
@@ -3386,7 +3474,11 @@ function buildCompressibleSeqRanges(session, opts = {}) {
   };
   for (const seq of nodes) {
     const event = eventAtOf(session, seq);
-    if (event === void 0 || protectedSeqs.has(seq) || isCheckpointNode(event)) {
+    if (event === void 0 || protectedSeqs.has(seq) || isCheckpointNode(event) || isSystemNode(event)) {
+      flush();
+      continue;
+    }
+    if (classifySurfaceEvent(event) === "instruction") {
       flush();
       continue;
     }
@@ -3515,6 +3607,26 @@ function expandShadowedSeqs(session, blockId) {
   visit(root);
   return out;
 }
+var DEFAULT_DECOMPRESS_PAGE = 100;
+var DEFAULT_DECOMPRESS_PAGE_CHARS = 7e3;
+function sliceDecompressPage(expanded, offset, limit, charBudget, renderLen) {
+  const offN = typeof offset === "number" ? offset : Number(offset);
+  const safeOffset = Number.isFinite(offN) && offN > 0 ? Math.floor(offN) : 0;
+  const limN = typeof limit === "number" ? limit : Number(limit);
+  const safeLimit = Number.isFinite(limN) && limN >= 1 ? Math.min(Math.floor(limN), DEFAULT_DECOMPRESS_PAGE) : DEFAULT_DECOMPRESS_PAGE;
+  const start = Math.min(safeOffset, expanded.length);
+  const endCap = Math.min(start + safeLimit, expanded.length);
+  let end = start;
+  let acc = 0;
+  for (let i = start; i < endCap; i += 1) {
+    const seq = expanded[i];
+    const len = renderLen(seq);
+    if (i > start && acc + len > charBudget) break;
+    acc += len;
+    end = i + 1;
+  }
+  return { offset: safeOffset, limit: safeLimit, total: expanded.length, seqs: expanded.slice(start, end), exhausted: end >= expanded.length };
+}
 
 // src/state.ts
 function rebuildKernelBlocks(events) {
@@ -3575,8 +3687,29 @@ function nextBlockIdAfter(events) {
   }
   return max + 1;
 }
+function nextRunIdAfter(blocks) {
+  let max = 0;
+  for (const block of blocks) {
+    const num = Number(block.runId.slice(1));
+    if (Number.isInteger(num)) max = Math.max(max, num);
+  }
+  return max + 1;
+}
 var AcpStateStore = class {
-  states = /* @__PURE__ */ new Map();
+  /**
+   * Live kernel states, capped by an LRU policy (issue #113): once the cap is
+   * reached the coldest session's state is dropped, and its next access
+   * rehydrates through stateFor's log-rebuild path below. Rehydration is
+   * deterministic — bN ids are recorded in the durable event or synthesised
+   * in ledger order, and run ids continue after the rehydrated max — so block
+   * identity survives eviction exactly as it survives a restart. Kernel
+   * fields that reset on eviction (tokenSnapshot, nudge cadence, stats
+   * counters) all self-heal on the session's next turn.
+   */
+  states;
+  constructor(limit = DEFAULT_SESSION_CACHE_LIMIT) {
+    this.states = new LruMap(limit);
+  }
   /** Kernel state for one session, initialised on first access. */
   stateFor(session) {
     const id = session.id;
@@ -3587,6 +3720,7 @@ var AcpStateStore = class {
     if (events.some((event) => event.type === "compaction/summary")) {
       state.blocks = rebuildKernelBlocks(events);
       state.nextBlockId = nextBlockIdAfter(events);
+      state.nextRunId = nextRunIdAfter(state.blocks);
     }
     this.states.set(id, state);
     return state;
@@ -3715,7 +3849,7 @@ var DEFAULT_PROMPTS = {
   },
   tools: {
     compress: "Replace older conversation ranges with dense summaries you write. Each message seq is a surface reference. Single range: compress({ content: [{ startSeq, endSeq, summary }] }). Batch multiple unrelated ranges in one call (each content entry becomes its own block); keep ranges disjoint. Never compress content the current step is actively using. Compress boundaries are SURFACE SEQS (acp_status Surface: row, latest nudge table) \u2014 NOT the block refs (bN, e.g. b1) that acp_status COMPRESSED BLOCKS shows, which are for decompress only. Drilldown mN refs (e.g. m00306) are ALSO accepted as startSeq/endSeq \u2014 they are auto-mapped to the live surface seq; an unknown mN (never assigned on the current surface) fails with guidance. Seq refs must come from the CURRENT surface (acp_status or the latest nudge): a span whose edges were shadowed by an earlier compress is auto-remapped to its still-live content, a fully compressed span is reported as already compressed, and invented/other-session seqs fail with guidance. Good compression moments: stage or subtask completion whose details you have fully consumed and will not re-check, strategy switches, intermediate milestones, and wrapping up failed exploration \u2014 when the details are consumed and no longer critical for the task ahead. Before compressing, ask: will I need to re-verify any detail from this range in this task? If yes, keep it live. When you write a summary, turn dead-end exploration into a conclusion (what was tried, why it failed, the next step) \u2014 not a blow-by-blow; and keep the summary the ONLY record: self-contained, so a later reader (or you, after decompress) can continue without the original.",
-    decompress: "Recover the original content of a compressed block by its blockId \u2014 the kernel block ref `bN` shown by acp_status (e.g. b1), or a compaction id from search_context (read-only; does not unshadow the range).",
+    decompress: "Recover the original content of a compressed block by its blockId \u2014 the kernel block ref `bN` shown by acp_status (e.g. b1), or a compaction id from search_context (read-only; does not unshadow the range). Large blocks are paged so each page stays under the host tool-result trim budget (up to 100 messages per call): pass offset/limit to walk them and follow the continue hint in the result.",
     searchContext: "Search inside compressed blocks (summaries and original content) for information the model no longer sees in context. When a summary lacks a detail you need (exact values, error strings, decisions, verbatim code), SEARCH the compressed blocks FIRST \u2014 never guess or reconstruct from memory: search_context(query) locates the right block, then decompress only that block to recover the original.",
     acpStatus: 'Context status: overview of the current context \u2014 CONTEXT BREAKDOWN (tool/text/summaries token shares of the visible total), COMPRESSED BLOCKS ledger, and the nudge decision. No args = overview. Percentages are shares of the visible content, not the context window. Note: the block refs in COMPRESSED BLOCKS (bN, e.g. b1) are for decompress; compress uses the Surface: seq range, not bN. Drilldown: pass scope:"compressed" for a per-block list, or scope:"uncompressed" with view:"messages" (every visible message) / view:"ranges" (merged ranges); tool filters to one tool name, sort reorders (size/time/tool; age for compressed), limit caps rows (default 30). Drilldown row refs are kernel ids (mN) \u2014 feed them straight to compress as startSeq/endSeq (auto-mapped to the live surface seq); bN is for decompress, Surface: seqs also work in compress.'
   },
@@ -3744,7 +3878,7 @@ WHEN NOT TO COMPRESS:
 
 Compression tools (refs are SURFACE SEQS, not ids):
 - compress: replace one or more seq ranges, each with your own dense summary. Single range: compress({ content: [{ startSeq, endSeq, summary }] }). Batch multiple unrelated segments in one call (each entry becomes its own block): compress({ content: [{ startSeq: 1, endSeq: 5, summary: '...' }, { startSeq: 12, endSeq: 18, summary: '...' }] }). Keep ranges disjoint \u2014 overlapping entries in one batch are skipped. Edges are auto-balanced to tool-call/result boundaries; a trailing #callId fragment in a seq is ignored. Seq refs must be on the current surface: seqs from older nudges or earlier compresses go stale as the surface moves, so a stale span is auto-remapped to its still-live remainder (the result reports the adjusted span), a fully compressed span is reported as already compressed, and invented/other-session seqs fail with guidance. The block refs (bN, e.g. b1) in acp_status COMPRESSED BLOCKS are for decompress, NOT compress boundaries.
-- decompress: recover a compressed block's original content, read-only. decompress({ blockId }) \u2014 accept the bN ref shown by acp_status (e.g. b1) or a compaction id.
+- decompress: recover a compressed block's original content, read-only. decompress({ blockId }) \u2014 accept the bN ref shown by acp_status (e.g. b1) or a compaction id. Large blocks page (each page sized to stay under the host tool-result trim budget, up to 100 messages): pass offset/limit and follow the continue hint in the result.
 - search_context: when a summary lacks the details you need (exact values, error strings, decisions, verbatim code), SEARCH the compressed blocks FIRST \u2014 never guess or reconstruct from memory; search_context(query) locates the right block, decompress only that block.
 - acp_status: current context usage and the live compressible-range list. Run it right before compressing \u2014 the only seqs that never go stale are the ones you just read. Drilldown (scope/view/tool/sort/limit) lists per-message or per-block sizes; drilldown rows are kernel ids (mN) \u2014 compress accepts them directly (auto-mapped to the live surface seq).
 
@@ -3793,22 +3927,63 @@ function rangeTable(session, prompts = DEFAULT_RESOLVED) {
 function measuredTokenCount(agent, coreMessages) {
   return resolveTokenCount(agent, coreMessages);
 }
-function buildNudge(agent, env, lastNudgeTurn) {
+function computeSurfaceBreakdown(state, messages, total, growth) {
+  let system = 0;
+  let tool = 0;
+  let code = 0;
+  let text = 0;
+  for (const message of messages) {
+    const tokens = defaultCountTokens(message.text ?? "");
+    if (message.contentType === "tool-call" || message.contentType === "tool-result") {
+      tool += tokens;
+    } else if (message.role === "system") {
+      system += tokens;
+    } else if ((message.text ?? "").includes("```")) {
+      code += tokens;
+    } else {
+      text += tokens;
+    }
+  }
+  let summaries = 0;
+  for (const block of state.blocks) {
+    if (block.active) summaries += defaultCountTokens(block.summary);
+  }
+  return { system, tool, summaries, code, text, total, growth };
+}
+var EMERGENCY_NUDGE_MAX_PER_TURN = 3;
+function buildNudge(agent, env, lastNudgeTurn, emergencyNudges, onEmergencyCapHit) {
   const session = agent.session;
   const state = env.store.stateFor(session);
   const coreMessages = allLogMessages(session);
-  const surfaceMessages = eventsToCoreMessages(surfaceEventsOf(session));
+  const surfaceEvents = surfaceEventsOf(session);
+  const surfaceMessages = eventsToCoreMessages(surfaceEvents);
   const tokenCount = measuredTokenCount(agent, surfaceMessages);
   const config = kernelConfigFor(env);
   const turn = env.kernel.processTurn({ messages: coreMessages, state, config, tokenCount });
   env.store.set(session, turn.state);
   const nudge = turn.nudge;
   if (nudge === void 0 || !nudge.shouldInject) return null;
+  const statusMessages = eventsToCoreMessages(
+    surfaceEvents.filter((event) => isCheckpointNode(event) === false)
+  );
+  nudge.contextBreakdown = computeSurfaceBreakdown(turn.state, statusMessages, tokenCount, nudge.contextBreakdown?.growth ?? 0);
   const emergency = nudge.breakdown?.emergencyOverride === 1;
   const turnNumber = findOpenTurn(sessionEventsOf(session)) ?? 0;
-  const alreadyShown = !emergency && lastNudgeTurn.get(session.id) === turnNumber;
-  if (alreadyShown) return null;
-  lastNudgeTurn.set(session.id, turnNumber);
+  if (!emergency) {
+    if (lastNudgeTurn.get(session.id) === turnNumber) return null;
+    lastNudgeTurn.set(session.id, turnNumber);
+  } else {
+    const record = emergencyNudges.get(session.id);
+    if (record !== void 0 && record.turn === turnNumber) {
+      if (record.count >= EMERGENCY_NUDGE_MAX_PER_TURN) {
+        onEmergencyCapHit?.();
+        return null;
+      }
+      record.count += 1;
+    } else {
+      emergencyNudges.set(session.id, { turn: turnNumber, count: 1 });
+    }
+  }
   const text = buildNudgeText(nudge, emergency, session, env.prompts);
   const message = createUserMessage2({
     content: [{ type: "text", text }],
@@ -3920,6 +4095,64 @@ function renderNudgeFromTemplates(nudge, emergency, session, prompts) {
   }
   if (prompts.nudge.tip !== "") parts.push("", prompts.nudge.tip);
   return parts.join("\n");
+}
+
+// src/window.ts
+var DEFAULT_CONTEXT_WINDOW = 128e3;
+function windowSourceLabel(window) {
+  if (window.source === "explicit") return "configured";
+  if (window.source === "projection") {
+    return `session projection current route (auto-refreshes on model switch)`;
+  }
+  if (window.source === "auto") {
+    return `auto-detected from ${window.provider ?? "?"}/${window.model ?? "?"}`;
+  }
+  if (window.probeFailed === true) return "default (auto-detection failed \u2014 restart to re-probe)";
+  return "default (auto-detection unavailable)";
+}
+function projectedContextWindow(agent) {
+  const projections = agent.ctx?.get?.("sessionProjections");
+  const window = projections?.snapshot?.(agent.session)?.values?.contextPressure?.contextWindow;
+  if (typeof window === "number" && Number.isInteger(window) && window > 0) return window;
+  return null;
+}
+function liveRoute(agent) {
+  let rc;
+  try {
+    rc = agent.session.requestContext();
+  } catch {
+    return null;
+  }
+  if (rc === void 0 || rc === null) return null;
+  const { provider, model } = rc;
+  if (typeof provider !== "string" || provider === "") return null;
+  if (typeof model !== "string" || model === "") return null;
+  return { provider, model };
+}
+function routeFor(agent) {
+  const live = liveRoute(agent);
+  return {
+    provider: live?.provider ?? agent.options.provider ?? "",
+    model: live?.model ?? agent.options.model ?? ""
+  };
+}
+async function probeModelWindow(agent, provider, model) {
+  const llm = agent.ctx?.get?.("llm");
+  if (llm?.resolveModelInfo === void 0) return { contextWindow: null, outputReservation: null };
+  try {
+    const info = await llm.resolveModelInfo(provider, model);
+    const window = info?.context?.contextWindow;
+    const cap = info?.defaultMaxTokens;
+    return {
+      contextWindow: typeof window === "number" && Number.isInteger(window) && window > 0 ? window : null,
+      outputReservation: typeof cap === "number" && Number.isInteger(cap) && cap > 0 ? cap : null
+    };
+  } catch {
+    return { contextWindow: null, outputReservation: null };
+  }
+}
+async function detectContextWindow(agent, provider, model) {
+  return (await probeModelWindow(agent, provider, model)).contextWindow;
 }
 
 // src/tools.ts
@@ -4069,6 +4302,21 @@ function validateContentItems(content) {
   });
   if (violations.length > 0) throw new ToolArgsError(violations);
 }
+function guardedRowsInSpan(guarded, shadowed) {
+  const inSpan = new Set(shadowed);
+  return [...guarded].filter((seq) => inSpan.has(seq)).sort((a, b) => a - b);
+}
+function protectedRowRejectionNote(start, end, hits, shadowed) {
+  const preview = hits.slice(0, 4).join(", ");
+  const more = hits.length > 4 ? ` +${hits.length - 4} more` : "";
+  const first = shadowed.indexOf(hits[0]);
+  const last = shadowed.indexOf(hits[hits.length - 1]);
+  const before = first > 0 ? shadowed.slice(0, first) : [];
+  const after = last >= 0 && last < shadowed.length - 1 ? shadowed.slice(last + 1) : [];
+  const slices = [before, after].filter((slice) => slice.length > 0).map((slice) => `${slice[0]}..${slice[slice.length - 1]}`);
+  const recovery = slices.length === 0 ? "no part of this span is compressible while those rows are current \u2014 pick an OLDER span instead (acp_status lists the live ranges)" : `the compressible part of this span is seq ${slices.join(" and ")} \u2014 submit them as separate content entries (or two compress calls), each with its own summary`;
+  return `  seqs ${start}..${end} rejected \u2014 the span covers ${hits.length} CURRENT injected instruction row(s) (seq ${preview}${more}); the host re-injects the newest AGENTS.md copy the moment it leaves the surface, so compressing it reclaims nothing \u2014 ${recovery} (older/stale copies of the same file are fine to compress)`;
+}
 async function handleCompress(env, args, exec) {
   const agent = requireAgent(exec);
   const session = agent.session;
@@ -4093,6 +4341,8 @@ async function handleCompress(env, args, exec) {
   validateContentItems(args.content);
   const ranges = [];
   const alreadyCompressedNotes = [];
+  const rejectedNotes = [];
+  const guardedSeqs = guardedSurfaceSeqsOf(session);
   for (const range of args.content) {
     const startSeq = parseBoundary2(range.startSeq, byRef);
     const endSeq = parseBoundary2(range.endSeq, byRef);
@@ -4109,6 +4359,12 @@ async function handleCompress(env, args, exec) {
         continue;
       }
       throw error;
+    }
+    const shadowedSpan = shadowedSeqsOf(session, resolved.start, resolved.end);
+    const instructionHits = guardedRowsInSpan(guardedSeqs, shadowedSpan);
+    if (instructionHits.length > 0) {
+      rejectedNotes.push(protectedRowRejectionNote(resolved.start, resolved.end, instructionHits, shadowedSpan));
+      continue;
     }
     const startBlockRef = blockRefForSummarySeq(session, resolved.start);
     const endBlockRef = blockRefForSummarySeq(session, resolved.end);
@@ -4130,9 +4386,11 @@ async function handleCompress(env, args, exec) {
     });
   }
   if (ranges.length === 0) {
-    const text = ["Compressed 0 block(s), ~0 tokens reclaimed.", ...alreadyCompressedNotes];
+    const text = ["Compressed 0 block(s), ~0 tokens reclaimed.", ...alreadyCompressedNotes, ...rejectedNotes];
     if (alreadyCompressedNotes.length > 0) {
       text.push("  (all requested ranges were already compressed \u2014 decompress a block to recover its originals)");
+    } else if (rejectedNotes.length > 0) {
+      text.push("  (nothing compressed \u2014 every range covered a current injected instruction row; see the rejections above)");
     }
     return { text: text.join("\n") };
   }
@@ -4185,14 +4443,15 @@ async function handleCompress(env, args, exec) {
     const shadowedTokens = shadowedTokensViaMeter(session, shadowed, agent.ctx);
     const tier = block.tier === 2 || block.tier === 3 ? block.tier : 1;
     const parentBlockIds = compactionIdsOfKernelBlocks(session, block.directBlockIds);
+    const { provider, model } = routeFor(agent);
     const { compactionId } = runCompactionTransaction(session, {
       start,
       end,
       shadowedSeqs: shadowed,
       summary: [{ type: "text", text: range.summary }],
       shadowedTokenCount: shadowedTokens,
-      provider: agent.options.provider ?? "",
-      model: agent.options.model ?? "",
+      provider,
+      model,
       tier,
       kernelBlockId: block.blockId,
       ...range.topic === void 0 ? {} : { topic: range.topic },
@@ -4211,15 +4470,23 @@ async function handleCompress(env, args, exec) {
     );
   }
   const summaryLine = `Compressed ${applied.result.blocksCreated} block(s), ~${applied.result.tokensCompressed} tokens reclaimed.`;
-  const totalSkipped = skippedRanges + alreadyCompressedNotes.length;
+  const totalSkipped = skippedRanges + alreadyCompressedNotes.length + rejectedNotes.length;
   const failedLines = applied.result.errors.map((error) => `  ${error}`);
-  const warningLines = [...freeWarnings.map((warning) => `  ${warning}`), ...failedLines, ...alreadyCompressedNotes, ...lines];
+  const warningLines = [
+    ...freeWarnings.map((warning) => `  ${warning}`),
+    ...failedLines,
+    ...alreadyCompressedNotes,
+    ...rejectedNotes,
+    ...lines
+  ];
   const footer = totalSkipped > 0 ? `  (${totalSkipped} range(s) skipped or failed \u2014 see above)` : "";
   return { text: `${summaryLine}
 ${[...warningLines, footer].filter((line) => line !== "").join("\n")}` };
 }
 var decompressParameters = {
-  blockId: { type: "string", required: true, description: "Block id: the kernel block ref `bN` shown by acp_status (e.g. b1), or a compaction id / prefix from search_context." }
+  blockId: { type: "string", required: true, description: "Block id: the kernel block ref `bN` shown by acp_status (e.g. b1), or a compaction id / prefix from search_context." },
+  offset: { type: "integer", description: "Start position in the block's message list (default 0). Blocks are paged by size \u2014 each page stays under the host tool-result trim budget (up to 100 messages) \u2014 so follow the continue hint in the result to walk the rest." },
+  limit: { type: "integer", description: "Messages per page (default 100; values above 100 are capped to 100). Pages are also bounded by a character budget, so long messages return fewer than this per call." }
 };
 function resolveBlockId(session, arg) {
   const byKernelRef = blockIdOfKernelRef(session, arg);
@@ -4240,17 +4507,40 @@ function handleDecompress(_env, rawArgs, exec) {
   if (block === void 0) {
     return { text: `decompress: block "${args.blockId}" not found (see acp_status for the block list)` };
   }
+  const expanded = expandShadowedSeqs(session, block.blockId);
+  const page = sliceDecompressPage(
+    expanded,
+    args.offset ?? 0,
+    args.limit ?? DEFAULT_DECOMPRESS_PAGE,
+    DEFAULT_DECOMPRESS_PAGE_CHARS,
+    (seq) => {
+      const event = eventAtOf(session, seq);
+      const text = event === void 0 ? "" : extractEventText(event);
+      return text.length === 0 ? 0 : `[seq ${seq}] ${text}`.length;
+    }
+  );
+  if (page.total === 0 || page.seqs.length === 0) {
+    const where = page.total === 0 ? "" : ` has ${page.total} messages; offset ${page.offset} is past the end \u2014 use an offset below ${page.total}, or omit it`;
+    return { text: page.total === 0 ? `Block ${block.blockId} \u2014 ${block.summary}
+
+(no recoverable content)` : `decompress: block ${block.blockId}${where}` };
+  }
   const parts = [];
-  for (const seq of expandShadowedSeqs(session, block.blockId)) {
+  for (const seq of page.seqs) {
     const event = eventAtOf(session, seq);
     const text = event === void 0 ? "" : extractEventText(event);
     if (text.length > 0) parts.push(`[seq ${seq}] ${text}`);
   }
   const tierNote = block.tier > 1 ? ` (tier ${block.tier}, distills ${block.parentBlockIds.length} block(s))` : "";
+  const lines = [];
+  lines.push(`[messages ${page.offset + 1}..${page.offset + page.seqs.length} of ${page.total}]`);
+  if (!page.exhausted) lines.push(`More available \u2014 continue with decompress({ blockId: "${block.blockId}", offset: ${page.offset + page.seqs.length} })`);
   return {
     text: `Block ${block.blockId} \u2014 ${block.summary}${tierNote}
 
-${parts.join("\n\n") || "(no recoverable content)"}`
+${lines.join("\n")}
+
+${parts.join("\n\n") || "(no text content on this page)"}`
   };
 }
 var searchParameters = {
@@ -4269,8 +4559,12 @@ function roleOfEvent(event) {
       return null;
   }
 }
+var searchDocsCache = /* @__PURE__ */ new WeakMap();
 function buildSearchDocs(session) {
-  const ledger = rebuildBlockLedger(sessionEventsOf(session));
+  const events = sessionEventsOf(session);
+  const cached = searchDocsCache.get(events);
+  if (cached !== void 0) return cached;
+  const ledger = rebuildBlockLedger(events);
   const docs = [];
   const claimed = /* @__PURE__ */ new Set();
   for (const block of ledger) {
@@ -4303,6 +4597,7 @@ function buildSearchDocs(session) {
       });
     }
   }
+  searchDocsCache.set(events, docs);
   return docs;
 }
 function handleSearch(_env, rawArgs, exec) {
@@ -4348,11 +4643,6 @@ var statusParameters = {
     description: "Cap on rows or blocks shown (default 30)."
   }
 };
-function isCheckpointEvent(event) {
-  if (event.type !== "user/message") return false;
-  const source = event.data.source;
-  return source?.plugin === "compact";
-}
 async function handleStatus(env, rawArgs, exec) {
   const args = unwrapEnvelope(rawArgs);
   const agent = requireAgent(exec);
@@ -4367,7 +4657,7 @@ async function handleStatus(env, rawArgs, exec) {
   const config = kernelConfigFor({ ...env, modelContextLimit: window.limit });
   const turn = env.kernel.processTurn({ messages: coreMessages, state, config, tokenCount });
   const statusMessages = eventsToCoreMessages(
-    surface.filter((event) => !isCheckpointEvent(event)),
+    surface.filter((event) => isCheckpointNode(event) === false),
     toolNames
   );
   const report = buildStatusReport(turn.state, statusMessages, defaultCountTokens, args);
@@ -4430,44 +4720,6 @@ function makeTools(env) {
   ];
 }
 
-// src/window.ts
-var DEFAULT_CONTEXT_WINDOW = 128e3;
-function windowSourceLabel(window) {
-  if (window.source === "explicit") return "configured";
-  if (window.source === "projection") {
-    return `session projection current route (auto-refreshes on model switch)`;
-  }
-  if (window.source === "auto") {
-    return `auto-detected from ${window.provider ?? "?"}/${window.model ?? "?"}`;
-  }
-  if (window.probeFailed === true) return "default (auto-detection failed \u2014 restart to re-probe)";
-  return "default (auto-detection unavailable)";
-}
-function projectedContextWindow(agent) {
-  const projections = agent.ctx?.get?.("sessionProjections");
-  const window = projections?.snapshot?.(agent.session)?.values?.contextPressure?.contextWindow;
-  if (typeof window === "number" && Number.isInteger(window) && window > 0) return window;
-  return null;
-}
-async function probeModelWindow(agent, provider, model) {
-  const llm = agent.ctx?.get?.("llm");
-  if (llm?.resolveModelInfo === void 0) return { contextWindow: null, outputReservation: null };
-  try {
-    const info = await llm.resolveModelInfo(provider, model);
-    const window = info?.context?.contextWindow;
-    const cap = info?.defaultMaxTokens;
-    return {
-      contextWindow: typeof window === "number" && Number.isInteger(window) && window > 0 ? window : null,
-      outputReservation: typeof cap === "number" && Number.isInteger(cap) && cap > 0 ? cap : null
-    };
-  } catch {
-    return { contextWindow: null, outputReservation: null };
-  }
-}
-async function detectContextWindow(agent, provider, model) {
-  return (await probeModelWindow(agent, provider, model)).contextWindow;
-}
-
 // src/commands.ts
 async function statusText(env, agent) {
   const session = agent.session;
@@ -4524,34 +4776,62 @@ function compressText(env, agent, args) {
     return "/acp compress: the range touches a compressed block summary node \u2014 distill it with the compress tool (seq-based batch), not /acp compress";
   }
   const shadowed = shadowedSeqsOf(session, start, end);
+  const instructionHits = guardedRowsInSpan(guardedSurfaceSeqsOf(session), shadowed);
+  if (instructionHits.length > 0) {
+    return protectedRowRejectionNote(start, end, instructionHits, shadowed);
+  }
   const shadowedTokens = shadowedTokensViaMeter(session, shadowed, agent.ctx);
+  const { provider, model } = routeFor(agent);
   const { compactionId } = runCompactionTransaction(session, {
     start,
     end,
     shadowedSeqs: shadowed,
     summary: [{ type: "text", text: summary }],
     shadowedTokenCount: shadowedTokens,
-    provider: agent.options.provider ?? "",
-    model: agent.options.model ?? ""
+    provider,
+    model
   });
   return `Compressed seqs ${start}..${end} (${shadowed.length} messages) as block ${compactionId.slice(0, 8)}`;
 }
+var DECOMPRESS_USAGE = "/acp decompress <blockId> [offset] [limit]";
 function decompressText(_env, agent, args) {
-  if (args.length < 1) return "/acp decompress <blockId>";
+  if (args.length < 1) return DECOMPRESS_USAGE;
+  const offset = args[1] === void 0 ? 0 : Number(args[1]);
+  if (!Number.isInteger(offset) || offset < 0) return `${DECOMPRESS_USAGE} \u2014 offset must be a non-negative integer`;
+  const limit = args[2] === void 0 ? DEFAULT_DECOMPRESS_PAGE : Number(args[2]);
+  if (!Number.isInteger(limit) || limit < 1 || limit > DEFAULT_DECOMPRESS_PAGE) return `${DECOMPRESS_USAGE} \u2014 limit must be an integer between 1 and ${DEFAULT_DECOMPRESS_PAGE}`;
   const session = agent.session;
   const blockId = blockIdOfKernelRef(session, args[0]);
   const ledger = rebuildBlockLedger(sessionEventsOf(session));
   const block = blockId === null ? ledger.find((entry) => entry.blockId.startsWith(args[0])) : ledger.find((entry) => entry.blockId === blockId);
   if (block === void 0) return `block "${args[0]}" not found (see /acp status)`;
-  const parts = expandShadowedSeqs(session, block.blockId).map((seq) => extractEventText(eventAtOf(session, seq))).filter((text) => text.length > 0);
-  return `Block ${block.blockId} \u2014 ${block.summary}
+  const expanded = expandShadowedSeqs(session, block.blockId);
+  const page = sliceDecompressPage(
+    expanded,
+    offset,
+    limit,
+    DEFAULT_DECOMPRESS_PAGE_CHARS,
+    (seq) => extractEventText(eventAtOf(session, seq)).length
+  );
+  if (page.seqs.length === 0) {
+    if (page.total === 0) return `Block ${block.blockId} \u2014 ${block.summary}
 
-${parts.join("\n\n") || "(no recoverable content)"}`;
+(no recoverable content)`;
+    return `block ${block.blockId} has ${page.total} messages; offset ${offset} is past the end \u2014 use an offset below ${page.total}`;
+  }
+  const parts = page.seqs.map((seq) => extractEventText(eventAtOf(session, seq))).filter((text) => text.length > 0);
+  const lines = [
+    `Block ${block.blockId} \u2014 ${block.summary}`,
+    `[messages ${page.offset + 1}..${page.offset + page.seqs.length} of ${page.total}]`
+  ];
+  if (!page.exhausted) lines.push(`Continue with: /acp decompress ${block.blockId.slice(0, 8)} ${page.offset + page.seqs.length}`);
+  lines.push("", parts.join("\n\n") || "(no recoverable content)");
+  return lines.join("\n");
 }
 function acpCommand(env) {
   return {
     name: "acp",
-    description: "Active Context Pruning \u2014 model-driven context compression. Usage: /acp status | /acp compress <startSeq> <endSeq> <summary> | /acp decompress <blockId>",
+    description: "Active Context Pruning \u2014 model-driven context compression. Usage: /acp status | /acp compress <startSeq> <endSeq> <summary> | /acp decompress <blockId> [offset] [limit]",
     handler: async (invocation) => {
       const raw = invocation.rawInput.trim();
       if (raw === "" || raw === "status") {
@@ -4608,7 +4888,9 @@ var AcpCompactionEngine = class extends CompactionEngine {
    * revive lost-config bugs with every unit test green.
    */
   env;
-  lastNudgeTurn = /* @__PURE__ */ new Map();
+  lastNudgeTurn = new LruMap(DEFAULT_SESSION_CACHE_LIMIT);
+  /** Per-session emergency-nudge injection budget for the current user turn (issue #108). */
+  emergencyNudges = /* @__PURE__ */ new Map();
   /** Successful compress call ids awaiting their tool/result so the pair can be hidden. */
   compressCallIdsToHide = /* @__PURE__ */ new Set();
   /** Per provider/model route the resolved window (probe failures cached too). */
@@ -4621,6 +4903,7 @@ var AcpCompactionEngine = class extends CompactionEngine {
     this.prompts = resolvePrompts(config.prompts);
     const ports = this.config.countTokens !== void 0 ? { countTokens: this.config.countTokens } : {};
     this.kernel = createCore(ports);
+    setDocCacheCap(128 * 1024 * 1024);
     this.store = new AcpStateStore();
     const env = {
       kernel: this.kernel,
@@ -4685,7 +4968,17 @@ var AcpCompactionEngine = class extends CompactionEngine {
       const decision = await next();
       if (decision.kind === "reject") return decision;
       const window = await this.windowFor(payload.agent);
-      const outcome = buildNudge(payload.agent, { ...env, modelContextLimit: window.limit }, this.lastNudgeTurn);
+      const outcome = buildNudge(
+        payload.agent,
+        { ...env, modelContextLimit: window.limit },
+        this.lastNudgeTurn,
+        this.emergencyNudges,
+        () => {
+          ctx.logger.warn(
+            `billion-context-dsh: emergency nudge suppressed \u2014 per-turn budget of ${EMERGENCY_NUDGE_MAX_PER_TURN} spent (session ${payload.agent.session.id}); pressure is still above the emergency threshold`
+          );
+        }
+      );
       if (outcome === null) return decision;
       return { kind: "enter", messages: [...decision.messages, outcome.message] };
     });
@@ -4737,8 +5030,7 @@ var AcpCompactionEngine = class extends CompactionEngine {
     if (this.config.modelContextLimit !== void 0) {
       return { limit: this.config.modelContextLimit, source: "explicit" };
     }
-    const provider = agent.options.provider ?? "";
-    const model = agent.options.model ?? "";
+    const { provider, model } = routeFor(agent);
     const key = `${provider}\0${model}`;
     if (this.config.autoModelContextLimit) {
       const projected = projectedContextWindow(agent);
@@ -4828,6 +5120,7 @@ export {
   DEFAULT_CONTEXT_WINDOW,
   DEFAULT_PROMPTS,
   DEFAULT_RESOLVED,
+  EMERGENCY_NUDGE_MAX_PER_TURN,
   acpCommand,
   assertNoActiveCompaction,
   blockRefForSummarySeq,

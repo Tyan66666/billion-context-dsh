@@ -12,6 +12,7 @@
  */
 import type { Session, SessionEvent, SessionEventMap } from '@deepseek-ai/dsh-session';
 import { type ContentBlock } from '@deepseek-ai/dsh-llm';
+import { type AcpBlockLedgerPayload } from './block-ledger.ts';
 /** One durable ACP block as rebuilt from the session log. */
 export interface AcpBlockLedgerEntry {
     /** The compaction transaction id (stable block identity). */
@@ -118,32 +119,16 @@ export interface CompactionTransactionInput {
     readonly directMessageIds?: readonly string[];
     readonly effectiveMessageIds?: readonly string[];
 }
-/**
- * ACP tier extension fields carried on `compaction/summary` events. The
- * upstream dsh-compaction event type does not know them, so reads and writes
- * go through this precise intersection (never `any`).
- */
-export interface AcpCompactionSummaryFields {
-    /** Compression tier (1/2/3) — 1 = message range, 2 = distills tier-1, 3 = distills tier-2. */
-    readonly tier?: 1 | 2 | 3;
-    /** Short block label (kernel `CompressionBlock.topic`) — the acp_status block title. */
-    readonly topic?: string;
-    /** The acp-kernel block id (`bN`) created for this transaction. */
-    readonly kernelBlockId?: string;
-    /** Durable compaction ids of the blocks distilled into this one. */
-    readonly parentBlockIds?: readonly string[];
-    /**
-     * The kernel block's direct message ids (raw CoreMessage ids) at creation —
-     * recorded so a restarted engine rehydrates the SAME coverage (a tier-2
-     * block's coverage is its parents' originals, not the checkpoint node).
-     */
-    readonly directMessageIds?: readonly string[];
-    /** The kernel block's effective message ids (raw CoreMessage ids) at creation. */
-    readonly effectiveMessageIds?: readonly string[];
-}
 type CompactionSummaryData = SessionEventMap['compaction/summary'];
-/** Read a `compaction/summary` event's data including the ACP tier extension fields. */
-export declare function readCompactionSummary(event: SessionEvent): CompactionSummaryData & AcpCompactionSummaryFields;
+/**
+ * Read a `compaction/summary` event's data. The six ACP tier/lineage fields are
+ * no longer top-level members (issue #141): post-fix writers carry them in the
+ * admitted optional `rawOutput` member (decode via {@link decodeAcpBlockLedger}),
+ * while logs written by pre-fix engines still carry them as top-level members —
+ * so the returned type also intersects with {@link AcpBlockLedgerPayload}, letting
+ * readers fall back to the legacy shape. Never `any`.
+ */
+export declare function readCompactionSummary(event: SessionEvent): CompactionSummaryData & AcpBlockLedgerPayload;
 /**
  * Run one durable compression transaction. Throws on invalid state; on success
  * the four events are in the log and the surface has one summary node.
@@ -163,6 +148,18 @@ export interface SeqCompressibleRange {
     /** Share of messages that are tool messages (tool-call or tool-result), 0-100 — kernel `toolPct` parity. */
     readonly toolPct: number;
 }
+/**
+ * Durable model-free prune: append `compaction/prune` as the shadow price,
+ * then replace the given surface seqs with a user message. dsh-session 0.1.5+
+ * allows only user/message (and system/message) replacements to cite source
+ * events — assistant/message FORBIDS `sourceEventSeqs` because it embeds its
+ * own provider stream — so there is no invisible replacement node anymore:
+ * every hidden span becomes a user message. Callers with meaningful text pass
+ * it (compress call/result hiding keeps the tool outcome visible to the
+ * model); callers without get the fixed prune note. The originals remain in
+ * the append-only log.
+ */
+export declare const PRUNE_NOTE = "(removed by context management)";
 /**
  * Hide one successful `compress` tool's call/result pair after its tool/result
  * has been logged. The durable compaction summary is inserted BEFORE the
@@ -208,11 +205,52 @@ export declare function openToolCallIds(session: Session): Set<string>;
  */
 export declare function deferCompressPairHide(session: Session, callId: string, resultSeq: number, onError?: (error: unknown) => void): void;
 /**
+ * Newest AGENTS.md instruction row per scope (source file). The host
+ * re-injects a file's instructions when its CURRENT copy is absent from the
+ * surface (deepseek-harness packages/context/agent-instructions presence
+ * gate, index.ts:137/:163 — presence+identity, not payload diff), so
+ * compressing the newest row of a scope makes that file come straight back,
+ * while compressing a STALE copy of the same file is silent. Live-audited
+ * shape (session-f25e4fad): EVERY injection row — baseline and worktree —
+ * carries `source.changes[].scope` = `"<dir>\u0000<file>"` (root
+ * `.\u0000AGENTS.md`, worktree `worktrees/<name>\u0000AGENTS.md`), which is
+ * stable across config tweaks unlike `baselineIdentity`. Tail-scan the log,
+ * group by scope, keep the last seq of each group. O(events), mirrors
+ * indexWatermarkOf. Rows without `changes[]` (legacy shapes) are SKIPPED
+ * entirely: identity is what the host's presence gate needs in order to
+ * re-inject a file, so a scope-less row can never come back and must not be
+ * guarded (the earlier shape gave each its own group, which made every legacy
+ * row a permanent hard-reject — issue #71 review S3).
+ */
+export declare function newestInstructionSeqsOf(session: Session): Set<number>;
+/**
+ * Surface seqs NO caller may compress: the CURRENT (newest) injected
+ * agent-instructions row of every scope, restricted to rows still visible on
+ * the surface (one definition of "current" — `newestInstructionSeqsOf`).
+ * `buildCompressibleSeqRanges` never OFFERS them, and both compress entry
+ * points (`handleCompress` in src/tools.ts, `/acp compress` in
+ * src/commands.ts) probe the RESOLVED span against this set and HARD-REJECT a
+ * covering range before the kernel applies it, so nothing durable lands and no
+ * phantom block can exist. This supersedes the earlier F7 draft (warn only):
+ * folding a current copy reclaims nothing — the host re-injects it — so there
+ * is no legitimate outcome to warn about. Deliberately NARROW (issue #71
+ * review F4): only CURRENT agent-instructions rows — the audited loop driver.
+ * Engine-authored metadata rows (nudge echo, compress-pair stub) stay
+ * foldable like main, and STALE copies of the same file stay compressible —
+ * removing them while the newest copy stays visible is the real cleanup.
+ */
+export declare function guardedSurfaceSeqsOf(session: Session): Set<number>;
+/**
  * Compute compressible spans directly from the surface — independent of the
  * kernel's ref map, which can drift after surface replacements in long
  * sessions and hide large tool results from the nudge range table. Skips the
- * recent protected tail, the last user message, and compaction checkpoints;
- * edges are then balanced through resolveSurfaceRange. Ranges are ordered
+ * recent protected tail (last REAL user turn — injected rows never win it,
+ * see isRealUserTurn), the newest AGENTS.md row of every scope, compaction
+ * checkpoints, and ALL host instruction/policy rows (they are barriers that
+ * split segments — compressing a current instruction row makes the host
+ * re-inject it, the loop this PR fixes). Engine-authored metadata rows (nudge
+ * echo, compress-pair stub) fold into the adjacent real segment like main.
+ * Edges are then balanced through resolveSurfaceRange. Ranges are ordered
  * oldest-first (stable across turns — matches the kernel's `oldest first`).
  * UPSTREAM: this self-computation is a labeled workaround for kernel
  * ref-map drift after surface replacements (AGENTS.md rule 11) — drop it and
@@ -280,4 +318,56 @@ export declare function summarySeqOfKernelBlock(session: Session, kernelBlockId:
  * seqs. Cycle-safe (a block can never be its own ancestor).
  */
 export declare function expandShadowedSeqs(session: Session, blockId: string): number[];
+/**
+ * Default decompress page size (#112): a block shadowing hundreds of
+ * messages used to be returned whole in ONE tool result — big enough to
+ * flood the context window or get silently trimmed by the host's
+ * tool-result pruner before the model ever saw the tail. One page per call
+ * keeps every recovery usable; `offset` walks the rest.
+ *
+ * A page is bounded by BOTH this message count and a rendered-character
+ * budget ({@link DEFAULT_DECOMPRESS_PAGE_CHARS}). Count alone was not enough:
+ * the host's `dsh-compaction-tool-result-pruner` (docs/dsh-porting-analysis.md)
+ * trims by CHARACTERS (thresholdChars 8192), so a wide page of long messages
+ * still crossed that line and had its middle dropped. The char bound keeps an
+ * ordinary page under the pruner threshold so it comes back intact; the
+ * message count doubles as a hard ceiling so a pathological `limit` can't
+ * re-open the whole-block flooding half of #112.
+ */
+export declare const DEFAULT_DECOMPRESS_PAGE = 100;
+/**
+ * Rendered-character budget per decompress page (#112). Kept below the host's
+ * tool-result pruner threshold (8192, docs/dsh-porting-analysis.md) with
+ * headroom for the block header, the `[seq N]` prefixes, and the continue hint,
+ * so a normal page survives intact instead of middle-trimmed. Deliberately NOT
+ * tied to acp-kernel's `config.truncate.threshold`: that knob truncates a single
+ * oversized tool output during compression, whereas the host pruner trims our
+ * whole decompress result — different mechanisms, different thresholds.
+ */
+export declare const DEFAULT_DECOMPRESS_PAGE_CHARS = 7000;
+export interface DecompressPage {
+    /** Requested offset floored to >= 0; reported as-is when it lands past the end. */
+    offset: number;
+    /** Limit actually applied (clamped to [1, DEFAULT_DECOMPRESS_PAGE]). */
+    limit: number;
+    /** Total shadowed messages in the block (tier-expanded). */
+    total: number;
+    /** This page's shadowed seqs, in expansion order. */
+    seqs: number[];
+    /** True when no further page follows this one. */
+    exhausted: boolean;
+}
+/**
+ * Slice a block's expanded shadowed-seq list into one page. A page holds at most
+ * `limit` messages AND at most `charBudget` rendered characters, where
+ * `renderLen(seq)` reports each message's on-the-wire length (0 when it carries
+ * no text). Seqs whose original carries no text still occupy a slot, so `offset`
+ * stays a stable continuation index across calls while the log is frozen.
+ * Out-of-range / negative / non-finite values clamp instead of failing (optional
+ * convenience params, not semantic boundaries); non-numeric input falls back to
+ * the default rather than leaking NaN into the result. The first message of the
+ * page is always included even if it alone exceeds the budget, so a walk always
+ * makes progress past a single giant message.
+ */
+export declare function sliceDecompressPage(expanded: number[], offset: number, limit: number, charBudget: number, renderLen: (seq: number) => number): DecompressPage;
 export {};

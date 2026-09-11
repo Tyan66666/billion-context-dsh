@@ -17,6 +17,7 @@ Model-driven context management (Active Context Pruning / ACP) for the DeepSeek 
 | [Configurable prompts design](configurable-prompts-design.md) | Design review draft: per-stage prompt overrides (nudge / range table / system prompt / tool descriptions) via `config.prompts`, template + named placeholders, build-time validation |
 | [Presets design](presets-design.md) | One-word nudge aggressiveness (`config.preset`): five tiers (preserve / relaxed / balanced / efficient / aggressive) resolved into the three nudge thresholds, precedence explicit value > preset > default, display-only in `/acp status`; composition-layer today, settings hot-swap rides on #75 |
 | [Shadow-price host-vocabulary design](shadow-price-host-vocabulary-design.md) | Why `shadowedTokenCount` claims must speak the host token-meter's fixed-heuristic vocabulary (issue #54: CJK sessions bricked when priced with the CJK-aware `defaultCountTokens`; issue #103: image sessions bricked when priced with the route-repriced `node.tokens` — the claim reads `heuristicTokens ?? tokens`); meter-first pricing with an exact mirror fallback; L2 upstream direction |
+| [E2E host harness design](e2e-harness-design.md) | Why the host-integration regression suite (`scripts/e2e/`) assembles the real DSH agent loop in-process against a scripted fake LLM (issue #120); scenario schema, the honest-usage projection-anchor trap, the rc.6 peer-closure pin, phase-2 notes |
 
 ## 🗂 Source layout
 
