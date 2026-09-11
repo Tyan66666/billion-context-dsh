@@ -24,6 +24,7 @@ import { defaultCountTokens } from 'acp-kernel'
 import { extractEventText, extractText, toolCallIdOfResultEvent } from './messages.ts'
 import { hostPriceEvent } from './host-tokens.ts'
 import { eventAtOf, sessionEventsOf } from './session-events.ts'
+import { installedSurfaceReplaceOp } from './surface-op.ts'
 
 /**
  * A surface sequence number as the INSTALLED `dsh-session` sees it. On the
@@ -438,7 +439,7 @@ export function runCompactionTransaction(
       source: compactCheckpointSource(compactionId),
     })
     seqs.push(session.append('user/message', message, {
-      surfaceOp: { op: 'replace', start: input.start as SurfaceSeq, end: input.end as SurfaceSeq },
+      surfaceOp: installedSurfaceReplaceOp(input.start as SurfaceSeq, input.end as SurfaceSeq),
       sourceEventSeqs: [...input.shadowedSeqs] as SurfaceSeq[],
     }).seq)
 
@@ -604,7 +605,7 @@ function hideSurfaceSeqs(
       content: [{ type: 'text', text }],
       source: { kind: 'plugin', plugin: 'billion-context-dsh' },
     }), {
-      surfaceOp: { op: 'replace', start: start as SurfaceSeq, end: end as SurfaceSeq },
+      surfaceOp: installedSurfaceReplaceOp(start as SurfaceSeq, end as SurfaceSeq),
       sourceEventSeqs: [...seqs] as SurfaceSeq[],
     })
     return
@@ -614,7 +615,7 @@ function hideSurfaceSeqs(
     step: 0,
     message: createAssistantMessage({ content: [], source: { provider, model } }),
   }, {
-    surfaceOp: { op: 'replace', start: start as SurfaceSeq, end: end as SurfaceSeq },
+    surfaceOp: installedSurfaceReplaceOp(start as SurfaceSeq, end as SurfaceSeq),
     sourceEventSeqs: [...seqs] as SurfaceSeq[],
   })
 }

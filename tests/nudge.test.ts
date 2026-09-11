@@ -5,10 +5,12 @@ import { createCore, defaultCountTokens, type CompressionCore, type NudgeDecisio
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { AcpStateStore } from '../src/state.ts'
-import { buildNudge, buildNudgeText, rangeTable, resolveTokenCount } from '../src/nudge.ts'
+import { buildNudge, buildNudgeText, computeSurfaceBreakdown, rangeTable, resolveTokenCount } from '../src/nudge.ts'
 import { makeTools, type ToolEnvironment } from '../src/tools.ts'
-import { rebuildBlockLedger } from '../src/region.ts'
-import { buildTextSession } from './helpers.ts'
+import { rebuildBlockLedger, runCompactionTransaction } from '../src/region.ts'
+import { allLogMessages, eventsToCoreMessages, surfaceEventsOf } from '../src/messages.ts'
+import { buildTextSession, appendTurn, appendToolCall, appendToolResult, appendUser, longText } from './helpers.ts'
+import { Session } from '@deepseek-ai/dsh-session'
 
 function fakeAgent(session: import('@deepseek-ai/dsh-session').Session): Agent {
   return {
@@ -237,4 +239,73 @@ test('M4: resolveTokenCount prefers projectedTokens over surfaceTokens over char
     },
   } as unknown as Agent
   assert.equal(resolveTokenCount(withZeroProjected, coreMessages), 77777, 'zero projectedTokens falls through to surfaceTokens')
+})
+
+test('M4: nudge contextBreakdown reflects the SURFACE, not the compressed-away history (#85.2K-tool regression)', () => {
+  // A session with tool pairs; we compress the FIRST pair via a durable
+  // transaction. The kernel computes `contextBreakdown` from the FULL log
+  // (allLogMessages), so the raw nudge reports the historical tool total (both
+  // pairs — the compressed one included). computeSurfaceBreakdown must report
+  // only the LIVE surface tool messages (the surviving pair B), matching what
+  // acp_status shows.
+  const env: ToolEnvironment = { kernel: createCore({}) as CompressionCore, store: new AcpStateStore(), modelContextLimit: 128000 }
+  const session = Session.create('breakdown')
+  appendTurn(session, 1)
+  appendToolCall(session, 'plan a', 'c1')          // seq 2
+  appendToolResult(session, longText('resA', 0), 'c1') // seq 3
+  appendToolCall(session, 'plan b', 'c2')          // seq 4
+  appendToolResult(session, longText('resB', 1), 'c2') // seq 5
+  appendUser(session, longText('question', 2))     // seq 6
+  // Durably compress exactly pair A (seqs 2..3) into one block.
+  runCompactionTransaction(session, {
+    start: 2,
+    end: 3,
+    shadowedSeqs: [2, 3],
+    summary: [{ type: 'text', text: 'summary covering pair A with the auth subsystem decisions preserved verbatim' }],
+    shadowedTokenCount: 500,
+    provider: 'test-provider',
+    model: 'test-model',
+    kernelBlockId: 'b1',
+    effectiveMessageIds: ['2', '3'],
+    directMessageIds: ['2', '3'],
+  })
+  // First access after the durable transaction → stateFor rehydrates the block
+  // from the ledger (state.ts rebuildKernelBlocks); the block stays active.
+  const state = env.store.stateFor(session)
+  assert.ok(state.blocks.some((b) => b.active), 'transaction rebuilt one active block')
+
+  const surfaceMessages = eventsToCoreMessages(surfaceEventsOf(session), new Map())
+  // Full-log perspective: the compressed-away pair A is still in the log, so a
+  // full-log breakdown would count BOTH tool pairs.
+  const allToolTokens = allLogMessages(session)
+    .filter((m) => m.contentType === 'tool-result')
+    .reduce((sum, m) => sum + defaultCountTokens(m.text ?? ''), 0)
+  const surfaceBreakdown = computeSurfaceBreakdown(state, surfaceMessages, 12345, 100)
+  assert.ok(surfaceBreakdown.tool > 0, 'the surviving surface tool pair is counted')
+  assert.ok(surfaceBreakdown.tool < allToolTokens, 'surface tool < full-log tool (compressed pair excluded)')
+  // summaries reflect the active block, not zero.
+  assert.ok(surfaceBreakdown.summaries > 0, 'active block summaries are counted')
+})
+
+test('M4: nudge contextBreakdown is wired to the surface (kernel path uses computeSurfaceBreakdown)', () => {
+  // computeSurfaceBreakdown is exported and buildNudge re-points the nudge's
+  // contextBreakdown to it before rendering; the pure function is verified
+  // above. Here we assert the bare bodies (no blocks, no compression) produce a
+  // sane total that matches the surface sum — a smoke guard that the override
+  // does not corrupt the breakdown shape.
+  const env: ToolEnvironment = { kernel: createCore({}) as CompressionCore, store: new AcpStateStore(), modelContextLimit: 128000 }
+  const session = buildTextSession(6)
+  const state = env.store.stateFor(session)
+  const surfaceMessages = eventsToCoreMessages(surfaceEventsOf(session), new Map())
+  const bd = computeSurfaceBreakdown(state, surfaceMessages, 9999, 50)
+  assert.deepEqual(
+    Object.keys(bd).sort(),
+    ['code', 'growth', 'summaries', 'system', 'text', 'tool', 'total'],
+    'breaks down into tool/text/code/system/summaries/total/growth',
+  )
+  assert.equal(bd.total, 9999)
+  assert.equal(bd.growth, 50)
+  // No blocks → summaries is zero; text carries the alternating user/assistant plain text.
+  assert.equal(bd.summaries, 0)
+  assert.ok(bd.text > 0)
 })

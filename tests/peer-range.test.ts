@@ -66,6 +66,16 @@ for (const peerName of seamPeers) {
 		for (const v of ['0.1.2-alpha.4', '0.1.2-alpha.5', '0.1.2-rc.1']) {
 			assert.equal(semver.satisfies(v, peerRange), true, `${v} must satisfy ${peerRange} (0.1.2 seam)`)
 		}
+		// The 0.1.5 seam (surfaceOp replace renamed `start/end` → `startSeq/endSeq`
+		// in host commit 657e68186a): the engine probes the installed version and
+		// emits the shape that line accepts, so the peer gains a `^0.1.5-alpha.1`
+		// clause — the rename's FIRST published version, lower-capped so every
+		// 0.1.5 prerelease (alpha → rc → final) installs. 0.1.3-alpha.2 (the
+		// newest LEGACY field line) and 0.1.4 stay rejected below; 0.1.4 was never
+		// published.
+		for (const v of ['0.1.5-alpha.1', '0.1.5-alpha.2', '0.1.5-rc.1', '0.1.5-rc.2']) {
+			assert.equal(semver.satisfies(v, peerRange), true, `${v} must satisfy ${peerRange} (0.1.5 seam, renamed surfaceOp)`)
+		}
 	})
 
 	test(`${peerName}: peer range keeps rejecting older and next-minor versions`, () => {
