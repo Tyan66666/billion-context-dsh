@@ -30,9 +30,9 @@ export const ACP_BLOCK_LEDGER_MARKER = '$dshAcpBlockLedger'
 export const ACP_BLOCK_LEDGER_VERSION = 1
 
 /**
- * The six ACP tier/lineage fields carried durably per compressed block so a
+ * The ACP tier/lineage fields carried durably per compressed block so a
  * restarted engine rehydrates the SAME kernel blocks (tier, lineage, coverage)
- * instead of collapsing everything to tier 1.
+ * instead of collapsing everything to tier 1, plus B3's verified readings.
  */
 export interface AcpBlockLedgerPayload {
   /** Compression tier: 1 (message range), 2 (distills tier-1), 3 (distills tier-2). */
@@ -47,6 +47,8 @@ export interface AcpBlockLedgerPayload {
   readonly directMessageIds?: readonly string[]
   /** The kernel block's effective message ids at creation (raw CoreMessage ids). */
   readonly effectiveMessageIds?: readonly string[]
+  /** B3: acceptance readings already green before compression (e.g. "t0-fastpath 8/8"). */
+  readonly verifiedReadings?: readonly string[]
 }
 
 /** True only for an array whose every element is a string. */
@@ -71,6 +73,9 @@ export function encodeAcpBlockLedger(payload: AcpBlockLedgerPayload): ContentBlo
   }
   if (payload.directMessageIds !== undefined) obj.directMessageIds = [...payload.directMessageIds]
   if (payload.effectiveMessageIds !== undefined) obj.effectiveMessageIds = [...payload.effectiveMessageIds]
+  if (payload.verifiedReadings !== undefined && payload.verifiedReadings.length > 0) {
+    obj.verifiedReadings = [...payload.verifiedReadings]
+  }
   return [{ type: 'text', text: JSON.stringify(obj) }]
 }
 
@@ -100,21 +105,23 @@ export function decodeAcpBlockLedger(rawOutput: unknown): AcpBlockLedgerPayload 
       if (record[ACP_BLOCK_LEDGER_MARKER] !== ACP_BLOCK_LEDGER_VERSION) continue
       // Mutable accumulator (the public payload type is readonly); returning it
       // satisfies AcpBlockLedgerPayload because mutable props are assignable to readonly.
-      const result: {
-        tier?: 1 | 2 | 3
-        kernelBlockId?: string
-        topic?: string
-        parentBlockIds?: string[]
-        directMessageIds?: string[]
-        effectiveMessageIds?: string[]
-      } = {}
-      if (record.tier === 1 || record.tier === 2 || record.tier === 3) result.tier = record.tier
-      if (typeof record.kernelBlockId === 'string') result.kernelBlockId = record.kernelBlockId
-      if (typeof record.topic === 'string') result.topic = record.topic
-      if (isStringArray(record.parentBlockIds)) result.parentBlockIds = [...record.parentBlockIds]
-      if (isStringArray(record.directMessageIds)) result.directMessageIds = [...record.directMessageIds]
-      if (isStringArray(record.effectiveMessageIds)) result.effectiveMessageIds = [...record.effectiveMessageIds]
-      return result
+       const result: {
+         tier?: 1 | 2 | 3
+         kernelBlockId?: string
+         topic?: string
+         parentBlockIds?: string[]
+         directMessageIds?: string[]
+         effectiveMessageIds?: string[]
+         verifiedReadings?: string[]
+       } = {}
+       if (record.tier === 1 || record.tier === 2 || record.tier === 3) result.tier = record.tier
+       if (typeof record.kernelBlockId === 'string') result.kernelBlockId = record.kernelBlockId
+       if (typeof record.topic === 'string') result.topic = record.topic
+       if (isStringArray(record.parentBlockIds)) result.parentBlockIds = [...record.parentBlockIds]
+       if (isStringArray(record.directMessageIds)) result.directMessageIds = [...record.directMessageIds]
+       if (isStringArray(record.effectiveMessageIds)) result.effectiveMessageIds = [...record.effectiveMessageIds]
+       if (isStringArray(record.verifiedReadings)) result.verifiedReadings = [...record.verifiedReadings]
+       return result
     }
     return {}
   } catch {

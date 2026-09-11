@@ -8,6 +8,7 @@
 
 import {
   COMPRESS_PHILOSOPHY,
+  HOW_TO_COMPRESS_RULES,
   TIER2_DISTILL_RULES,
   TIER3_CONDENSE_RULES,
   defaultCountTokens,
@@ -26,6 +27,26 @@ import { buildCompressibleSeqRanges, findOpenTurn, summarySeqOfKernelBlock, surf
 import { sessionEventsOf } from './session-events.ts'
 import { kernelConfigFor, type KernelConfigInput } from './config.ts'
 import { DEFAULT_RESOLVED, renderTemplate, type ResolvedPrompts } from './prompts.ts'
+
+/**
+ * B6 nudge 瘦身（2026-09-08 方案 §4 B6）：哲学段与压缩规则段**移出 nudge**——
+ * 它们已经住在系统提示与工具描述里（各注一次），每拍复读=同一份文本反复计费
+ * （本会话实测：nudge 正文 6.1 KB/次 × 3 = 18.4 KB）。nudge 只留「该压缩了 + 压缩哪些」。
+ *
+ * UPSTREAM: this is a labeled host-side workaround (AGENTS.md rule 11), not a
+ * long-term design. The four texts below are imported from acp-kernel and are
+ * removed from already-rendered nudge text, so the clean fix belongs upstream:
+ * an acp-kernel option that renders the nudge without the guidance blocks.
+ * Drop stripNudgeGuidance and use that option once it exists. Tracked in
+ * docs/dsh-porting-verification.md.
+ */
+const GUIDANCE_BLOCKS = [COMPRESS_PHILOSOPHY, HOW_TO_COMPRESS_RULES, TIER2_DISTILL_RULES, TIER3_CONDENSE_RULES] as const
+
+export function stripNudgeGuidance(text: string): string {
+  let out = text
+  for (const block of GUIDANCE_BLOCKS) out = out.split(block).join('')
+  return out.replace(/\n{3,}/g, '\n\n').trim()
+}
 
 /** Kernel inputs the nudge path shares with the compress tool. */
 export interface NudgeEnvironment extends KernelConfigInput {
@@ -292,8 +313,17 @@ export function buildNudgeText(
 
 /**
  * Take the kernel-rendered nudge text and replace its ref-ID-oriented segments
- * with our surface-seq equivalents. Everything else (frame, philosophy,
- * breakdown, HOW_TO_COMPRESS_RULES, tier rules, tip) stays kernel verbatim.
+ * with our surface-seq equivalents.
+ *
+ * The B6 slim step (`stripNudgeGuidance`) runs first: it removes the
+ * philosophy, HOW_TO_COMPRESS_RULES and tier-2/3 rule blocks, because they
+ * already live in the system prompt and the tool descriptions — repeating them
+ * in every nudge only re-billed the same ~6 KB. What stays kernel-verbatim:
+ * the frame, the context breakdown, the tier line and the batch tip.
+ *
+ * Only the ref-ID-oriented segments are replaced with our seq-based
+ * equivalents, because DSH has no `<acp>` ref tags — see
+ * docs/dsh-porting-verification.md:
  */
 function adaptKernelNudgeToSeq(
   text: string,
@@ -301,9 +331,11 @@ function adaptKernelNudgeToSeq(
   session: import('@deepseek-ai/dsh-session').Session,
   prompts: ResolvedPrompts,
 ): string {
-  let out = text
+  // B6：先摘掉哲学/规则段（它们住在系统提示与工具描述里），再做 seq 适配
+  let out = stripNudgeGuidance(text)
   // Tier nudges: replace the kernel trigger block (block ids bN) with our tier
-  // line carrying surface seqs. The kernel's TIER2/3 rules stay in the tail.
+  // line carrying surface seqs. The kernel's TIER2/3 rule blocks were already
+  // removed by stripNudgeGuidance above — those rules live in the system prompt.
   if ((nudge.tier === 2 || nudge.tier === 3) && (nudge.tierTargetBlocks?.length ?? 0) > 0) {
     out = replaceTierTrigger(out, nudge, session, prompts)
   } else if (out.includes('"startId"')) {
@@ -447,5 +479,7 @@ function renderNudgeFromTemplates(
   // Batch-compress tip (from kernel's nudge-text.ts style).
   if (prompts.nudge.tip !== '') parts.push('', prompts.nudge.tip)
 
-  return parts.join('\n')
+  // B6：模板路径同样摘掉哲学/规则段——否则宿主只要覆盖任一 nudge 槽位（如只改 tip），
+  // 整份 6 KB 指引就会重新贴回来（独立复核 2026-09-08 发现的软缺口）。
+  return stripNudgeGuidance(parts.join('\n'))
 }

@@ -116,10 +116,29 @@ export function buildToolCallIndex(events: readonly SessionEvent[]): ReadonlyMap
  *                        untagged (`toolName: ''`), never "text".
  * Non-surface events project to nothing.
  */
+/**
+ * B1 summary source framing. A compaction summary is MODEL-WRITTEN text, not
+ * user words — injected as a user/message with the same standing as real input,
+ * which let obligation sentences inside summaries read as user directives and
+ * the model's own guesses read as user commitments. The frame says both things
+ * up front. It is applied at creation (src/region.ts writes the framed blocks
+ * to BOTH durable writes) and again at projection (below) as an idempotent
+ * safety net for legacy blocks written before the feature.
+ */
+export const SUMMARY_FRAME_PREFIX = '[Model-written summary — not user words; re-verify any obligations before relying on them]'
+
+export function withSummaryFramePrefix(text: string): string {
+  return text.startsWith(SUMMARY_FRAME_PREFIX) ? text : `${SUMMARY_FRAME_PREFIX}\n${text}`
+}
+
 export function projectEvent(event: SessionEvent, toolNames?: ReadonlyMap<string, string>): CoreMessage[] {
   switch (event.type) {
     case 'user/message': {
-      const text = extractText((event.data as { content?: unknown }).content)
+      const raw = extractText((event.data as { content?: unknown }).content)
+      // B1: frame compaction summaries at projection too (idempotent — creation-time
+      // framing already covers new blocks; this catches legacy blocks whose nodes
+      // were written before the feature existed).
+      const text = isCheckpointNode(event) ? withSummaryFramePrefix(raw) : raw
       return text.length > 0 ? [{ id: String(event.seq), role: 'user', contentType: 'text', text }] : []
     }
     case 'assistant/message': {

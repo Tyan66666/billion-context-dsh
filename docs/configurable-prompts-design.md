@@ -1,9 +1,15 @@
 # 可配置提示词设计(Configurable Prompts Design)— v7
 
 > **修订记录(v7,防过度压缩文案提升为默认,issue #55):**
+> **修订记录(v8,nudge 正文瘦身(B6)落地,PR #143):**
+> - **B6**:nudge 正文不再承载哲学段与规则段。`src/nudge.ts` 的 `stripNudgeGuidance` 在渲染后摘除 `COMPRESS_PHILOSOPHY` / `HOW_TO_COMPRESS_RULES` / `TIER2_DISTILL_RULES` / `TIER3_CONDENSE_RULES` 四段——kernel 默认路径(`adaptKernelNudgeToSeq`)与模板路径(`renderNudgeFromTemplates`)都应用,宿主覆盖模板时同样生效,随后折叠空行并 trim。原因:这四段已经住在系统提示(`{philosophy}` / `{howToCompressRules}` / `{tier2DistillRules}` / `{tier3CondenseRules}`)与工具描述里,每次 nudge 复读一遍纯属重复计费(长会话实测 nudge 正文 6.1 KB/次 × 3 = 18.4 KB)。设计记录:docs/injection-governance-design.md §4;测试:tests/g5-governance.test.ts B6-1..4;上游绕行登记:docs/dsh-porting-verification.md。
+> - **对 v7 及更早条目的修正**:R1/K1/K3/K5 里"nudge 文案全部来自 acp-kernel 原文""两档模板内嵌 `{philosophy}`""guidance 默认 = kernel `HOW_TO_COMPRESS_RULES`"这些说法,在 B6 之后**只对未被摘除的段成立**(frame / breakdown / tier 行 / tip 行)。下表 P1/P2/P3 行已同步为当前真实行为。
+> - **`{philosophy}` 占位符的现状**:校验器仍接受它(兼容既有宿主覆盖),但渲染出的哲学段会被 `stripNudgeGuidance` 摘掉——它在 nudge 里已等于空转,想注入哲学段只能改系统提示模板。
+> - **附带(与提示词面相关)**:compress 工具描述新增一句 `verifiedReadings`(见 §2 P7),用于记录已经绿的验收读数。
+>
 > - **R6**:默认模板追加三条防过度压缩引导(见 issue #55:审阅/核对型任务中模型"读完文件→立刻 compress→又 decompress→再压缩"循环):① `WHEN NOT TO COMPRESS` 新增「Content you will still need to cite verbatim — in review/audit/verification tasks, keep source reads un-compressed until the final report is written. If you compressed it and now need the exact detail, decompress costs a full round-trip; prefer delaying the compress.」;② compress 工具描述的 subtask completion 触发词加限定「whose details you have fully consumed and will not re-check」;③ compress 工具描述末尾加自问兜底「Before compressing, ask: will I need to re-verify any detail from this range in this task? If yes, keep it live.」。三条文案先经本地 `cordis.patch.yml` 覆盖(`prompts.tools.compress` + `prompts.systemPrompt`)长时间实测有效,再提升为默认模板——与 R5(#43)同一提升路径。回归:prompts 测试 #5d 钉住三条语义载体,测试 #5 字节快照与 #1 的 WHEN NOT 断言同步更新。改宿主默认模板,不 bump kernel。提升后,本地 `cordis.patch.yml` 中的同名覆盖成为冗余(内容一致),可自行移除。
 > - **R5**:默认 compress 工具描述追加语义压缩时机 + 可行动摘要两句(见 issue #43,AgentFold/CAT 论文启发):「Good compression moments: stage or subtask completion, strategy switches, intermediate milestones, and wrapping up failed exploration — when the details are consumed and no longer critical for the task ahead.」+「When you write a summary, turn dead-end exploration into a conclusion (what was tried, why it failed, the next step) — not a blow-by-blow; and keep the summary the ONLY record.」——纯文案增强,改宿主默认模板,不 bump kernel。
-> - **R1**:默认(无 `prompts.nudge` 覆盖)`buildNudgeText` 直接调用 kernel `renderNudgeText(nudge)`——EFFICIENCY_NOTE/EMERGENCY_HEADER、breakdown、HOW_TO_COMPRESS_RULES、TIER2/3 规则、`💡` tip **全部来自 acp-kernel 原文**,不再手抄模板。仅把 ref-ID 导向的段替换为 surface-seq 版本:`rangesStr`(mNNNNN)→ 我们的范围表;紧急档 JSON example(startId/endId)→ seq 示例;tier 触发块(bN block ids)→ 我们的 tier 行。零范围时保留 kernel 的 "[No specific ranges detected]" 提示。
+> - **R1**:默认(无 `prompts.nudge` 覆盖)`buildNudgeText` 先调 kernel `renderNudgeText(nudge)`,再按 B6 摘掉哲学段与规则段(见 R0)——EFFICIENCY_NOTE/EMERGENCY_HEADER、frame、breakdown、`💡` tip 逐字来自 acp-kernel,**但 `HOW_TO_COMPRESS_RULES` 与 TIER2/3 规则段已被摘除**(原文仍由系统提示与工具描述承载)。ref-ID 导向的段替换为 surface-seq 版本:`rangesStr`(mNNNNN)→ 我们的范围表;紧急档 JSON example(startId/endId)→ seq 示例;tier 触发块(bN block ids)→ 我们的 tier 行。零范围时保留 kernel 的 "[No specific ranges detected]" 提示。
 > - **R2**:**双路径分派**——`prompts.nudge !== DEFAULT_RESOLVED.nudge`(宿主覆盖了任何 nudge 槽位)→ 走模板渲染路径(`renderNudgeFromTemplates`,v5 装配原样保留,config.prompts 定制优先);否则走 kernel 路径。默认引用(未覆盖)与模板路径按引用相等判断。
 > - **R3**:kernel 路径下紧急档**无 `💡 tip`**(kernel 紧急分支没有批量提示行)——这是与 kernel 对齐的行为变化,测试 #3 断言同步更新。
 > - **R4**:**compress 工具参数包裹容错**——部分模型把参数写成 `{ "arguments": "{\"content\": [...]}" }`(双重嵌套)或 `{ "arguments": { "content": [...] } }`;旧 DSH 校验器报 `invalid arguments: "arguments" must be an object` 导致模型无限重试。修复:schema 增加可选 `arguments`(type: `json`)节点 + `content` 去掉 `required: true`(required 会在解包前拒绝包裹形态),`handleCompress` 用 `unwrapCompressArgs` 解包;两种形态都不带 content 时报清晰错误。
@@ -61,9 +67,9 @@ billion-context-dsh 目前所有"模型可见"的提示词文本都是硬编码�
 
 | # | 阶段 | 当前位置 | 内容 | 可用占位符 |
 |---|---|---|---|---|
-| P1 | nudge 普通档首句 | `src/prompts.ts`(DEFAULT_PROMPTS.nudge.normal) | kernel `EFFICIENCY_NOTE` 逐字——"This is an efficiency nudge to compress early and keep context lean — not an overflow warning. …"(内嵌 philosophy;**不含 "Context usage is at X%" 陈述**,usage 只通过 breakdown 传达) | `{pct}` `{philosophy}` |
-| P2 | nudge 紧急档首句 | `src/prompts.ts`(DEFAULT_PROMPTS.nudge.emergency) | "⚠️ Context limit reached — compress now. Prioritize consumed tool outputs."(内嵌 philosophy) | `{pct}` `{philosophy}` |
-| P3 | nudge 指导行 | `src/prompts.ts`(DEFAULT_PROMPTS.nudge.guidance) | kernel `HOW_TO_COMPRESS_RULES` 全文(KEEP/DROP/PRIORITY/格式) | 无 |
+| P1 | nudge 普通档首句 | `src/prompts.ts`(DEFAULT_PROMPTS.nudge.normal) | B6 后的效率通知首句——"Efficiency nudge: compress consumed ranges early to keep context lean — not an overflow warning. A stronger alert appears only if the context is actually full."(正文 ≤300 B;**不再内嵌 philosophy**;**不含 "Context usage is at X%" 陈述**,usage 只通过 breakdown 传达) | `{pct}`(`{philosophy}` 仍被接受但渲染后会被摘除) |
+| P2 | nudge 紧急档首句 | `src/prompts.ts`(DEFAULT_PROMPTS.nudge.emergency) | "⚠️ Context limit reached — compress now. Prioritize consumed tool outputs."(B6 后不再内嵌 philosophy) | `{pct}`(`{philosophy}` 同上) |
+| P3 | nudge 指导行 | `src/prompts.ts`(DEFAULT_PROMPTS.nudge.guidance) | 默认 = kernel `HOW_TO_COMPRESS_RULES` 全文(KEEP/DROP/PRIORITY/格式),但 B6 会在渲染后**摘除**该段;宿主自定义的 guidance 文案(kernel 原文之外)不受影响 | 无 |
 | P4 | nudge tier 蒸馏行 | `src/nudge.ts`(buildNudgeText) | "Tier 2: 1 tier-1 block(s) distillable (4750 tokens) — compress their summary node(s) [seqs …]…" | `{tier} {count} {prevTier} {tokens} {seqs}` |
 | P8 | nudge 上下文分解 | `src/prompts.ts`(DEFAULT_PROMPTS.nudge.breakdown) | "Context breakdown: 0K system \| 134K tool \| 0K summaries \| 10K code \| 7K text"(对齐 kernel `formatBreakdown`) | `{system} {tool} {summaries} {code} {text}` |
 | P9 | nudge 增长行 | `src/prompts.ts`(DEFAULT_PROMPTS.nudge.growth) | "+26K since last nudge" | `{growth}` |
@@ -133,11 +139,11 @@ type PromptInput = string | null
 type PromptOverride<T> = { [K in keyof T]?: PromptInput }
 
 export interface NudgePrompts {
-  /** P1 普通档首句。占位符:{pct} {philosophy} */
+  /** P1 普通档首句。占位符:{pct}（`{philosophy}` 仍被接受,但 B6 会摘除渲染出的哲学段) */
   normal: string
-  /** P2 紧急档首句。占位符:{pct} {philosophy} */
+  /** P2 紧急档首句。占位符:{pct}（`{philosophy}` 同上) */
   emergency: string
-  /** P3 指导行(默认 = kernel HOW_TO_COMPRESS_RULES)。无占位符 */
+  /** P3 指导行(默认 = kernel HOW_TO_COMPRESS_RULES;B6 渲染后摘除) */
   guidance: string
   /** P4 tier 蒸馏行。占位符:{tier} {count} {prevTier} {tokens} {seqs} */
   tier: string
@@ -355,7 +361,7 @@ tools: {
 | `src/nudge.ts` | `NudgeEnvironment` 加 `readonly prompts?: ResolvedPrompts`;**B1 关键行**:`buildNudge` 内 `nudge.ts:100` 的调用改为 `buildNudgeText(nudge, emergency, session, env.prompts)`——这是配置进入 nudge 的**唯一转发点**,漏掉 = 配置被接受但静默失效;`buildNudgeText(nudge, emergency, session, prompts = DEFAULT_RESOLVED)`(可选末参);`rangeTable(session, prompts = DEFAULT_RESOLVED)`;**R1/R2 双路径**:默认引用 → kernel `renderNudgeText` + `adaptKernelNudgeToSeq`(replaceRangesStr / replaceTierTrigger / replaceEmergencyExample);覆盖 → `renderNudgeFromTemplates`(模板装配) |
 | `src/tools.ts` | `ToolEnvironment` 加 `readonly prompts?: ResolvedPrompts`;`makeTools` 里四个 description 从 `env.prompts.tools.*` 取,缺省 `DEFAULT_RESOLVED`;**R4 容错**:compress schema 增加可选 `arguments`(type: `json`)节点、`content` 去掉 `required: true`;`handleCompress` 开头用 `unwrapCompressArgs` 解包 `{ arguments: "..." }` / `{ arguments: {...} }` 两种包裹形态,两种形态都不带 content 时报清晰错误 |
 | `src/system-prompt.ts` | `ACP_SYSTEM_PROMPT` 改为"默认模板渲染结果"导出(名称与语义不变);模板/渲染逻辑留在 `prompts.ts` |
-| `src/prompts.ts` | **K2**:`NudgePrompts` 新增 `breakdown` / `growth` / `tip` 槽位与默认模板;**K1**:normal/emergency 默认模板对齐 kernel(内嵌 `{philosophy}`);`guidance` 默认 = `HOW_TO_COMPRESS_RULES`;**K4**:systemPromptTemplate 新增 `{howToCompressRules}` / `{tier2DistillRules}` / `{tier3CondenseRules}` 占位符 + WHEN TO/WHEN NOT 段落;**K5**:`renderSystemPrompt` 注入 4 个 kernel 变量 |
+| `src/prompts.ts` | **K2**:`NudgePrompts` 新增 `breakdown` / `growth` / `tip` 槽位与默认模板;**K1**:normal/emergency 默认模板对齐 kernel(内嵌 `{philosophy}`,但 B6 渲染后摘除哲学段);`guidance` 默认 = `HOW_TO_COMPRESS_RULES`(B6 渲染后摘除);**K4**:systemPromptTemplate 新增 `{howToCompressRules}` / `{tier2DistillRules}` / `{tier3CondenseRules}` 占位符 + WHEN TO/WHEN NOT 段落;**K5**:`renderSystemPrompt` 注入 4 个 kernel 变量 |
 | `AGENTS.md` | 模块图加 `prompts.ts`(M4) |
 | `docs/README.md` | ~~加索引行~~ **已完成**(v1 已收录本设计文档条目) |
 

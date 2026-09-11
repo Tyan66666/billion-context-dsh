@@ -9,6 +9,7 @@ import { AcpStateStore } from '../src/state.ts'
 import { makeTools, type ToolEnvironment } from '../src/tools.ts'
 import { blockRegistry, rebuildBlockLedger, sliceDecompressPage, DEFAULT_DECOMPRESS_PAGE, DEFAULT_DECOMPRESS_PAGE_CHARS } from '../src/region.ts'
 import { rangeTable } from '../src/nudge.ts'
+import { SUMMARY_FRAME_PREFIX } from '../src/messages.ts'
 import { appendTurn, appendToolResult, appendToolCall, appendMultiToolCall, appendUser, appendAssistant, buildTextSession, buildShortTextSession, longText } from './helpers.ts'
 
 function makeEnv(limit = 128000): ToolEnvironment {
@@ -305,8 +306,12 @@ test('M3: decompress accepts the kernel block ref bN that acp_status shows', asy
   assert.match(kernelBlockId!, /^b\d+$/, 'the durable block records its kernel ref')
 
   const text = await decompressAll(env, session, kernelBlockId!)
-  // The bN path resolves to the SAME durable block as the compaction id.
-  assert.match(text, /Block [0-9a-f-]{36} — Authentication/, 'bN resolves to the compaction id')
+  // The bN path resolves to the SAME durable block as the compaction id. Since B1
+  // (injection governance) the durable summary carries the model-written frame, so
+  // the header echoes it before the summary's first line.
+  assert.match(text, /Block [0-9a-f-]{36} — /, 'bN resolves to the compaction id')
+  assert.ok(text.includes(SUMMARY_FRAME_PREFIX), 'framed summary in the decompress header')
+  assert.match(text, /Authentication summary/)
   assert.match(text, /\[msg 0\]/)
   assert.match(text, /\[msg 4\]/)
 })
