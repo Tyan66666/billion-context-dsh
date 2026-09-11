@@ -105,21 +105,23 @@ export function decodeAcpBlockLedger(rawOutput: unknown): AcpBlockLedgerPayload 
       if (record[ACP_BLOCK_LEDGER_MARKER] !== ACP_BLOCK_LEDGER_VERSION) continue
       // Mutable accumulator (the public payload type is readonly); returning it
       // satisfies AcpBlockLedgerPayload because mutable props are assignable to readonly.
-      const result: {
-        tier?: 1 | 2 | 3
-        kernelBlockId?: string
-        topic?: string
-        parentBlockIds?: string[]
-        directMessageIds?: string[]
-        effectiveMessageIds?: string[]
-      } = {}
-      if (record.tier === 1 || record.tier === 2 || record.tier === 3) result.tier = record.tier
-      if (typeof record.kernelBlockId === 'string') result.kernelBlockId = record.kernelBlockId
-      if (typeof record.topic === 'string') result.topic = record.topic
-      if (isStringArray(record.parentBlockIds)) result.parentBlockIds = [...record.parentBlockIds]
-      if (isStringArray(record.directMessageIds)) result.directMessageIds = [...record.directMessageIds]
-      if (isStringArray(record.effectiveMessageIds)) result.effectiveMessageIds = [...record.effectiveMessageIds]
-      return result
+       const result: {
+         tier?: 1 | 2 | 3
+         kernelBlockId?: string
+         topic?: string
+         parentBlockIds?: string[]
+         directMessageIds?: string[]
+         effectiveMessageIds?: string[]
+         verifiedReadings?: string[]
+       } = {}
+       if (record.tier === 1 || record.tier === 2 || record.tier === 3) result.tier = record.tier
+       if (typeof record.kernelBlockId === 'string') result.kernelBlockId = record.kernelBlockId
+       if (typeof record.topic === 'string') result.topic = record.topic
+       if (isStringArray(record.parentBlockIds)) result.parentBlockIds = [...record.parentBlockIds]
+       if (isStringArray(record.directMessageIds)) result.directMessageIds = [...record.directMessageIds]
+       if (isStringArray(record.effectiveMessageIds)) result.effectiveMessageIds = [...record.effectiveMessageIds]
+       if (isStringArray(record.verifiedReadings)) result.verifiedReadings = [...record.verifiedReadings]
+       return result
     }
     return {}
   } catch {

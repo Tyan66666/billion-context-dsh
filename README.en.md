@@ -195,11 +195,14 @@ A walkthrough of the ACP philosophy this project inherits — how active context
 
 | Tool | What it does |
 | --- | --- |
-| `compress` | Replace a seq range with a dense summary you write (edges auto-balanced to tool-pair boundaries); re-compressing a block's summary node distills it (tier 2/3) |
+| `compress` | Replace a seq range with a dense summary you write (edges auto-balanced to tool-pair boundaries); re-compressing a block's summary node distills it (tier 2/3). Each range may carry `verifiedReadings: string[]` — the files/sections you actually read and verified in that range; persisted with the summary and echoed back in the compress result as `verified: …`, so later turns know what was checked without re-reading |
 | `decompress` | Restore a previously compressed block's original content (read-only); accepts the `bN` ref shown by acp_status or a compaction id. Large blocks are paged by size — each page stays under the host tool-result trim budget (~7K chars, up to 100 messages) — so a normal page comes back intact; pass `offset`/`limit` and follow the continue hint in the result to walk a very large block |
 | `search_context` | Search compressed block summaries and originals by keyword (acp-kernel hybrid retrieval: stemming + CJK bigrams + fuzzy); hits link back to the owning block |
 | `acp_status` | CONTEXT BREAKDOWN (tool/text/summaries shares of the visible total) + compressed-block ledger + nudge decision line + a `Checkpoint seqs` row mapping each ACTIVE block's kernel ref (`bN`) to its checkpoint summary seq (the distill entry point, issue #60); no context-window rows. Drilldown supported: `scope:"compressed"` per block, `scope:"uncompressed"` + `view:"messages"`/`"ranges"` per message/range, with `tool` filter, `sort` order and `limit` cap. Drilldown row refs are kernel ids (mN) — feed them straight to `compress` as `startSeq`/`endSeq` (auto-mapped to the live surface seq); `Surface:` seqs work too |
 | `/acp` | status / compress / decompress from the command bar; status also shows human-side window info (estimated context, window source, compressed-block ledger, and **nudge arbitration** — `nudge: idle/ACTIVE — reason` plus how many tokens remain until the next nudge, decided by the same kernel turn as the nudge path) |
+
+- **Summary source framing**: every compaction summary is prefixed at write time with `[Model-written summary — not user words; re-verify any obligations before relying on them]` — written into BOTH the durable summary event and its checkpoint node (one identical text), with an idempotent projection-time safety net for legacy blocks. Purpose: stop the model from executing obligation-like sentences inside a summary as if they were the user's own words.
+- **Slim nudges**: the compression philosophy/rules sections are no longer repeated in every nudge body (they already live in the system prompt); a nudge carries only the trigger frame + context breakdown + range table. The template path (`config.prompts.nudge`) strips the same sections. Design background: [docs/injection-governance-design.md](docs/injection-governance-design.md).
 
 ## Upstream & credits
 

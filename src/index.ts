@@ -46,7 +46,6 @@ import { ACP_SYSTEM_PROMPT_ORDER } from './system-prompt.ts'
 import { renderSystemPrompt, resolvePrompts, type AcpPrompts, type ResolvedPrompts } from './prompts.ts'
 import { DEFAULT_CONTEXT_WINDOW, probeModelWindow, projectedContextWindow, routeFor, type AcpWindow } from './window.ts'
 import { deferCompressPairHide, stripOrphanedSurfaceToolMessages } from './region.ts'
-import { elideUnchangedInjections, visibleInjectionKeys, type InjectedMessageLike } from './injection-dedupe.ts'
 
 export { AcpStateStore } from './state.ts'
 export { kernelConfigFor, type KernelConfigInput } from './config.ts'
@@ -203,7 +202,6 @@ export class AcpCompactionEngine extends CompactionEngine {
   private readonly emergencyNudges = new Map<string, { turn: number; count: number }>()
   /** Successful compress call ids awaiting their tool/result so the pair can be hidden. */
   private readonly compressCallIdsToHide = new Set<string>()
-  /** B2：去重判定面现算自会话面（无跨请求状态——旧副本被遮蔽即整包重注）。 */
   /** Per provider/model route the resolved window (probe failures cached too). */
   private readonly windowCache = new Map<string, AcpWindow>()
   /** Per route the adapter's per-request output cap (the output reservation); null = undisclosed. */
@@ -320,22 +318,7 @@ export class AcpCompactionEngine extends CompactionEngine {
       // in flight at pre-step (the previous step's tools all landed), so the
       // default empty in-flight set is safe.
       stripOrphanedSurfaceToolMessages(payload.agent.session)
-      // B2 不变包引用化（2026-09-08 方案 §4 B2）：仅当**当前会话面上仍有同 kind + 同哈希的
-      // 副本**时，才把新注入帧降为 `[unchanged: sha1:<hash>]`（≤60 B）；旧副本已被压缩遮蔽
-      // 时整包重注（它是唯一一份）。判定面现算，不持有跨请求状态。
-      const applyDedupe = <T extends InjectedMessageLike>(messages: readonly T[]): T[] => {
-        const visible = visibleInjectionKeys(payload.agent.session)
-        const r = elideUnchangedInjections(messages, visible)
-        if (r.elided > 0) {
-          this.ctx.logger.info(`billion-context-dsh: injection dedupe — ${r.elided} unchanged frame(s), re-injected ${r.injectedBytes} B (saved ${r.savedBytes} B)`)
-        }
-        return r.messages
-      }
-      if (!this.config.autoNudge) {
-        const decision0 = await next()
-        if (decision0.kind === 'reject') return decision0
-        return { kind: 'enter', messages: applyDedupe(decision0.messages) }
-      }
+      if (!this.config.autoNudge) return next()
       const decision = await next()
       if (decision.kind === 'reject') return decision
       const window = await this.windowFor(payload.agent)
@@ -353,9 +336,8 @@ export class AcpCompactionEngine extends CompactionEngine {
           )
         },
       )
-      const deduped = applyDedupe(decision.messages)
-      if (outcome === null) return { kind: 'enter', messages: deduped }
-      return { kind: 'enter', messages: [...deduped, outcome.message] }
+      if (outcome === null) return decision
+      return { kind: 'enter', messages: [...decision.messages, outcome.message] }
     })
     // The load-bearing ACP guidance lives in the system prompt ONCE; nudges
     // stay short and advisory (model-driven: the model decides). The

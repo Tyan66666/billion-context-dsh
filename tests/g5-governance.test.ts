@@ -1,20 +1,33 @@
 /**
- * g5-governance.test — B3 止损依据结构化 + B6 nudge 瘦身
- * （2026-09-08 过度工程治理方案 §4 B3/B6；六例）。
+ * g5-governance.test.ts — B3 (structured loss-prevention basis: verified
+ * readings) and B6 (slim nudge) regression coverage.
+ *
+ * Post-review state (maintainer review of #132, 2026-09-11):
+ * - B3's `verifiedReadings` ride inside the rawOutput block-ledger payload
+ *   (issue #141 discipline: NO top-level members on compaction/summary) and
+ *   must stay readable back through `verifiedReadingsOf` AND through the raw
+ *   payload decode itself.
+ * - B6 strips the philosophy/rules blocks out of every nudge (they live once
+ *   in the system prompt and tool descriptions). The assertions pin REAL
+ *   rendered nudge substrings instead of round-tripping the same imported
+ *   constants the stripper removes (a tautology that could never fail).
+ * - All log access goes through the seam API (`sessionEventsOf` /
+ *   `eventAtOf`) — dsh-session 0.1.5 exposes no `.events` getter.
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { Session } from '@deepseek-ai/dsh-session'
-import { runCompactionTransaction, readCompactionSummary, verifiedReadingsOf } from '../src/region.ts'
+import { runCompactionTransaction, readCompactionSummary, verifiedReadingsOf, type CompactionTransactionInput } from '../src/region.ts'
 import { compressParameters } from '../src/tools.ts'
-import { buildNudgeText, stripNudgeGuidance } from '../src/nudge.ts'
-import { COMPRESS_PHILOSOPHY, HOW_TO_COMPRESS_RULES } from 'acp-kernel'
+import { buildNudgeText } from '../src/nudge.ts'
 import type { NudgeDecision } from 'acp-kernel'
 import { ACP_SYSTEM_PROMPT } from '../src/system-prompt.ts'
 import { DEFAULT_PROMPTS, resolvePrompts } from '../src/prompts.ts'
+import { decodeAcpBlockLedger } from '../src/block-ledger.ts'
+import { eventAtOf, sessionEventsOf } from '../src/session-events.ts'
 import { buildTextSession } from './helpers.ts'
 
-const tx = (session: Session, extra: Record<string, unknown> = {}) => runCompactionTransaction(session, {
+const tx = (session: Session, extra: Partial<CompactionTransactionInput> = {}) => runCompactionTransaction(session, {
   start: 1,
   end: 4,
   shadowedSeqs: [1, 2, 3, 4],
@@ -23,28 +36,30 @@ const tx = (session: Session, extra: Record<string, unknown> = {}) => runCompact
   provider: 'p',
   model: 'm',
   ...extra,
-} as never)
+})
 
-test('B3-1 已绿验收读数结构化落盘：compaction/summary 事件带 verifiedReadings', () => {
+test('B3-1 已绿验收读数结构化落盘：存进 rawOutput ledger 载荷，读面可读回', () => {
   const session = buildTextSession(6)
   const { seqs } = tx(session, { verifiedReadings: ['t0-fastpath 8/8 绿', '闭环侧 400/400 绿'] })
-  const event = session.events[seqs[1]!]!
+  const event = eventAtOf(session, seqs[1]!)!
   assert.equal(event.type, 'compaction/summary')
   assert.deepEqual([...verifiedReadingsOf(event)], ['t0-fastpath 8/8 绿', '闭环侧 400/400 绿'])
-  assert.deepEqual([...(readCompactionSummary(event).verifiedReadings ?? [])], ['t0-fastpath 8/8 绿', '闭环侧 400/400 绿'])
+  const decoded = decodeAcpBlockLedger(readCompactionSummary(event).rawOutput)
+  assert.deepEqual([...(decoded.verifiedReadings ?? [])], ['t0-fastpath 8/8 绿', '闭环侧 400/400 绿'])
+  assert.equal(Object.hasOwn(event.data, 'verifiedReadings'), false, '#141 纪律：verifiedReadings 不得是顶层成员')
 })
 
 test('B3-2 缺位=不写键、读面空数组（绝不抛）', () => {
   const session = buildTextSession(6)
   const { seqs } = tx(session)
-  const event = session.events[seqs[1]!]!
-  assert.equal('verifiedReadings' in (event.data as Record<string, unknown>), false, '缺位不写键（round-trip 纪律）')
+  const event = eventAtOf(session, seqs[1]!)!
+  assert.equal(Object.hasOwn(event.data, 'verifiedReadings'), false, '缺位不写键（round-trip 纪律）')
   assert.deepEqual(verifiedReadingsOf(event), [])
 })
 
 test('B3-3 非摘要事件读面防御：空数组而非抛', () => {
   const session = buildTextSession(2)
-  const nonSummary = session.events[0]!
+  const nonSummary = sessionEventsOf(session)[0]!
   assert.deepEqual(verifiedReadingsOf(nonSummary), [])
 })
 
@@ -63,16 +78,29 @@ test('B6-1 nudge 正文（不含范围表）≤300 B', () => {
   const text = buildNudgeText(decision, false, session)
   const body = text.split('Surface:')[0]!.trim()
   assert.ok(Buffer.byteLength(body, 'utf8') <= 300, `正文=${Buffer.byteLength(body, 'utf8')}B ≤ 300B`)
-  assert.match(body, /efficiency nudge|Efficiency nudge/, '仍保留「该压缩了」的框')
+  assert.match(body, /efficiency nudge/i, '仍保留「该压缩了」的框')
 })
 
-test('B6-2 哲学段与规则段仍在系统提示里（移出≠删除）', () => {
+test('B6-2 哲学段与规则段移出 nudge、仍留在系统提示里（移出≠删除）', () => {
   assert.ok(ACP_SYSTEM_PROMPT.includes('Compression Philosophy:'), '系统提示保留哲学段')
   assert.ok(ACP_SYSTEM_PROMPT.includes('HOW TO COMPRESS'), '系统提示保留压缩规则')
-  const stripped = stripNudgeGuidance(`FRAME\n\n${COMPRESS_PHILOSOPHY}\n\n${HOW_TO_COMPRESS_RULES}\n\nTAIL`)
-  assert.equal(stripped.includes('Compression Philosophy'), false)
-  assert.equal(stripped.includes('HOW TO COMPRESS'), false)
-  assert.match(stripped, /FRAME[\s\S]*TAIL/, '只摘指引段，框与尾保留')
+  // Pinned against the REAL rendered output — a round-trip through the very constants the stripper removes could never fail.
+  const session = buildTextSession(12)
+  const decision: NudgeDecision = {
+    shouldInject: true,
+    reason: 'probe',
+    compressibleRanges: [],
+    tierTargetBlocks: [],
+    contextUsage: 0.5,
+    tier: null,
+    breakdown: { usage: 0.5, growth: 0, growthReference: 0, effectiveThreshold: 0, nudgeGrowthTokens: 50000, growthFloor: 20000, currentTokens: 50000, referenceTokens: 50000 } as never,
+    contextBreakdown: { system: 1000, tool: 2000, summaries: 0, code: 0, text: 3000 },
+  } as never
+  const text = buildNudgeText(decision, false, session)
+  assert.match(text, /efficiency nudge/i, 'nudge 仍带效率框')
+  assert.ok(text.includes('Context breakdown:'), 'nudge 仍带上下文分解行')
+  assert.equal(text.includes('Compression Philosophy:'), false, '哲学段已从 nudge 摘除')
+  assert.equal(text.includes('HOW TO COMPRESS'), false, '压缩规则已从 nudge 摘除')
 })
 
 test('B6-4 模板路径（宿主覆盖任一 nudge 槽）同样摘指引段（独立复核发现的软缺口）', () => {
