@@ -239,14 +239,24 @@ function nudgeEnvFor(preset?: PresetName) {
 }
 
 test('config: a lower tier lowers the over-limit line — efficient fires where balanced stays quiet', () => {
-  // At ~61% usage: below the balanced max 0.70 line (and below its min, so the
-  // growth gate keeps it quiet) but above the efficient max 0.60 line, which fires
-  const agent = fakeAgent(midSession())
-
-  const quiet = buildNudge(agent, nudgeEnvFor('balanced'), new Map<string, number>())
+  // At ~61% usage: below the balanced max 0.70 line but above the efficient max
+  // 0.60 line — that gap is the difference this test isolates.
+  //
+  // A FRESH nudge state cannot observe the line at all: since kernel 0.0.54 a
+  // first-sight mass-ready state (never shown, no baseline) fires immediately
+  // whenever usage >= minContextLimitPct, and 61% clears every tier's min
+  // (balanced 0.45, efficient 0.40). So each env is warmed with one call whose
+  // result is discarded; the over-limit line decides the call after it.
+  const balancedEnv = nudgeEnvFor('balanced')
+  const balancedAgent = fakeAgent(midSession())
+  buildNudge(balancedAgent, balancedEnv, new Map<string, number>(), new Map())
+  const quiet = buildNudge(balancedAgent, balancedEnv, new Map<string, number>(), new Map())
   assert.equal(quiet, null, 'balanced (max 0.70) does not fire at ~61% usage')
 
-  const loud = buildNudge(agent, nudgeEnvFor('efficient'), new Map<string, number>())
+  const efficientEnv = nudgeEnvFor('efficient')
+  const efficientAgent = fakeAgent(midSession())
+  buildNudge(efficientAgent, efficientEnv, new Map<string, number>(), new Map())
+  const loud = buildNudge(efficientAgent, efficientEnv, new Map<string, number>(), new Map())
   assert.ok(loud !== null, 'efficient (max 0.60) fires the over-limit nudge at ~61% usage')
   assert.equal(loud!.emergency, false, '61% is above max but below the emergency line')
 })

@@ -81,11 +81,11 @@ return {
 
 ## 7. 验证
 
-已验证：`npm run typecheck` 0 错、`npm test` **279 全绿**、与 main 的 dist 零差异、worktree 内无冲突标记；另做两次变异验证——禁用 `assertNudgeThresholdOrder` 只让「反向窗口」用例红、把 `aggressive.min` 由 0.30 改成 0.35 只让 15 值快照用例红。
-- 18 条新测试覆盖：内核不变量逐行成立；单调谱系（相邻档三值严格递减）；**15 个阈值逐字快照**（README 表格即契约，改一个数字即红）；`PRESET_NAMES` 恰好五键且有序；`balanced == 开箱默认`；`isPresetName` 守卫（大小写 / 空格 / 非串全拒）；`resolvePreset` 命中 + 未知名报错并列合法值；`resolveAcpConfig` 全填 / 显式优先 / 部分覆盖保留其余 / 未知名 fail-fast / **反向窗口 fail-fast** / 省略 preset 行为逐字节不变；解析值经 `kernelConfigFor` 原样到达内核（`growthRatio` 等无关键保持默认）+ **`coreOverrides.nudge` 同名键最后落地**；未知 preset 在**引擎构造**边界同样 fail-fast；`/acp status` 的 `preset:` 行逐字（含解析后的三个百分比）；端到端——同一 ~61% 用量下 `efficient`（max 0.60）触发过限 nudge 而 `balanced`（max 0.70）保持安静（证明档位真的改变内核决策）。
+已验证：`npm run typecheck` 0 错、`npm test` **318 全绿**（299 条基线 + 19 条本 PR 新增）、与 main 的 dist 零差异、worktree 内无冲突标记（合并 main 时四处冲突——`README.md` / `README.en.md` 的配置表行、`src/index.ts` / `src/tools.ts` 的 import 块——分别以「main 的行 + 插入 `preset` 行」「两侧 import 取并集」解决）；另做两次变异验证——禁用 `assertNudgeThresholdOrder` 只让「反向窗口」用例红、把 `aggressive.min` 由 0.30 改成 0.35 只让 15 值快照用例红。
+- 19 条新测试覆盖：内核不变量逐行成立；单调谱系（相邻档三值严格递减）；**15 个阈值逐字快照**（README 表格即契约，改一个数字即红）；`PRESET_NAMES` 恰好五键且有序；`balanced == 开箱默认`；`isPresetName` 守卫（大小写 / 空格 / 非串全拒）；`resolvePreset` 命中 + 未知名报错并列合法值；`resolveAcpConfig` 全填 / 显式优先 / 部分覆盖保留其余 / 未知名 fail-fast / **反向窗口 fail-fast** / 省略 preset 行为逐字节不变；解析值经 `kernelConfigFor` 原样到达内核（`growthRatio` 等无关键保持默认）+ **`coreOverrides.nudge` 同名键最后落地**；未知 preset 在**引擎构造**边界同样 fail-fast；`/acp status` 的 `preset:` 行逐字（含解析后的三个百分比）；端到端——同一 ~61% 用量下 `efficient`（max 0.60）触发过限 nudge 而 `balanced`（max 0.70）保持安静（证明档位真的改变内核决策）；两个档位都先调用一次暖住状态再断言第二次，因为内核 ≥0.0.54 的 `firstSightMassReady` 会在全新状态下按 `min` 直接触发，绕过 `max` 这条被断言的线。
 - 测试小坑：Node 22 下 `assert.throws(fn)` 返回 `undefined`，故断言错误信息改用正则校验器参数（`assert.throws(fn, /…/)`），并以 `.*` 桥接错误消息中引号名与合法值列表之间的分隔符。
 
 ## 8. 后续 TODO
 
-- #75 Phase 1 落地后：把 `preset` 别名暴露进 settings 命名空间，`/acp config set preset <tier>` 热切换（与六个标量键同一通道）。
+- #75 Phase 1 落地后：把 `preset` 别名暴露进 settings 命名空间，`/acp config set preset <tier>` 热切换（与六个标量键同一通道）。`src/settings.ts` 现无 `preset`（未知键按未知键拒绝），所以当前只有组合行能设置它。
 - owner 决策后：视需要把 `growthRatio` / `protectedLastMessages` 提为一等键或纳入预设维度。
