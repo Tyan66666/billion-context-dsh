@@ -38,7 +38,7 @@ src/
 └── commands.ts     # M4: /acp slash command (status / compress / decompress / config)
 
 scripts/e2e/
-├── run-e2e.mjs     # entry: runs scenarios/*.json sequentially, asserts the persisted event log (issue #120)
+├── run-e2e.mjs     # entry: runs scenarios/*.json sequentially, asserts the persisted event log AND the request bodies the fake LLM received (wire-level prompt-cache byte-stability; issue #120/#111)
 ├── harness.mjs     # in-process real DSH host: cordis + agent-loop + DeepSeek adapter, mounts AcpCompactionEngine
 ├── fake-llm.mjs     # scripted OpenAI-compatible SSE server (FIFO turns; {{U1}} live-seq templates; honest usage for rule 12's projection anchor)
 └── scenarios/      # basic-compress / nudge-rhythm / compress-then-decompress / acp-status (data-only JSON)
