@@ -5,6 +5,7 @@ import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { AcpStateStore } from '../src/state.ts'
 import {
   AlreadyCompressedRangeError,
+  PRUNE_NOTE,
   assertNoActiveCompaction,
   blockIdOfKernelRef,
   blockRegistry,
@@ -19,7 +20,7 @@ import {
   shadowedSeqsOf,
   stripOrphanedSurfaceToolMessages,
 } from '../src/region.ts'
-import { appendTurn, appendToolCall, appendToolResult, appendMultiToolCall, appendUser, appendAssistant, buildTextSession, longText } from './helpers.ts'
+import { appendTurn, appendToolCall, appendToolResult, appendMultiToolCall, appendUser, appendAssistant, buildTextSession, longText, wholeSurfaceRangeView } from './helpers.ts'
 
 test('M2: AcpStateStore initialises one state per session', () => {
   const store = new AcpStateStore()
@@ -34,12 +35,12 @@ test('M2: AcpStateStore initialises one state per session', () => {
 
 test('M5: findOpenTurn / assertNoActiveCompaction track the durable lock', () => {
   const session = Session.create('s')
-  assert.equal(findOpenTurn(session.events), null)
+  assert.equal(findOpenTurn(session.snapshotEvents()), null)
   appendTurn(session, 1)
-  assert.equal(findOpenTurn(session.events), 1)
+  assert.equal(findOpenTurn(session.snapshotEvents()), 1)
   session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
-  assert.equal(findOpenTurn(session.events), null)
-  assertNoActiveCompaction(session.events)
+  assert.equal(findOpenTurn(session.snapshotEvents()), null)
+  assertNoActiveCompaction(session.snapshotEvents())
 })
 
 test('M5: runCompactionTransaction lands the four events and shadows the range', () => {
@@ -56,7 +57,7 @@ test('M5: runCompactionTransaction lands the four events and shadows the range',
   assert.ok(compactionId.length > 0)
   assert.equal(seqs.length, 4)
 
-  const types = session.events.slice(-4).map((event) => event.type)
+  const types = session.snapshotEvents().slice(-4).map((event) => event.type)
   assert.deepEqual(types, ['compaction/start', 'compaction/summary', 'user/message', 'compaction/end'])
 
   // Surface: the shadowed seqs are gone, the summary node is on the surface.
@@ -64,7 +65,7 @@ test('M5: runCompactionTransaction lands the four events and shadows the range',
   assert.ok(session.surface.nodes.includes(seqs[2]!), 'the replacement node joins the surface')
 
   // The summary node carries the checkpoint source.
-  const replaceEvent = session.events[seqs[2]!]!
+  const replaceEvent = session.snapshotEvents()[seqs[2]!]!
   assert.equal(replaceEvent.type, 'user/message')
   const source = (replaceEvent.data as { source?: { plugin?: string } }).source
   assert.equal(source?.plugin, 'compact')
@@ -73,7 +74,7 @@ test('M5: runCompactionTransaction lands the four events and shadows the range',
   assert.equal(session.deriveMessages().length, 3)
 
   // The durable log still holds every original event (decompress can recover).
-  assert.equal(session.events.length, 6 + 1 /*turn*/ + 4)
+  assert.equal(session.snapshotEvents().length, 6 + 1 /*turn*/ + 4)
 })
 
 test('M5: the block ledger rebuilds from the log without kernel state', () => {
@@ -96,7 +97,7 @@ test('M5: the block ledger rebuilds from the log without kernel state', () => {
     provider: 'p',
     model: 'm',
   })
-  const ledger = rebuildBlockLedger(session.events)
+  const ledger = rebuildBlockLedger(session.snapshotEvents())
   assert.equal(ledger.length, 2)
   assert.deepEqual(ledger[0]!.shadowedSeqs, [1, 2, 3, 4])
   assert.equal(ledger[1]!.shadowedTokenCount, 2000)
@@ -125,7 +126,7 @@ test('M5: blockIdOfKernelRef resolves the bN the model tool shows back to the co
     model: 'm',
     kernelBlockId: 'b2',
   })
-  const ledger = rebuildBlockLedger(session.events)
+  const ledger = rebuildBlockLedger(session.snapshotEvents())
   // The acp_status block rows (bN) must resolve to the durable ids the
   // decompress/search tools accept — the whole point of the dual-id support.
   assert.equal(blockIdOfKernelRef(session, 'b1'), ledger[0]!.blockId)
@@ -227,7 +228,7 @@ test('M5: a fully shadowed span throws AlreadyCompressedRangeError with the cove
       && error.start === 1
       && error.end === 4
       && error.coveringBlockIds.length === 1
-      && error.coveringBlockIds[0] === rebuildBlockLedger(session.events)[0]!.blockId,
+      && error.coveringBlockIds[0] === rebuildBlockLedger(session.snapshotEvents())[0]!.blockId,
     're-compressing an already compressed span reports the covering block',
   )
 })
@@ -299,7 +300,7 @@ test('M5: a stale dangling compaction/start self-heals instead of poisoning the 
   const realWarn = console.warn
   console.warn = (message: unknown, ...rest: unknown[]) => { warns.push(String(message)) }
   try {
-    assert.doesNotThrow(() => assertNoActiveCompaction(session.events))
+    assert.doesNotThrow(() => assertNoActiveCompaction(session.snapshotEvents()))
   } finally {
     console.warn = realWarn
   }
@@ -311,7 +312,7 @@ test('M5: a stale dangling compaction/start self-heals instead of poisoning the 
 
 test('M5: runCompactionTransaction fails fast on a range that is not in the surface (zero events written)', () => {
   const session = buildTextSession(4)
-  const before = session.events.length
+  const before = session.snapshotEvents().length
   assert.throws(
     () => runCompactionTransaction(session, {
       start: 99,
@@ -326,7 +327,7 @@ test('M5: runCompactionTransaction fails fast on a range that is not in the surf
   )
   // The failure is detected BEFORE any durable event is written, so a bad
   // range never leaves a dangling compaction/start or an orphan summary.
-  assert.equal(session.events.length, before, 'no durable event was written')
+  assert.equal(session.snapshotEvents().length, before, 'no durable event was written')
 })
 
 test('M5: a failed compaction transaction writes a compensating compaction/end before rethrowing', () => {
@@ -349,7 +350,7 @@ test('M5: a failed compaction transaction writes a compensating compaction/end b
   )
   // The transaction appended compaction/start then compaction/summary, and the
   // catch block added a compensating compaction/end — never a dangling start.
-  assert.equal(session.events[session.events.length - 1]!.type, 'compaction/end')
+  assert.equal(session.snapshotEvents()[session.snapshotEvents().length - 1]!.type, 'compaction/end')
 })
 
 test('M5: tool-call ranges are auto-adjusted to balanced edges', () => {
@@ -410,7 +411,7 @@ test('M5: pass-2 expansion must not cross a checkpoint into value-reversed seqs'
   session.append('user/message', createUserMessage({
     content: [{ type: 'text', text: longText('summary', 0) }],
     source: { kind: 'user', plugin: 'compact' },
-  }), { surfaceOp: { op: 'replace', start: 1, end: 1 }, sourceEventSeqs: [1] })
+  }), { surfaceOp: { op: 'replace', startSeq: 1, endSeq: 1 }, sourceEventSeqs: [1] })
   // nodes: [8, 2, 3, 4, 5, 6, 7] — NON-monotonic: the newer checkpoint seq 8
   // sits ahead of the older residual nodes 2..7 (the live production shape
   // behind the '110295..106762' reversed nudge range).
@@ -444,9 +445,9 @@ test('M5: ledger backfills shadowedTokenCount for legacy blocks written as 0', (
     role: 'user',
     content: [{ type: 'text', text: 'legacy summary' }],
     source: { kind: 'plugin', plugin: 'compact', compactionId: 'legacy-1' },
-  } as never, { surfaceOp: { op: 'replace', start: 1, end: 3 }, sourceEventSeqs: [1, 2, 3] })
+  } as never, { surfaceOp: { op: 'replace', startSeq: 1, endSeq: 3 }, sourceEventSeqs: [1, 2, 3] })
   session.append('compaction/end', { compactionId: 'legacy-1', turn: 1 })
-  const ledger = rebuildBlockLedger(session.events)
+  const ledger = rebuildBlockLedger(session.snapshotEvents())
   assert.equal(ledger.length, 1)
   assert.ok(ledger[0]!.shadowedTokenCount > 0, 'legacy 0 is backfilled from shadowed originals')
 })
@@ -465,11 +466,18 @@ test('M5: stripOrphanedSurfaceToolMessages removes orphan results and orphan cal
   const hidden = stripOrphanedSurfaceToolMessages(session)
   assert.equal(hidden, 2, 'both the orphan call and the orphan result are pruned')
 
-  // The empty assistant pruning nodes derive to nothing: only q0/q1 remain.
-  assert.equal(session.deriveMessages().length, 2)
+  // 0.1.5 has no invisible replacement node: each hidden node becomes a
+  // prune-note user message, so q0/q1 plus two notes remain visible.
+  const afterOrphans = session.deriveMessages()
+  assert.equal(afterOrphans.length, 4)
+  assert.equal(
+    afterOrphans.filter((message) => message.content.some((block) => (block as { type?: string }).type === 'text' && (block as { text?: string }).text === PRUNE_NOTE)).length,
+    2,
+    'each hidden node leaves one prune note',
+  )
   // The pairing cache is healthy again and the surface yields compressible spans.
   assert.doesNotThrow(() => resolveSurfaceRange(session, 1, session.surface.nodes[session.surface.nodes.length - 1]!))
-  assert.doesNotThrow(() => buildCompressibleSeqRanges(session, { preserveRecent: 0 }), 'orphan cleanup leaves the range table computable')
+  assert.doesNotThrow(() => buildCompressibleSeqRanges(session, wholeSurfaceRangeView(session), { preserveRecent: 0 }), 'orphan cleanup leaves the range table computable')
 })
 
 test('M5: buildCompressibleSeqRanges carries kernel-parity toolPct and oldest-first order', () => {
@@ -486,7 +494,7 @@ test('M5: buildCompressibleSeqRanges carries kernel-parity toolPct and oldest-fi
   appendToolCall(session, longText('call', 4), 'call_1', 1, 3)   // seq 5 — tool
   appendToolResult(session, longText('result', 5), 'call_1', 1, 4) // seq 6 — tool
 
-  const ranges = buildCompressibleSeqRanges(session, { preserveRecent: 0 })
+  const ranges = buildCompressibleSeqRanges(session, wholeSurfaceRangeView(session), { preserveRecent: 0 })
   assert.equal(ranges.length, 2, 'protected user message splits the surface into two ranges')
   assert.equal(ranges[0]!.toolPct, 0, 'text-only range reports toolPct 0')
   assert.equal(ranges[1]!.toolPct, Math.round((2 / 3) * 100), '2-tool-of-3-msg range reports the tool share (67)')
@@ -505,7 +513,7 @@ test('M5: stripOrphanedSurfaceToolMessages preserves an in-flight tool call', ()
   const hidden = stripOrphanedSurfaceToolMessages(session, new Set(['call-acp']))
   assert.equal(hidden, 0, 'the executing compress call is not treated as an orphan')
   assert.equal(session.deriveMessages().length, before, 'the in-flight call stays on the surface')
-  assert.ok(session.surface.nodes.includes(session.events.find((event) => event.type === 'assistant/message')!.seq), 'the assistant call node remains visible')
+  assert.ok(session.surface.nodes.includes(session.snapshotEvents().find((event) => event.type === 'assistant/message')!.seq), 'the assistant call node remains visible')
 })
 
 test('M5: hideCompressToolPair removes the compress call/result from the invalid surface', () => {
@@ -543,7 +551,7 @@ test('M5: hideCompressToolPair removes the compress call/result from the invalid
   assert.ok(!after.some((message) => message.role === 'assistant' && message.content.some((block) => (block as { type?: string }).type === 'tool-call')), 'compress call is hidden')
   assert.ok(!after.some((message) => message.role === 'user' && message.content.some((block) => (block as { type?: string }).type === 'tool-result')), 'compress result is hidden as a tool-result')
   assert.ok(after.some((message) => message.role === 'user' && message.content.some((block) => (block as { type?: string }).type === 'text' && (block as { text?: string }).text === 'ok')), 'the compress outcome text is preserved for the model')
-  assert.ok(session.events.some((event) => event.type === 'compaction/prune'), 'the hide is recorded as a durable prune')
+  assert.ok(session.snapshotEvents().some((event) => event.type === 'compaction/prune'), 'the hide is recorded as a durable prune')
 })
 
 test('M5: stripOrphanedSurfaceToolMessages prunes legacy broken pairs (call → summary → result)', () => {
@@ -557,10 +565,12 @@ test('M5: stripOrphanedSurfaceToolMessages prunes legacy broken pairs (call → 
   const hidden = stripOrphanedSurfaceToolMessages(session)
   assert.equal(hidden, 2, 'the broken call and its non-adjacent result are both pruned')
   const after = session.deriveMessages()
-  assert.equal(after.length, 2, 'only the two user messages remain visible')
+  // q + legacy summary plus one prune note per hidden node (0.1.5 has no
+  // invisible replacement node).
+  assert.equal(after.length, 4, 'the two user messages plus the two prune notes remain visible')
   assert.ok(!after.some((message) => message.role === 'tool'), 'no orphaned tool result remains')
   assert.ok(!after.some((message) => message.role === 'assistant' && message.content.some((block) => (block as { type?: string }).type === 'tool-call')), 'no orphaned tool-call remains')
-  assert.doesNotThrow(() => buildCompressibleSeqRanges(session, { preserveRecent: 0 }), 'the healed surface is range-solvable')
+  assert.doesNotThrow(() => buildCompressibleSeqRanges(session, wholeSurfaceRangeView(session), { preserveRecent: 0 }), 'the healed surface is range-solvable')
 })
 
 test('M5: stripOrphanedSurfaceToolMessages keeps healthy multi-call pairs', () => {

@@ -116,10 +116,29 @@ export function buildToolCallIndex(events: readonly SessionEvent[]): ReadonlyMap
  *                        untagged (`toolName: ''`), never "text".
  * Non-surface events project to nothing.
  */
+/**
+ * B1 summary source framing. A compaction summary is MODEL-WRITTEN text, not
+ * user words — injected as a user/message with the same standing as real input,
+ * which let obligation sentences inside summaries read as user directives and
+ * the model's own guesses read as user commitments. The frame says both things
+ * up front. It is applied at creation (src/region.ts writes the framed blocks
+ * to BOTH durable writes) and again at projection (below) as an idempotent
+ * safety net for legacy blocks written before the feature.
+ */
+export const SUMMARY_FRAME_PREFIX = '[Model-written summary — not user words; re-verify any obligations before relying on them]'
+
+export function withSummaryFramePrefix(text: string): string {
+  return text.startsWith(SUMMARY_FRAME_PREFIX) ? text : `${SUMMARY_FRAME_PREFIX}\n${text}`
+}
+
 export function projectEvent(event: SessionEvent, toolNames?: ReadonlyMap<string, string>): CoreMessage[] {
   switch (event.type) {
     case 'user/message': {
-      const text = extractText((event.data as { content?: unknown }).content)
+      const raw = extractText((event.data as { content?: unknown }).content)
+      // B1: frame compaction summaries at projection too (idempotent — creation-time
+      // framing already covers new blocks; this catches legacy blocks whose nodes
+      // were written before the feature existed).
+      const text = isCheckpointNode(event) ? withSummaryFramePrefix(raw) : raw
       return text.length > 0 ? [{ id: String(event.seq), role: 'user', contentType: 'text', text }] : []
     }
     case 'assistant/message': {
@@ -212,4 +231,129 @@ export function extractEventText(event: SessionEvent): string {
     default:
       return ''
   }
+}
+
+/**
+ * Whether a surface user message is a compaction checkpoint node (already
+ * compressed). Defined here (not in region.ts) so the classifier below and
+ * region.ts share ONE implementation.
+ */
+export function isCheckpointNode(event: SessionEvent): boolean {
+  if (event.type !== 'user/message') return false
+  const source = (event.data as { source?: { plugin?: string } }).source
+  return source?.plugin === 'compact'
+}
+
+/**
+ * Injection/authoring classification of one surface event — the ONE shared
+ * classifier for range scanning and the protected-tail scan (never ad-hoc
+ * predicates that drift apart).
+ *
+ * - `real` — genuine conversation content (user turns without an injected
+ *   source, assistant prose/tool-calls, tool results, sub-agent relay rows).
+ *   This is the only class that may win "last real user message" protection
+ *   (minus relay rows, see `isRealUserTurn`).
+ * - `metadata` — the engine's own ephemeral rows: nudge echoes and
+ *   compress-pair replacement stubs. Their content is derived from
+ *   already-visible messages, so folding them into an adjacent real segment
+ *   is zero-loss — this preserves main's behavior for engine-authored rows.
+ * - `checkpoint` — compaction summary nodes (`plugin: 'compact'`).
+ *   Distillation is an explicit act; never folded into any segment.
+ * - `instruction` — host-authored policy/instructions: AGENTS.md injections
+ *   (both host shapes), skill catalogs, and ANY unknown `kind:'plugin'` row.
+ *   Folding these is unsafe (the model would lose live policy text, and the
+ *   host re-injects the current AGENTS.md copy when it disappears — the
+ *   compress → re-inject loop this PR fixes). Unknown plugin names fall here
+ *   deliberately: a future host injection must never silently become
+ *   compressible content.
+ */
+export type SurfaceEventClass = 'real' | 'metadata' | 'checkpoint' | 'instruction'
+
+/** Plugin names the engine itself authors — safe to fold into real segments. */
+export const METADATA_PLUGINS: ReadonlySet<string> = new Set([
+  'acp-nudge', // nudge echo (src/nudge.ts)
+  'billion-context-dsh', // compress-pair replacement stub (src/region.ts)
+])
+
+/**
+ * Host plugins whose rows are real CONTENT, not policy: folding them reclaims
+ * tokens and provokes nothing, so they fold exactly like an assistant turn.
+ *  - '@deepseek-ai/dsh-system-prompt' (dsh-agent-loop): dynamic-context
+ *    snapshot rows. The host appends a new row only when the snapshot TEXT
+ *    changes (`if (this.retained?.text === snapshot) return`), so removing an
+ *    old row never re-appends it — long sessions just accumulate them.
+ *  - 'user-approval' (dsh-user-approval): one-shot approval-policy notice.
+ *  - 'tools-ptc' (dsh-tools): deferred tool context, can carry image blocks.
+ * A plugin NOT listed here still falls to 'instruction' below, so a future
+ * presence-driven injection channel stays protected by default (issue #71
+ * review B2).
+ */
+const REAL_CONTENT_PLUGINS: ReadonlySet<string> = new Set([
+  '@deepseek-ai/dsh-system-prompt',
+  'user-approval',
+  'tools-ptc',
+])
+
+/** Known host policy kinds that must never be folded (safe-listing beyond `plugin`). */
+const HOST_INSTRUCTION_KINDS: ReadonlySet<string> = new Set([
+  'agent-instructions', // AGENTS.md injection (hook shape: {kind:'agent-instructions', form:'instructions'})
+  'skill-catalog', // skill catalog (form:'catalog')
+])
+
+/**
+ * True for AGENTS.md instruction rows in BOTH host shapes: the hook shape
+ * (`kind:'agent-instructions'`, form 'instructions') and the baseline shape
+ * (`kind:'plugin'` + plugin 'agent-instructions'). Shared by the newest-row
+ * scan and the range scanner so protection and folding always agree on what
+ * counts as an AGENTS.md row.
+ */
+export function isAgentInstructionsRow(event: SessionEvent): boolean {
+  if (event.type !== 'user/message') return false
+  const source = (event.data as { source?: { kind?: string; plugin?: string } }).source
+  if (!source) return false
+  return source.kind === 'agent-instructions' || (source.kind === 'plugin' && source.plugin === 'agent-instructions')
+}
+
+export function classifySurfaceEvent(event: SessionEvent): SurfaceEventClass {
+  // Compaction summary nodes first — they are user messages too.
+  if (isCheckpointNode(event)) return 'checkpoint'
+  // Assistant / tool events are always genuine content.
+  if (event.type !== 'user/message') return 'real'
+  const source = (event.data as { source?: { kind?: string; plugin?: string } }).source
+  if (!source) return 'real' // user turn written without a source: genuine content
+  const kind = source.kind
+  if (kind === 'user') return 'real' // real user turn (host stamps {kind:'user'})
+  if (kind === 'plugin') {
+    if (source.plugin !== undefined && METADATA_PLUGINS.has(source.plugin)) return 'metadata'
+    if (source.plugin !== undefined && REAL_CONTENT_PLUGINS.has(source.plugin)) return 'real'
+    // Unknown plugin names are policy rows until proven otherwise: a future
+    // presence-driven injection must never silently become compressible.
+    return 'instruction'
+  }
+  if (kind !== undefined && HOST_INSTRUCTION_KINDS.has(kind)) return 'instruction'
+  // Sub-agent relay rows and any future kind: treat as real content for
+  // compressibility, but they must not win "last real user message" protection
+  // (see isRealUserTurn) — a relay is not the user speaking.
+  return 'real'
+}
+
+/**
+ * Whether an event is a real user turn — the protected-tail criterion. An
+ * injected row (AGENTS.md, skill catalog, nudge echo, tool notice) is real
+ * *content* at most but is never the user speaking: the latest real user
+ * message must keep its protection window even when an injected row lands
+ * after it. The scan this replaces protected "the last non-checkpoint
+ * user/message", which on live sessions is frequently an AGENTS.md injection
+ * row (the host appends it in the same enter batch) — the actual last user
+ * message was left compressible while synthetic output sat safe.
+ */
+export function isRealUserTurn(event: SessionEvent): boolean {
+  if (event.type !== 'user/message') return false
+  if (classifySurfaceEvent(event) !== 'real') return false
+  const source = (event.data as { source?: { kind?: string; plugin?: string } }).source
+  // Host content rows that are NOT the user speaking (dynamic-context snapshot,
+  // approval notice, deferred tool context): foldable, but they must never win
+  // the protection window — that is exactly the bug class issue #71 fixes.
+  if (source?.plugin !== undefined && REAL_CONTENT_PLUGINS.has(source.plugin)) return false
+  return source?.kind !== 'subagent-report' && source?.kind !== 'subagent-settled'
 }

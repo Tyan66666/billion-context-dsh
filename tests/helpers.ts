@@ -28,6 +28,7 @@ export function appendAssistant(session: Session, text: string, turn = 1, step =
   session.append('assistant/message', {
     turn,
     step,
+    stream: [],
     message: createAssistantMessage({
       content: [{ type: 'text', text }],
       provider: 'test-provider',
@@ -40,6 +41,7 @@ export function appendToolCall(session: Session, text: string, callId: string, t
   session.append('assistant/message', {
     turn,
     step,
+    stream: [],
     message: createAssistantMessage({
       content: [
         { type: 'text', text },
@@ -73,6 +75,7 @@ export function appendMultiToolCall(session: Session, text: string, callIds: rea
   session.append('assistant/message', {
     turn,
     step,
+    stream: [],
     message: createAssistantMessage({
       content: [
         { type: 'text', text },
@@ -93,4 +96,41 @@ export function buildTextSession(count: number, id: string = 'test-session'): Se
     else appendAssistant(session, longText('reply', index), 1, index)
   }
   return session
+}
+
+/** Short (~87-char, fixed-length) counterpart to buildTextSession: small enough that several messages fit under one decompress page's char budget, so paging/limit assertions are stable (issue #112). Callers must size the session AND compressed range to clear the kernel's compress gates — see the tools.test.ts decompress-limit test. */
+export function buildShortTextSession(count: number): Session {
+  const session = Session.create('test-session')
+  appendTurn(session, 1)
+  for (let index = 0; index < count; index += 1) {
+    const line = `short line ${String(index).padStart(3, '0')} ${'abcdefghijklmnopqrstuvwxyz0123456789'.repeat(2)}`
+    if (index % 2 === 0) appendUser(session, line)
+    else appendAssistant(session, line, 1, index)
+  }
+  return session
+}
+
+/**
+ * A kernel range view that offers the WHOLE surface as one span.
+ *
+ * Production feeds the range table the kernel's own `compressibleRanges`
+ * (translated to surface seqs through the same view type). These tests target
+ * the FILTER layer on top of that geometry — instruction barriers, the
+ * protected tail, checkpoints, the system node — so one spanning range isolates
+ * it from how the kernel happens to group messages. The ref→seq mapping and the
+ * kernel grouping have their own test (region.test.ts, kernel range source).
+ *
+ * The ref names are arbitrary: only the mapping through `refs.byRef` matters.
+ */
+export function wholeSurfaceRangeView(
+  session: Session,
+): { ranges: { startRef: string; endRef: string }[]; refs: { byRef: Record<string, string> } } {
+  const nodes = session.surface.nodes
+  const first = nodes[0]
+  const last = nodes[nodes.length - 1]
+  if (first === undefined || last === undefined) return { ranges: [], refs: { byRef: {} } }
+  return {
+    ranges: [{ startRef: 'm00001', endRef: 'm00002' }],
+    refs: { byRef: { m00001: String(first), m00002: String(last) } },
+  }
 }

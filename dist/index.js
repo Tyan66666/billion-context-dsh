@@ -4,14 +4,1859 @@ import {
   ManualCompactionError
 } from "@deepseek-ai/dsh-compaction";
 
-// node_modules/acp-kernel/dist/chunk-MWXUJVMN.js
+// node_modules/acp-kernel/dist/index.js
 import { createRequire } from "module";
+var REF_WIDTH = 5;
+var MIN_INDEX = 1;
+var MAX_INDEX = 99999;
+var REF_PATTERN = /^m0*(\d{1,5})$/;
+var BLOCKED_REF = "BLOCKED";
+function indexToRef(index) {
+  if (!Number.isInteger(index) || index < MIN_INDEX || index > MAX_INDEX) {
+    throw new RangeError(
+      `ref index out of bounds: ${index} (allowed ${MIN_INDEX}-${MAX_INDEX})`
+    );
+  }
+  return `m${String(index).padStart(REF_WIDTH, "0")}`;
+}
+function refToIndex(ref) {
+  const match = REF_PATTERN.exec(ref.trim().toLowerCase());
+  if (!match) return null;
+  const index = Number(match[1]);
+  if (index < MIN_INDEX || index > MAX_INDEX) return null;
+  return index;
+}
+function refForRaw(map, rawId) {
+  return map.byRaw[rawId] ?? null;
+}
+function assignRefs(messages, options) {
+  const map = {
+    byRaw: { ...options.existing.byRaw },
+    byRef: { ...options.existing.byRef }
+  };
+  let cursor = Number.isInteger(options.nextIndex) && options.nextIndex >= MIN_INDEX ? options.nextIndex : MIN_INDEX;
+  let newlyAssigned = 0;
+  for (const message of messages) {
+    if (!message.id || options.shouldSkip?.(message)) continue;
+    if (map.byRaw[message.id]) continue;
+    if (options.isProtected?.(message)) {
+      map.byRaw[message.id] = BLOCKED_REF;
+      continue;
+    }
+    const ref = allocateFreeRef(map, cursor);
+    cursor = ref.index + 1;
+    map.byRaw[message.id] = ref.text;
+    map.byRef[ref.text] = message.id;
+    newlyAssigned++;
+  }
+  return { map, nextIndex: cursor, newlyAssigned };
+}
+function allocateFreeRef(map, start) {
+  let candidate = Math.max(start, MIN_INDEX);
+  while (candidate <= MAX_INDEX) {
+    const text = indexToRef(candidate);
+    if (!map.byRef[text]) {
+      return { text, index: candidate };
+    }
+    candidate++;
+  }
+  throw new Error(
+    `ref capacity exhausted: cannot allocate beyond ${indexToRef(MAX_INDEX)}`
+  );
+}
+function highestUsedIndex(map) {
+  let highest = 0;
+  for (const ref of Object.values(map.byRaw)) {
+    const index = ref === BLOCKED_REF ? null : refToIndex(ref);
+    if (index !== null && index > highest) highest = index;
+  }
+  return highest;
+}
+function createInitialState() {
+  return {
+    blocks: [],
+    messageRefs: { byRaw: {}, byRef: {} },
+    tokenSnapshot: {},
+    nudge: {
+      lastPerMessageNudgeTokens: 0,
+      lastNudgeShownTokens: 0,
+      baselineTokens: 0,
+      anchors: {},
+      lastShownByTier: {}
+    },
+    stats: { tokensCompressed: 0, compressionCount: 0 },
+    nextBlockId: 1,
+    nextRunId: 1
+  };
+}
+function allocateBlockId(state) {
+  const id = state.nextBlockId;
+  state.nextBlockId = Math.max(1, id) + 1;
+  return `b${id}`;
+}
+function allocateRunId(state) {
+  const id = state.nextRunId;
+  state.nextRunId = Math.max(1, id) + 1;
+  return `r${id}`;
+}
+function blockById(state, blockId) {
+  return state.blocks.find((block) => block.blockId === blockId);
+}
+function activeBlocks(state) {
+  return state.blocks.filter((block) => block.active);
+}
+function coveredMessageIds(state) {
+  const covered = /* @__PURE__ */ new Set();
+  for (const block of state.blocks) {
+    if (!block.active) continue;
+    for (const id of block.effectiveMessageIds) covered.add(id);
+  }
+  return covered;
+}
+function advanceSurvival(state, promotionThreshold) {
+  for (const block of state.blocks) {
+    if (!block.active) continue;
+    block.survivedCount += 1;
+    if (block.survivedCount >= promotionThreshold) {
+      block.generation = "old";
+    }
+  }
+}
+var SUMMARY_HEADER = "[Compressed conversation section]";
+function prune(messages, state, options = {}) {
+  const covered = coveredMessageIds(state);
+  if (covered.size === 0) return [...messages];
+  const inject = options.injectSummaries ?? true;
+  const firstUserIndex = messages.findIndex(
+    (message) => message.role === "user"
+  );
+  const indexById = /* @__PURE__ */ new Map();
+  messages.forEach((message, index) => indexById.set(message.id, index));
+  const anchors = inject ? collectSummaryAnchors(state, indexById) : [];
+  return stripOrphanedReasoning(
+    stripOrphanedToolResults(
+      stripOrphanedToolCalls(
+        rebuildMessages(messages, covered, firstUserIndex, anchors)
+      )
+    )
+  );
+}
+function collectSummaryAnchors(state, indexById) {
+  const anchors = [];
+  for (const block of activeBlocks(state)) {
+    let earliest = null;
+    for (const id of block.effectiveMessageIds) {
+      const index = indexById.get(id);
+      if (index !== void 0 && (earliest === null || index < earliest)) {
+        earliest = index;
+      }
+    }
+    anchors.push({
+      blockId: block.blockId,
+      summary: block.summary,
+      topic: block.topic,
+      insertAt: earliest ?? 0
+    });
+  }
+  anchors.sort((left, right) => left.insertAt - right.insertAt);
+  return anchors;
+}
+function rebuildMessages(messages, covered, firstUserIndex, anchors) {
+  const result = [];
+  const pending = [...anchors];
+  for (let index = 0; index < messages.length; index++) {
+    while (pending.length > 0 && pending[0].insertAt === index) {
+      result.push(renderSummary(pending.shift()));
+    }
+    if (index === firstUserIndex && firstUserIndex >= 0) {
+      result.push(messages[index]);
+      continue;
+    }
+    if (covered.has(messages[index].id)) continue;
+    result.push(messages[index]);
+  }
+  while (pending.length > 0) {
+    result.push(renderSummary(pending.shift()));
+  }
+  return result;
+}
+function renderSummary(anchor) {
+  const body = anchor.summary.trim();
+  const topicLine = anchor.topic ? `${SUMMARY_HEADER} \u2014 ${anchor.topic}` : SUMMARY_HEADER;
+  const text = body.length === 0 ? topicLine : `${topicLine}
+${body}`;
+  return {
+    id: `acp_summary_${anchor.blockId}`,
+    role: "system",
+    contentType: "text",
+    text
+  };
+}
+function stripOrphanedToolResults(messages) {
+  const knownCallIds = /* @__PURE__ */ new Set();
+  for (const m of messages) {
+    if (m.contentType === "tool-call" && m.toolCallId) {
+      knownCallIds.add(m.toolCallId);
+    }
+  }
+  return messages.filter(
+    (m) => m.contentType !== "tool-result" || !m.toolCallId || knownCallIds.has(m.toolCallId)
+  );
+}
+function stripOrphanedToolCalls(messages) {
+  const knownResultIds = /* @__PURE__ */ new Set();
+  for (const m of messages) {
+    if (m.contentType === "tool-result" && m.toolCallId) {
+      knownResultIds.add(m.toolCallId);
+    }
+  }
+  return messages.filter(
+    (m) => m.contentType !== "tool-call" || !m.toolCallId || m.toolName === "compress" || knownResultIds.has(m.toolCallId)
+  );
+}
+function stripOrphanedReasoning(messages) {
+  const drop = /* @__PURE__ */ new Set();
+  for (let i = 0; i < messages.length; i++) {
+    if (drop.has(i)) continue;
+    if (messages[i].contentType !== "reasoning") continue;
+    let j = i;
+    while (j + 1 < messages.length && messages[j + 1].contentType === "reasoning") {
+      j++;
+    }
+    const companion = messages[j + 1];
+    const hasCompanion = companion !== void 0 && companion.role === "assistant" && (companion.contentType === "text" || companion.contentType === "tool-call");
+    if (!hasCompanion) {
+      for (let k = i; k <= j; k++) drop.add(k);
+    }
+  }
+  if (drop.size === 0) return messages;
+  return messages.filter((_, i) => !drop.has(i));
+}
+function syncBlocks(messages, state) {
+  const presentIds = new Set(messages.map((message) => message.id));
+  const deactivated = [];
+  const result = {
+    blocks: state.blocks.map((block) => ({
+      ...block,
+      directMessageIds: [...block.directMessageIds],
+      effectiveMessageIds: [...block.effectiveMessageIds],
+      directBlockIds: [...block.directBlockIds]
+    })),
+    messageRefs: {
+      byRaw: { ...state.messageRefs.byRaw },
+      byRef: { ...state.messageRefs.byRef }
+    },
+    // Snapshot is keyed by ref with primitive values — shallow copy suffices.
+    tokenSnapshot: { ...state.tokenSnapshot ?? {} },
+    nudge: { ...state.nudge, anchors: { ...state.nudge.anchors } },
+    stats: { ...state.stats },
+    nextBlockId: state.nextBlockId,
+    nextRunId: state.nextRunId
+  };
+  const liveRefs = new Set(
+    messages.map((m) => result.messageRefs.byRaw[m.id]).filter((r) => typeof r === "string")
+  );
+  if (Object.keys(result.tokenSnapshot).length !== liveRefs.size) {
+    const pruned = {};
+    for (const [ref, n] of Object.entries(result.tokenSnapshot)) {
+      if (liveRefs.has(ref)) pruned[ref] = n;
+    }
+    result.tokenSnapshot = pruned;
+  }
+  const consumedBlockIds = /* @__PURE__ */ new Set();
+  for (const block of result.blocks) {
+    for (const consumedId of block.directBlockIds) {
+      consumedBlockIds.add(consumedId);
+    }
+  }
+  for (const block of result.blocks) {
+    if (consumedBlockIds.has(block.blockId)) {
+      block.active = false;
+      continue;
+    }
+    block.active = true;
+    const stillPresent = block.effectiveMessageIds.some(
+      (id) => presentIds.has(id)
+    );
+    if (!stillPresent) {
+      block.active = false;
+      deactivated.push(block.blockId);
+    }
+  }
+  return { state: result, deactivated };
+}
 var require2 = createRequire(import.meta.url);
 function defaultCountTokens(text) {
   if (!text) return 0;
   const cjk = text.match(/[\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]/g);
   const cjkCount = cjk?.length ?? 0;
   return cjkCount + Math.ceil((text.length - cjkCount) / 4);
+}
+function defaultConfig(modelContextLimit, overrides = {}) {
+  const base = {
+    tiers: { enabled: true, tier2Trigger: 5, tier3Trigger: 10 },
+    nudge: {
+      maxContextLimitPct: 0.75,
+      minContextLimitPct: 0.45,
+      frequency: 5,
+      iterationThreshold: 15,
+      force: "soft",
+      growthRatio: 0.05,
+      growthFloor: 5e4,
+      growthCap: 5e4,
+      minGrowthFloor: 2e4,
+      minGrowthRatio: 0.45,
+      emergencyThresholdPct: 0.95,
+      tier2GrowthMultiplier: 1.5
+    },
+    promotionThreshold: 5,
+    truncate: { threshold: 0.95 },
+    compress: {
+      minCompressRange: 5e3,
+      maxSummaryLength: 2e4,
+      minSummaryLength: 50
+    },
+    protectedTools: [],
+    preserveRecentMessages: 5,
+    preserveRecentTokens: 5e3,
+    modelContextLimit
+  };
+  return {
+    ...base,
+    ...overrides,
+    tiers: { ...base.tiers, ...overrides.tiers },
+    nudge: { ...base.nudge, ...overrides.nudge },
+    truncate: { ...base.truncate, ...overrides.truncate },
+    compress: { ...base.compress, ...overrides.compress }
+  };
+}
+function validateConfig(config) {
+  const errors = [];
+  if (!Number.isFinite(config.modelContextLimit) || config.modelContextLimit <= 0) {
+    errors.push("modelContextLimit must be a positive number");
+  }
+  if (config.nudge.minContextLimitPct > config.nudge.maxContextLimitPct) {
+    errors.push(
+      "nudge.minContextLimitPct must not exceed nudge.maxContextLimitPct"
+    );
+  }
+  if (config.nudge.maxContextLimitPct > config.nudge.emergencyThresholdPct) {
+    errors.push(
+      "nudge.maxContextLimitPct must not exceed nudge.emergencyThresholdPct"
+    );
+  }
+  if (config.promotionThreshold < 1) {
+    errors.push("promotionThreshold must be >= 1");
+  }
+  if (config.truncate.threshold <= 0 || config.truncate.threshold > 1) {
+    errors.push("truncate.threshold must be in (0, 1]");
+  }
+  for (const tier of [config.tiers.tier2Trigger, config.tiers.tier3Trigger]) {
+    if (tier < 1) errors.push("tier triggers must be >= 1");
+  }
+  if (config.tiers.tier3Trigger <= config.tiers.tier2Trigger) {
+    errors.push("tiers.tier3Trigger must be greater than tiers.tier2Trigger");
+  }
+  return errors;
+}
+var MESSAGE_REF_PATTERN = /^m0*(\d{1,5})$/;
+var BLOCK_REF_PATTERN = /^b(\d{1,9})$/;
+function parseBoundary(ref) {
+  const normalized = ref.trim().toLowerCase();
+  const messageMatch = MESSAGE_REF_PATTERN.exec(normalized);
+  if (messageMatch) {
+    const numericId = Number(messageMatch[1]);
+    if (numericId >= 1 && numericId <= 99999) {
+      return { kind: "message", numericId, raw: normalized };
+    }
+  }
+  const blockMatch = BLOCK_REF_PATTERN.exec(normalized);
+  if (blockMatch) {
+    const numericId = Number(blockMatch[1]);
+    if (numericId >= 1) return { kind: "block", numericId, raw: normalized };
+  }
+  return null;
+}
+var BoundaryNotFoundError = class extends Error {
+  code = "BOUNDARY_NOT_FOUND";
+  kind;
+  endpoint;
+  constructor(kind, endpoint, message) {
+    super(message);
+    this.name = "BoundaryNotFoundError";
+    this.code = "BOUNDARY_NOT_FOUND";
+    this.kind = kind;
+    this.endpoint = endpoint;
+  }
+};
+function resolveBoundaries(input) {
+  const start = parseBoundary(input.startRef);
+  const end = parseBoundary(input.endRef);
+  if (!start || !end) {
+    throw new Error(
+      `Invalid boundary ref(s): startId="${input.startRef}", endId="${input.endRef}". Use mNNNNN or bN.`
+    );
+  }
+  const indexByRawId = /* @__PURE__ */ new Map();
+  input.messages.forEach(
+    (message, index) => indexByRawId.set(message.id, index)
+  );
+  let startIndex = resolveAnchorIndex(start, input.state, indexByRawId, "start");
+  let endIndex = resolveAnchorIndex(end, input.state, indexByRawId, "end");
+  if (startIndex > endIndex) {
+    [startIndex, endIndex] = [endIndex, startIndex];
+  }
+  const messageIds = [];
+  for (let index = startIndex; index <= endIndex; index++) {
+    const message = input.messages[index];
+    if (message) messageIds.push(message.id);
+  }
+  const boundaryKind = start.kind === "block" || end.kind === "block" ? "block" : "message";
+  const nestedBlockIds = [];
+  const nestedSeen = /* @__PURE__ */ new Set();
+  for (const block of activeBlocks(input.state)) {
+    const anchor = earliestIndexOfIds(block.effectiveMessageIds, indexByRawId);
+    if (anchor !== null && anchor >= startIndex && anchor <= endIndex) {
+      if (!nestedSeen.has(block.blockId)) {
+        nestedSeen.add(block.blockId);
+        nestedBlockIds.push(block.blockId);
+      }
+    }
+  }
+  const protectedGaps = [];
+  return {
+    startIndex,
+    endIndex,
+    messageIds,
+    nestedBlockIds,
+    boundaryKind,
+    protectedGaps
+  };
+}
+function resolveAnchorIndex(boundary, state, indexByRawId, endpoint) {
+  const label = endpoint === "start" ? "startId" : "endId";
+  if (boundary.kind === "message") {
+    const rawId = state.messageRefs.byRef[boundary.raw] ?? state.messageRefs.byRef[formatPaddedRef(boundary.numericId)];
+    if (!rawId) {
+      throw new BoundaryNotFoundError(
+        "unknown",
+        endpoint,
+        `${label}="${boundary.raw}" does not exist in this session (typo or wrong session) \u2014 run acp_status for current refs.`
+      );
+    }
+    const index = indexByRawId.get(rawId);
+    if (index === void 0) {
+      throw new BoundaryNotFoundError(
+        "consumed",
+        endpoint,
+        `${label}="${boundary.raw}" not found in visible context (likely consumed by an existing block).`
+      );
+    }
+    return index;
+  }
+  const block = blockById(state, `b${boundary.numericId}`);
+  if (!block) {
+    throw new BoundaryNotFoundError(
+      "unknown",
+      endpoint,
+      `${label}="b${boundary.numericId}" does not exist in this session (typo or wrong session) \u2014 run acp_status for current refs.`
+    );
+  }
+  if (!block.active) {
+    throw new BoundaryNotFoundError(
+      "consumed",
+      endpoint,
+      `${label}="b${boundary.numericId}" not found in visible context (block distilled/consumed by a higher-tier block).`
+    );
+  }
+  const anchor = earliestIndexOfIds(block.effectiveMessageIds, indexByRawId);
+  if (anchor === null) {
+    throw new BoundaryNotFoundError(
+      "consumed",
+      endpoint,
+      `${label}="b${boundary.numericId}" not found in visible context (block messages consumed by a higher-tier block).`
+    );
+  }
+  return anchor;
+}
+function formatPaddedRef(index) {
+  return `m${String(index).padStart(5, "0")}`;
+}
+function earliestIndexOfIds(ids, indexByRawId) {
+  let earliest = null;
+  for (const id of ids) {
+    const index = indexByRawId.get(id);
+    if (index !== void 0 && (earliest === null || index < earliest)) {
+      earliest = index;
+    }
+  }
+  return earliest;
+}
+var TRUNCATION_MARKER = "[truncated for context space]";
+var DEFAULTS = {
+  minOutputTokens: 1e3,
+  keepPrefixChars: 2e3,
+  keepSuffixChars: 2e3,
+  protectRecentMessages: 3
+};
+function truncateLargeToolOutputs(messages, tokenCount, config, countTokens, options = {}) {
+  const opts = { ...DEFAULTS, ...options };
+  if (config.modelContextLimit <= 0) return { messages, truncatedCount: 0, savedTokens: 0 };
+  const threshold = config.truncate.threshold * config.modelContextLimit;
+  if (tokenCount < threshold) return { messages, truncatedCount: 0, savedTokens: 0 };
+  const protectedIndex = messages.length - opts.protectRecentMessages;
+  const candidates = [];
+  for (let index = 0; index < messages.length; index++) {
+    if (index >= protectedIndex) break;
+    const message = messages[index];
+    if (message.contentType !== "tool-result") continue;
+    const text = message.text ?? "";
+    if (text.length === 0 || text.includes(TRUNCATION_MARKER)) continue;
+    const tokens = countTokens(text);
+    if (tokens < opts.minOutputTokens) continue;
+    candidates.push({ index, tokens });
+  }
+  if (candidates.length === 0) return { messages, truncatedCount: 0, savedTokens: 0 };
+  candidates.sort((left, right) => right.tokens - left.tokens);
+  const targetTokens = threshold * 0.9;
+  let savedTokens = 0;
+  const edits = /* @__PURE__ */ new Map();
+  let truncatedCount = 0;
+  for (const candidate of candidates) {
+    if (tokenCount - savedTokens <= targetTokens) break;
+    const original = messages[candidate.index].text ?? "";
+    if (original.length <= opts.keepPrefixChars + opts.keepSuffixChars) continue;
+    const prefix = original.slice(0, opts.keepPrefixChars);
+    const suffix = original.slice(-opts.keepSuffixChars);
+    const replacement = prefix + `
+
+...${TRUNCATION_MARKER} \u2014 original ~${candidate.tokens} tokens]...
+
+` + suffix;
+    edits.set(candidate.index, replacement);
+    savedTokens += candidate.tokens - countTokens(replacement);
+    truncatedCount++;
+  }
+  if (truncatedCount === 0) return { messages, truncatedCount: 0, savedTokens: 0 };
+  const updated = messages.map(
+    (message, index) => edits.has(index) ? { ...message, text: edits.get(index) } : message
+  );
+  return { messages: updated, truncatedCount, savedTokens };
+}
+var KEEP_LAST_ORPHANED = 0;
+function rangeKey(startRef, endRef) {
+  return `${startRef}::${endRef}`;
+}
+function rewriteCompressText(text, liveKeys) {
+  let parsed;
+  try {
+    parsed = JSON.parse(text ?? "");
+  } catch {
+    return null;
+  }
+  if (!parsed || typeof parsed !== "object") return null;
+  const obj = parsed;
+  const content = obj.content;
+  if (!Array.isArray(content) || content.length === 0) return null;
+  const kept = content.filter((entry) => {
+    if (!entry || typeof entry !== "object") return false;
+    const s = typeof entry.startId === "string" ? entry.startId : typeof entry.messageId === "string" ? entry.messageId : "";
+    const e = typeof entry.endId === "string" ? entry.endId : typeof entry.messageId === "string" ? entry.messageId : "";
+    return liveKeys.has(rangeKey(s, e));
+  });
+  if (kept.length === content.length || kept.length === 0) return null;
+  return JSON.stringify({ ...obj, content: kept });
+}
+function hideConsumedCompressCalls(state, messages) {
+  const allBlockCallIds = /* @__PURE__ */ new Set();
+  const activeCallIds = /* @__PURE__ */ new Set();
+  const liveRangeKeysByCallId = /* @__PURE__ */ new Map();
+  const legacyLiveByCallId = /* @__PURE__ */ new Set();
+  for (const block of state.blocks) {
+    if (!block.compressCallId) continue;
+    allBlockCallIds.add(block.compressCallId);
+    if (!block.active) continue;
+    activeCallIds.add(block.compressCallId);
+    if (block.startRef === void 0 || block.endRef === void 0) {
+      legacyLiveByCallId.add(block.compressCallId);
+      continue;
+    }
+    let keys = liveRangeKeysByCallId.get(block.compressCallId);
+    if (!keys) {
+      keys = /* @__PURE__ */ new Set();
+      liveRangeKeysByCallId.set(block.compressCallId, keys);
+    }
+    keys.add(rangeKey(block.startRef, block.endRef));
+  }
+  const lastOrphanedCallIds = [];
+  for (let i = messages.length - 1; i >= 0 && lastOrphanedCallIds.length < KEEP_LAST_ORPHANED; i--) {
+    const message = messages[i];
+    if (message.toolName !== "compress" || message.contentType !== "tool-call") continue;
+    const callId = message.toolCallId;
+    if (callId && !allBlockCallIds.has(callId)) {
+      lastOrphanedCallIds.push(callId);
+    }
+  }
+  const keepCallIds = /* @__PURE__ */ new Set([...activeCallIds, ...lastOrphanedCallIds]);
+  const hiddenCallIds = /* @__PURE__ */ new Set();
+  for (const message of messages) {
+    if (message.toolName === "compress" && message.contentType === "tool-call" && (!message.toolCallId || !keepCallIds.has(message.toolCallId))) {
+      if (message.toolCallId) hiddenCallIds.add(message.toolCallId);
+    }
+  }
+  let hidden = 0;
+  const result = [];
+  for (const message of messages) {
+    if (message.toolName === "compress" && message.contentType === "tool-call" && (!message.toolCallId || !keepCallIds.has(message.toolCallId))) {
+      hidden++;
+      continue;
+    }
+    if (message.contentType === "tool-result" && message.toolCallId && hiddenCallIds.has(message.toolCallId)) {
+      hidden++;
+      continue;
+    }
+    if (message.toolName === "compress" && message.contentType === "tool-call" && message.toolCallId && keepCallIds.has(message.toolCallId)) {
+      const liveKeys = liveRangeKeysByCallId.get(message.toolCallId);
+      if (liveKeys && liveKeys.size > 0 && !legacyLiveByCallId.has(message.toolCallId)) {
+        const rewritten = rewriteCompressText(message.text, liveKeys);
+        if (rewritten !== null) {
+          result.push({ ...message, text: rewritten });
+          continue;
+        }
+      }
+    }
+    result.push(message);
+  }
+  return { messages: result, hidden };
+}
+var registry = /* @__PURE__ */ new Map();
+function listMessageFilters() {
+  return [...registry.values()];
+}
+function applyMessageFilters(messages, config) {
+  if (!config?.enabled) {
+    return { messages, partsFiltered: 0, partsDropped: 0, partsModified: 0 };
+  }
+  const active = listMessageFilters().filter(
+    (filter) => config.filters?.[filter.name]?.enabled !== false
+  );
+  if (active.length === 0) {
+    return { messages, partsFiltered: 0, partsDropped: 0, partsModified: 0 };
+  }
+  let working = messages.map((message) => ({ ...message }));
+  const tally = { partsFiltered: 0, partsDropped: 0, partsModified: 0 };
+  const total = working.length;
+  const immediate = active.filter((filter) => !filter.keepLastOnly);
+  for (let index = 0; index < working.length; index++) {
+    const message = working[index];
+    const text = message.text ?? "";
+    if (text.length === 0) continue;
+    let current = text;
+    const baseCtx = {
+      text: current,
+      role: message.role,
+      messageIndex: index,
+      totalMessages: total,
+      toolName: message.toolName
+    };
+    for (const filter of immediate) {
+      let decision;
+      try {
+        decision = filter.filter(baseCtx);
+      } catch {
+        continue;
+      }
+      if (decision.action === "keep") continue;
+      tally.partsFiltered++;
+      if (decision.action === "drop") {
+        current = "";
+        tally.partsDropped++;
+      } else if (decision.action === "modify" && decision.text !== void 0) {
+        current = decision.text;
+        tally.partsModified++;
+      }
+      baseCtx.text = current;
+    }
+    if (current !== text) working[index] = { ...message, text: current };
+  }
+  const keepLast = active.filter((filter) => filter.keepLastOnly);
+  for (const filter of keepLast) {
+    let foundLast = false;
+    for (let index = working.length - 1; index >= 0; index--) {
+      const message = working[index];
+      const text = message.text ?? "";
+      if (text.length === 0) continue;
+      const ctx = {
+        text,
+        role: message.role,
+        messageIndex: index,
+        totalMessages: total,
+        toolName: message.toolName
+      };
+      let decision;
+      try {
+        decision = filter.filter(ctx);
+      } catch {
+        continue;
+      }
+      if (decision.action !== "drop" && decision.action !== "modify") continue;
+      if (foundLast) {
+        tally.partsFiltered++;
+        tally.partsDropped++;
+        working[index] = { ...message, text: "" };
+      } else {
+        foundLast = true;
+        if (decision.action === "modify" && decision.text !== void 0) {
+          tally.partsFiltered++;
+          tally.partsModified++;
+          working[index] = { ...message, text: decision.text };
+        }
+      }
+    }
+  }
+  return { messages: working, ...tally };
+}
+function formatTokens(tokens) {
+  if (tokens < 1e3) return String(tokens);
+  if (tokens < 1e4) return (tokens / 1e3).toFixed(1) + "K";
+  return Math.round(tokens / 1e3) + "K";
+}
+function classifyType(message) {
+  if (message.contentType === "tool-call" || message.contentType === "tool-result") {
+    return message.toolName || "tool";
+  }
+  return message.contentType;
+}
+function escapeRegex(s) {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+var LT = "<";
+var GT = ">";
+var TAG_OPEN = LT + "acp ";
+var TAG_CLOSE = LT + "/acp" + GT;
+function acpTag(ref, tokens, type) {
+  return TAG_OPEN + 'tokens="' + formatTokens(tokens) + '" type="' + type + '"' + GT + ref + TAG_CLOSE;
+}
+function renderMessage(message, map, countTokens, strategy, snapshot = null) {
+  const ref = refForRaw(map, message.id);
+  if (!ref || ref === BLOCKED_REF) return message;
+  if (strategy === "none") return message;
+  if (strategy === "text-only" && message.contentType !== "text") {
+    return message;
+  }
+  const ownTagRe = new RegExp(
+    "^" + escapeRegex(TAG_OPEN) + "[^>]*" + GT + escapeRegex(ref) + escapeRegex(TAG_CLOSE) + "\\n?"
+  );
+  const cleanText = (message.text || "").replace(ownTagRe, "");
+  const tokens = snapshot ? snapshot[ref] ?? (snapshot[ref] = countTokens(cleanText)) : countTokens(cleanText);
+  const type = classifyType(message);
+  const prefix = acpTag(ref, tokens, type) + "\n";
+  if (!cleanText) return { ...message, text: prefix };
+  return { ...message, text: prefix + cleanText };
+}
+function renderWithSnapshot(messages, state, countTokens = (text) => Math.ceil(text.length / 4), strategy = "all") {
+  const map = state.messageRefs;
+  const snapshot = { ...state.tokenSnapshot ?? {} };
+  const rendered = messages.map(
+    (message) => renderMessage(message, map, countTokens, strategy, snapshot)
+  );
+  return { messages: rendered, tokenSnapshot: snapshot };
+}
+function createRenderRefsNode(strategy) {
+  return {
+    name: "render-refs",
+    run(io, ctx) {
+      const { messages, tokenSnapshot } = renderWithSnapshot(
+        io.messages,
+        io.state,
+        ctx.countTokens,
+        strategy
+      );
+      const prev = io.state.tokenSnapshot;
+      const changed = !prev || Object.keys(tokenSnapshot).length !== Object.keys(prev).length;
+      return changed ? { ...io, messages, state: { ...io.state, tokenSnapshot } } : { ...io, messages };
+    }
+  };
+}
+var renderRefsNode = createRenderRefsNode("all");
+var ALWAYS_PROTECTED_TOOLS = ["compress"];
+var NEVER_PRESERVE_RECENT_TOOLS = [
+  "decompress",
+  "search_context",
+  "read",
+  "bash"
+];
+function isNeverPreserveRecent(msg) {
+  if (msg.contentType !== "tool-call" && msg.contentType !== "tool-result") {
+    return false;
+  }
+  if (!msg.toolName) return false;
+  return NEVER_PRESERVE_RECENT_TOOLS.includes(msg.toolName);
+}
+function matchToolPattern(toolName, pattern) {
+  if (pattern.endsWith("*")) {
+    return toolName.startsWith(pattern.slice(0, -1));
+  }
+  return toolName === pattern;
+}
+function isMessageProtected(msg, config) {
+  if (msg.contentType !== "tool-call" && msg.contentType !== "tool-result" || !msg.toolName) {
+    return false;
+  }
+  if (ALWAYS_PROTECTED_TOOLS.includes(msg.toolName)) {
+    return true;
+  }
+  for (const pattern of config.protectedTools) {
+    if (matchToolPattern(msg.toolName, pattern)) return true;
+  }
+  if (config.isToolProtected?.(msg.toolName, msg.text)) return true;
+  return false;
+}
+function collectProtectedToolCallIds(messages, config) {
+  const ids = /* @__PURE__ */ new Set();
+  for (const m of messages) {
+    if (m.contentType === "tool-call" && m.toolCallId && isMessageProtected(m, config)) {
+      ids.add(m.toolCallId);
+    }
+  }
+  return ids;
+}
+function isMessageProtectedWithPairing(msg, config, protectedCallIds) {
+  if (isMessageProtected(msg, config)) return true;
+  if (msg.contentType === "tool-result" && msg.toolCallId && protectedCallIds.has(msg.toolCallId)) {
+    return true;
+  }
+  return false;
+}
+function adjustBoundariesForToolPairs(startIndex, endIndex, messages, maxScan = 20) {
+  const callIdsInRange = /* @__PURE__ */ new Set();
+  for (let i = startIndex; i <= endIndex; i++) {
+    const msg = messages[i];
+    if (!msg || !msg.toolCallId) continue;
+    if (msg.toolName === "compress") continue;
+    callIdsInRange.add(msg.toolCallId);
+  }
+  if (callIdsInRange.size === 0) {
+    return { startIndex, endIndex };
+  }
+  let newEndIndex = endIndex;
+  for (let i = endIndex + 1; i < messages.length && i <= endIndex + maxScan; i++) {
+    const msg = messages[i];
+    if (!msg) break;
+    if (msg.toolCallId && callIdsInRange.has(msg.toolCallId)) {
+      newEndIndex = i;
+    } else if (newEndIndex > endIndex) {
+      break;
+    }
+  }
+  let newStartIndex = startIndex;
+  for (let i = startIndex - 1; i >= 0 && i >= startIndex - maxScan; i--) {
+    const msg = messages[i];
+    if (!msg) break;
+    if (msg.toolCallId && callIdsInRange.has(msg.toolCallId)) {
+      newStartIndex = i;
+    } else if (newStartIndex < startIndex) {
+      break;
+    }
+  }
+  return { startIndex: newStartIndex, endIndex: newEndIndex };
+}
+function adjustBoundariesForReasoningPairs(startIndex, endIndex, messages) {
+  if (startIndex > endIndex) {
+    return { startIndex, endIndex };
+  }
+  let newStartIndex = startIndex;
+  let newEndIndex = endIndex;
+  for (let i = startIndex; i <= endIndex && i < messages.length; i++) {
+    const msg = messages[i];
+    if (!msg) continue;
+    if (msg.contentType === "reasoning") {
+      let j = i;
+      while (j + 1 < messages.length && messages[j + 1].contentType === "reasoning") {
+        j++;
+      }
+      const companion = messages[j + 1];
+      if (companion !== void 0 && companion.role === "assistant" && (companion.contentType === "text" || companion.contentType === "tool-call") && j + 1 > newEndIndex) {
+        newEndIndex = j + 1;
+      }
+    }
+    if (msg.role === "assistant" && (msg.contentType === "text" || msg.contentType === "tool-call")) {
+      let k = i - 1;
+      while (k >= 0 && messages[k].contentType === "reasoning") {
+        k--;
+      }
+      const runStart = k + 1;
+      if (runStart < i && runStart >= 0 && messages[runStart].contentType === "reasoning" && runStart < newStartIndex) {
+        newStartIndex = runStart;
+      }
+    }
+  }
+  return { startIndex: newStartIndex, endIndex: newEndIndex };
+}
+function refNum(ref) {
+  const n = parseInt(ref.slice(1), 10);
+  return Number.isNaN(n) ? -1 : n;
+}
+function estimateTextTokens(text) {
+  return Math.ceil(text.length / 4);
+}
+function isToolMessage(message) {
+  return message.contentType === "tool-call" || message.contentType === "tool-result";
+}
+function isSyntheticOrPruned(message, state) {
+  if (message.text?.startsWith("[Compressed conversation section]")) return true;
+  for (const block of state.blocks) {
+    if (block.active && block.effectiveMessageIds.includes(message.id)) return true;
+  }
+  return false;
+}
+function computeProtectedRefs(messages, state, config, countTokens = estimateTextTokens) {
+  const preserveN = config.preserveRecentMessages;
+  const preserveTokens = config.preserveRecentTokens;
+  const result = /* @__PURE__ */ new Set();
+  const visible = [];
+  for (const msg of messages) {
+    if (isSyntheticOrPruned(msg, state)) continue;
+    if (isNeverPreserveRecent(msg)) continue;
+    const ref = state.messageRefs.byRaw[msg.id];
+    if (!ref || ref === "BLOCKED") continue;
+    visible.push({ ref, tokens: countTokens(msg.text ?? "") });
+  }
+  if (preserveN > 0) {
+    for (const m of visible.slice(-preserveN)) {
+      result.add(m.ref);
+    }
+  }
+  if (preserveTokens > 0) {
+    let tokenAccum = 0;
+    for (let i = visible.length - 1; i >= 0 && tokenAccum < preserveTokens; i--) {
+      result.add(visible[i].ref);
+      tokenAccum += visible[i].tokens;
+    }
+  }
+  if (preserveN > 0) {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const msg = messages[i];
+      if (msg.role !== "user" || isSyntheticOrPruned(msg, state)) continue;
+      const ref = state.messageRefs.byRaw[msg.id];
+      if (ref && ref !== "BLOCKED") result.add(ref);
+      break;
+    }
+  }
+  return result;
+}
+function buildCompressibleRanges(messages, state, config, protectedZoneRefs, countTokens = estimateTextTokens) {
+  const compressibleMsgs = [];
+  const protectedMsgs = [];
+  const protectedCallIds = collectProtectedToolCallIds(messages, config);
+  for (const msg of messages) {
+    if (isSyntheticOrPruned(msg, state)) continue;
+    const ref = state.messageRefs.byRaw[msg.id];
+    if (!ref || ref === "BLOCKED") continue;
+    const rn = refNum(ref);
+    if (isMessageProtectedWithPairing(msg, config, protectedCallIds)) {
+      protectedMsgs.push({
+        ref,
+        refNum: rn,
+        tokens: countTokens(msg.text ?? ""),
+        tools: msg.toolName ? [msg.toolName] : []
+      });
+      continue;
+    }
+    if (protectedZoneRefs?.has(ref)) {
+      continue;
+    }
+    compressibleMsgs.push({
+      ref,
+      refNum: rn,
+      tokens: countTokens(msg.text ?? ""),
+      chars: (msg.text ?? "").length,
+      isTool: isToolMessage(msg),
+      isUser: msg.role === "user"
+    });
+  }
+  const compressible = [];
+  let cur = null;
+  let prevRefNum = -2;
+  for (const info of compressibleMsgs) {
+    const hasGap = info.refNum > prevRefNum + 1;
+    if (cur && (info.isUser && cur.count >= 3 || hasGap)) {
+      compressible.push(cur);
+      cur = null;
+    }
+    prevRefNum = info.refNum;
+    if (!cur) {
+      cur = {
+        startRef: info.ref,
+        endRef: info.ref,
+        count: 1,
+        tokens: info.tokens,
+        chars: info.chars,
+        toolPct: info.isTool ? 100 : 0,
+        textPct: info.isTool ? 0 : 100
+      };
+    } else {
+      cur.endRef = info.ref;
+      cur.count++;
+      cur.tokens += info.tokens;
+      cur.chars = (cur.chars ?? 0) + info.chars;
+      if (info.isTool) {
+        cur.toolPct = Math.round((cur.toolPct * (cur.count - 1) + 100) / cur.count);
+      } else {
+        cur.toolPct = Math.round(cur.toolPct * (cur.count - 1) / cur.count);
+      }
+      cur.textPct = 100 - cur.toolPct;
+    }
+  }
+  if (cur) compressible.push(cur);
+  const protectedRanges = [];
+  let pcur = null;
+  let pPrevRefNum = -2;
+  for (const info of protectedMsgs) {
+    const hasGap = info.refNum > pPrevRefNum + 1;
+    if (pcur && hasGap) {
+      protectedRanges.push(pcur);
+      pcur = null;
+    }
+    pPrevRefNum = info.refNum;
+    if (!pcur) {
+      pcur = {
+        startRef: info.ref,
+        endRef: info.ref,
+        count: 1,
+        tokens: info.tokens,
+        tools: [...info.tools]
+      };
+    } else {
+      pcur.endRef = info.ref;
+      pcur.count++;
+      pcur.tokens += info.tokens;
+      for (const t of info.tools) {
+        if (!pcur.tools.includes(t)) pcur.tools.push(t);
+      }
+    }
+  }
+  if (pcur) protectedRanges.push(pcur);
+  return {
+    compressible: compressible.filter((g) => g.tokens > 0),
+    protected: protectedRanges
+  };
+}
+function mergeBatch(batch) {
+  const first = batch[0];
+  const last = batch[batch.length - 1];
+  const count = batch.reduce((s, r) => s + r.count, 0);
+  const tokens = batch.reduce((s, r) => s + r.tokens, 0);
+  const chars = batch.reduce((s, r) => s + rangeChars(r), 0);
+  const toolPct = Math.round(
+    batch.reduce((s, r) => s + r.toolPct * r.count, 0) / count
+  );
+  const merged = {
+    startRef: first.startRef,
+    endRef: last.endRef,
+    count,
+    tokens,
+    chars,
+    toolPct,
+    textPct: 100 - toolPct
+  };
+  if (batch.some((r) => r.dangerous === true)) {
+    merged.dangerous = true;
+  }
+  return merged;
+}
+function rangeChars(r) {
+  return r.chars ?? r.tokens * 4;
+}
+function mergeRangesToThreshold(ranges, minChars) {
+  if (minChars <= 0 || ranges.length === 0) return ranges;
+  const result = [];
+  let batch = [];
+  let batchChars = 0;
+  for (const r of ranges) {
+    batch.push(r);
+    batchChars += rangeChars(r);
+    if (batchChars >= minChars) {
+      result.push(mergeBatch(batch));
+      batch = [];
+      batchChars = 0;
+    }
+  }
+  if (batch.length > 0) {
+    result.push(mergeBatch(batch));
+  }
+  return result;
+}
+function runPipeline(nodes, initial, ctx) {
+  let io = initial;
+  for (const node of nodes) {
+    if (node.enabled && !node.enabled(io, ctx)) continue;
+    io = node.run(io, ctx);
+  }
+  return io;
+}
+function rangeError(spec, message) {
+  return `range ${spec.startRef}..${spec.endRef}: ${message}`;
+}
+function createCore(ports = {}) {
+  const countTokens = ports.countTokens ?? defaultCountTokens;
+  function applyCompression(input) {
+    const state = cloneState(input.state);
+    const runId = allocateRunId(state);
+    let blocksCreated = 0;
+    let tokensCompressed = 0;
+    const errors = [];
+    const warnings = [];
+    const protectedMessageIds = input.protectedMessageIds ?? computeProtectedRefs(input.messages, input.state, input.config, countTokens);
+    const preExistingCoverage = collectCoverage(state);
+    const classifications = /* @__PURE__ */ new Map();
+    const classificationErrors = [];
+    const consumedRanges = [];
+    for (const spec of input.ranges) {
+      try {
+        const resolved = resolveBoundaries({
+          startRef: spec.startRef,
+          endRef: spec.endRef,
+          messages: input.messages,
+          state
+        });
+        classifications.set(spec, { status: "ok", resolved });
+      } catch (error) {
+        if (error instanceof BoundaryNotFoundError) {
+          classifications.set(
+            spec,
+            error.kind === "unknown" ? { status: "unknown", error } : { status: "consumed", error }
+          );
+          if (error.kind === "consumed") {
+            consumedRanges.push(spec);
+          } else {
+            classificationErrors.push(rangeError(spec, error.message));
+          }
+        } else {
+          classifications.set(spec, {
+            status: "invalid",
+            error: error instanceof Error ? error : new Error(String(error))
+          });
+          classificationErrors.push(
+            rangeError(spec, error instanceof Error ? error.message : String(error))
+          );
+        }
+      }
+    }
+    const rangeIndexSets = [];
+    for (const [spec, resolution] of classifications) {
+      if (resolution.status !== "ok") continue;
+      const indices = resolution.resolved.messageIds.map(
+        (id) => input.messages.findIndex((m) => m.id === id)
+      ).filter((i) => i >= 0);
+      rangeIndexSets.push({ spec, indices });
+    }
+    const sortedRanges = [...rangeIndexSets].sort((a, b) => {
+      const aMin = a.indices.length > 0 ? Math.min(...a.indices) : Infinity;
+      const bMin = b.indices.length > 0 ? Math.min(...b.indices) : Infinity;
+      return aMin - bMin;
+    });
+    const skipSpecs = /* @__PURE__ */ new Set();
+    let acceptedMaxIndex = -1;
+    for (const entry of sortedRanges) {
+      const entryMax = entry.indices.length > 0 ? Math.max(...entry.indices) : -1;
+      const entryMin = entry.indices.length > 0 ? Math.min(...entry.indices) : -1;
+      if (entryMin >= 0 && entryMin <= acceptedMaxIndex) {
+        skipSpecs.add(entry.spec);
+        warnings.push(
+          `Skipped range (${entry.spec.startRef}..${entry.spec.endRef}) \u2014 overlaps an earlier range in the batch; the earlier range takes precedence. Keep ranges disjoint.`
+        );
+        continue;
+      }
+      if (entryMax > acceptedMaxIndex) acceptedMaxIndex = entryMax;
+    }
+    if (input.config.compress.minCompressRange > 0 && input.ranges.length > 0) {
+      let totalRangeChars = 0;
+      let hasBlockBoundaryRange = false;
+      let countedRanges = 0;
+      for (const [spec, resolution] of classifications) {
+        if (resolution.status !== "ok" || skipSpecs.has(spec)) continue;
+        if (resolution.resolved.boundaryKind === "block") {
+          hasBlockBoundaryRange = true;
+          continue;
+        }
+        countedRanges++;
+        for (const id of resolution.resolved.messageIds) {
+          const msg = input.messages.find((m) => m.id === id);
+          totalRangeChars += msg?.text?.length ?? 0;
+        }
+      }
+      if (!hasBlockBoundaryRange && totalRangeChars < input.config.compress.minCompressRange) {
+        const gateMessage = consumedRanges.length > 0 ? `Requested range(s) already compressed (e.g. ${consumedRanges[0].startRef}..${consumedRanges[0].endRef}); remaining compressible content ${totalRangeChars} chars < min ${input.config.compress.minCompressRange}. Nothing to do \u2014 run acp_status to see current compressible ranges.` : `Total compressible content too small (${totalRangeChars} chars across ${countedRanges} range(s), min ${input.config.compress.minCompressRange}). Combine more messages into your range(s) to meet the threshold.`;
+        return {
+          state: input.state,
+          result: {
+            blocksCreated: 0,
+            tokensCompressed: 0,
+            errors: [gateMessage, ...classificationErrors],
+            warnings: []
+          }
+        };
+      }
+    }
+    for (const spec of input.ranges) {
+      if (skipSpecs.has(spec)) continue;
+      const resolution = classifications.get(spec);
+      if (resolution === void 0) continue;
+      if (resolution.status === "consumed") {
+        warnings.push(
+          `Skipped range (${spec.startRef}..${spec.endRef}) \u2014 already compressed (messages consumed by existing block(s)); nothing to compress.`
+        );
+        continue;
+      }
+      if (resolution.status === "unknown" || resolution.status === "invalid") {
+        errors.push(rangeError(spec, resolution.error.message));
+        continue;
+      }
+      try {
+        const outcome = applySingleRange({
+          spec,
+          messages: input.messages,
+          state,
+          runId,
+          config: input.config,
+          protectedMessageIds,
+          countTokens,
+          preExistingCoverage
+        });
+        blocksCreated++;
+        tokensCompressed += outcome.tokens;
+        warnings.push(...outcome.warnings);
+      } catch (error) {
+        errors.push(rangeError(spec, error instanceof Error ? error.message : String(error)));
+      }
+    }
+    state.stats.compressionCount += blocksCreated;
+    state.stats.tokensCompressed += tokensCompressed;
+    if (blocksCreated > 0) {
+      state.nudge.lastPerMessageNudgeTokens = 0;
+      state.nudge.lastNudgeShownTokens = 0;
+      state.nudge.lastShownByTier = {};
+    }
+    return { state, result: { blocksCreated, tokensCompressed, errors, warnings } };
+  }
+  function processTurn(input) {
+    const configErrors = validateConfig(input.config);
+    if (configErrors.length > 0) {
+      console.warn(`[acp-kernel] Config validation warnings: ${configErrors.join("; ")}. Thresholds may not fire correctly.`);
+    }
+    const ctx = {
+      config: input.config,
+      tokenCount: input.tokenCount,
+      countTokens
+    };
+    const initial = {
+      messages: input.messages,
+      state: input.state,
+      effects: {}
+    };
+    const strategy = input.renderTags ?? "all";
+    const nodes = buildNodes(strategy);
+    const result = runPipeline(nodes, initial, ctx);
+    return {
+      messages: result.messages,
+      state: result.state,
+      nudge: result.effects.nudge
+    };
+  }
+  function decompress(blockId, state) {
+    return blockById(state, blockId);
+  }
+  function search(query, state) {
+    const terms = query.toLowerCase().split(/\s+/).filter((term) => term.length > 0);
+    if (terms.length === 0) return [];
+    const scored = activeBlocks(state).map((block) => ({ block, score: scoreRelevance(block, terms) })).filter((entry) => entry.score > 0.1).sort((left, right) => right.score - left.score);
+    return scored.map((entry) => entry.block);
+  }
+  function status(state, tokenCount, config) {
+    const active = activeBlocks(state);
+    const usage = config.modelContextLimit > 0 ? tokenCount / config.modelContextLimit : 0;
+    return {
+      contextUsage: usage,
+      tokenCount,
+      modelContextLimit: config.modelContextLimit,
+      activeBlocks: active.length,
+      totalBlocks: state.blocks.length,
+      tokensCompressed: state.stats.tokensCompressed,
+      breakdown: { active: active.length, total: state.blocks.length }
+    };
+  }
+  function defaultNodes() {
+    return buildNodes("all");
+  }
+  function buildNodes(strategy) {
+    const base = [
+      assignRefsNode,
+      syncBlocksNode,
+      pruneNode,
+      filterNode,
+      hideCompressCallsNode,
+      recommendNode,
+      nudgeNode,
+      emergencyTruncateNode
+    ];
+    if (strategy === "none") return base;
+    return [...base, createRenderRefsNode(strategy)];
+  }
+  return { processTurn, applyCompression, defaultNodes, decompress, search, status };
+}
+var assignRefsNode = {
+  name: "assign-refs",
+  run(io, ctx) {
+    const hasProtection = ctx.config.protectedTools.length > 0 || !!ctx.config.isToolProtected;
+    const protectedFn = hasProtection ? (m) => isMessageProtected(m, ctx.config) : void 0;
+    const refResult = assignRefs(io.messages, {
+      existing: io.state.messageRefs,
+      nextIndex: highestUsedIndex(io.state.messageRefs) + 1,
+      isProtected: protectedFn
+    });
+    return { ...io, state: { ...io.state, messageRefs: refResult.map } };
+  }
+};
+var syncBlocksNode = {
+  name: "sync-blocks",
+  run(io, ctx) {
+    const synced = syncBlocks(io.messages, io.state);
+    advanceSurvival(synced.state, ctx.config.promotionThreshold);
+    return { ...io, state: synced.state };
+  }
+};
+var pruneNode = {
+  name: "prune",
+  run(io) {
+    return { ...io, messages: prune(io.messages, io.state) };
+  }
+};
+var filterNode = {
+  name: "filter",
+  enabled: (_io, ctx) => !!ctx.config.messageFilters?.enabled && listMessageFilters().length > 0,
+  run(io, ctx) {
+    const applied = applyMessageFilters(io.messages, ctx.config.messageFilters);
+    return { ...io, messages: applied.messages };
+  }
+};
+var hideCompressCallsNode = {
+  name: "hide-compress-calls",
+  run(io) {
+    const hidden = hideConsumedCompressCalls(io.state, io.messages);
+    return { ...io, messages: hidden.messages };
+  }
+};
+var recommendNode = {
+  name: "recommend",
+  run(io, ctx) {
+    const protectedRefs = computeProtectedRefs(
+      io.messages,
+      io.state,
+      ctx.config,
+      ctx.countTokens
+    );
+    const contextRanges = buildCompressibleRanges(
+      io.messages,
+      io.state,
+      ctx.config,
+      protectedRefs,
+      ctx.countTokens
+    );
+    const nothingToCompress = contextRanges.compressible.length === 0;
+    const recommendation = {
+      contextRanges,
+      recommendedRanges: mergeRangesToThreshold(
+        contextRanges.compressible,
+        ctx.config.compress.minCompressRange
+      ),
+      nothingToCompress
+    };
+    return { ...io, effects: { ...io.effects, recommendation } };
+  }
+};
+var nudgeNode = {
+  name: "nudge-inject",
+  run(io, ctx) {
+    const nudge = decideNudge({
+      tokenCount: ctx.tokenCount,
+      config: ctx.config,
+      state: io.state,
+      messages: io.messages,
+      recommendation: io.effects.recommendation,
+      countTokens: ctx.countTokens
+    });
+    const baseline = io.state.nudge.lastPerMessageNudgeTokens;
+    const nudgeGrowthTokens = resolveAdaptiveGrowth(
+      ctx.config.modelContextLimit,
+      ctx.config.nudge
+    );
+    let stamped = { ...io.state.nudge };
+    if (baseline > 0 && ctx.tokenCount < baseline - nudgeGrowthTokens) {
+      stamped.lastPerMessageNudgeTokens = ctx.tokenCount;
+      stamped.lastNudgeShownTokens = 0;
+      stamped.lastShownByTier = {};
+    }
+    if (stamped.lastPerMessageNudgeTokens === 0) {
+      stamped.lastPerMessageNudgeTokens = ctx.tokenCount;
+    }
+    if (nudge.shouldInject) {
+      stamped.lastNudgeShownTokens = ctx.tokenCount;
+      if (nudge.tier !== null) {
+        stamped.lastShownByTier = { ...stamped.lastShownByTier, [nudge.tier]: ctx.tokenCount };
+      }
+    }
+    return {
+      ...io,
+      state: { ...io.state, nudge: stamped },
+      effects: { ...io.effects, nudge }
+    };
+  }
+};
+var emergencyTruncateNode = {
+  name: "emergency-truncate",
+  run(io, ctx) {
+    const usage = ctx.config.modelContextLimit > 0 ? ctx.tokenCount / ctx.config.modelContextLimit : 0;
+    if (usage < ctx.config.truncate.threshold) return io;
+    const trunc = truncateLargeToolOutputs(
+      io.messages,
+      ctx.tokenCount,
+      ctx.config,
+      ctx.countTokens,
+      { protectRecentMessages: ctx.config.preserveRecentMessages }
+    );
+    return {
+      ...io,
+      messages: trunc.messages,
+      effects: { ...io.effects, truncatedCount: trunc.truncatedCount }
+    };
+  }
+};
+function applySingleRange(input) {
+  const warnings = [];
+  const resolved = resolveBoundaries({
+    startRef: input.spec.startRef,
+    endRef: input.spec.endRef,
+    messages: input.messages,
+    state: input.state
+  });
+  const rangeMessageIds = applyPairBoundaryAdjustments(
+    resolved,
+    input.messages
+  );
+  if (rangeMessageIds.length > resolved.messageIds.length) {
+    const indexByRawId = /* @__PURE__ */ new Map();
+    input.messages.forEach((m, i) => indexByRawId.set(m.id, i));
+    const adjustedStart = indexByRawId.get(rangeMessageIds[0]) ?? resolved.startIndex;
+    const adjustedEnd = indexByRawId.get(rangeMessageIds[rangeMessageIds.length - 1]) ?? resolved.endIndex;
+    const nestedSeen = new Set(resolved.nestedBlockIds);
+    for (const block2 of activeBlocks(input.state)) {
+      if (nestedSeen.has(block2.blockId)) continue;
+      const anchor = earliestIndexOfIds(block2.effectiveMessageIds, indexByRawId);
+      if (anchor !== null && anchor >= adjustedStart && anchor <= adjustedEnd) {
+        nestedSeen.add(block2.blockId);
+        resolved.nestedBlockIds.push(block2.blockId);
+      }
+    }
+  }
+  const isBlockBoundary = resolved.boundaryKind === "block";
+  const targetTier = resolveTargetTier(
+    input.state,
+    resolved.nestedBlockIds,
+    isBlockBoundary
+  );
+  const outputTier = isBlockBoundary ? Math.min(3, targetTier + 1) : 1;
+  const consumedBlockIds = resolved.nestedBlockIds.filter((id) => {
+    const block2 = blockById(input.state, id);
+    return block2?.active && block2.tier === targetTier;
+  });
+  const effectiveMessageIds = new Set(rangeMessageIds);
+  for (const consumedId of consumedBlockIds) {
+    const consumed = blockById(input.state, consumedId);
+    if (consumed) {
+      for (const id of consumed.effectiveMessageIds)
+        effectiveMessageIds.add(id);
+    }
+  }
+  const directMessageIds = [...effectiveMessageIds].filter(
+    (id) => !input.preExistingCoverage.has(id)
+  );
+  let filteredIds = filterProtectedToolMessages(
+    directMessageIds,
+    input.messages,
+    input.config
+  );
+  if (filteredIds.length < directMessageIds.length) {
+    const kept = new Set(filteredIds);
+    for (const id of directMessageIds) {
+      if (!kept.has(id)) effectiveMessageIds.delete(id);
+    }
+  }
+  const protectedRefs = input.protectedMessageIds;
+  const hitProtectedRaw = protectedRefs ? filteredIds.filter((id) => {
+    const ref = input.state.messageRefs.byRaw[id];
+    return ref !== void 0 && protectedRefs.has(ref);
+  }) : [];
+  if (hitProtectedRaw.length > 0) {
+    const protectedSet = new Set(hitProtectedRaw);
+    filteredIds = filteredIds.filter((id) => !protectedSet.has(id));
+    for (const id of hitProtectedRaw) effectiveMessageIds.delete(id);
+    const hitRefs = hitProtectedRaw.map((id) => input.state.messageRefs.byRaw[id]).filter((v) => typeof v === "string");
+    if (filteredIds.length === 0 && consumedBlockIds.length === 0) {
+      const recentN = input.config.preserveRecentMessages;
+      throw new Error(
+        `Range is entirely within the protected zone (the last ${recentN} messages and/or the most recent user message): ${hitRefs.join(
+          ", "
+        )}. Adjust startId/endId to older messages.`
+      );
+    }
+    warnings.push(
+      `Excluded ${hitProtectedRaw.length} protected message(s) ${hitRefs.join(
+        ", "
+      )} from compression range (recent/last-user zone).`
+    );
+  }
+  validateCompressionRange(input, filteredIds, consumedBlockIds.length);
+  let compressedTokens = 0;
+  for (const id of filteredIds) {
+    const message = input.messages.find((entry) => entry.id === id);
+    compressedTokens += input.countTokens(message?.text ?? "");
+  }
+  for (const consumedId of consumedBlockIds) {
+    const consumed = blockById(input.state, consumedId);
+    if (consumed) {
+      compressedTokens += input.countTokens(consumed.summary);
+    }
+  }
+  const blockId = allocateBlockId(input.state);
+  const block = {
+    blockId,
+    runId: input.runId,
+    tier: outputTier,
+    topic: input.spec.topic,
+    summary: input.spec.summary,
+    directMessageIds: filteredIds,
+    effectiveMessageIds: [...effectiveMessageIds],
+    directBlockIds: [...consumedBlockIds],
+    compressedTokens,
+    createdAt: Date.now(),
+    survivedCount: 0,
+    generation: "young",
+    active: true,
+    compressCallId: input.spec.compressCallId,
+    startRef: input.spec.startRef,
+    endRef: input.spec.endRef
+  };
+  input.state.blocks.push(block);
+  for (const consumedId of consumedBlockIds) {
+    const consumed = blockById(input.state, consumedId);
+    if (consumed) consumed.active = false;
+  }
+  return { tokens: compressedTokens, warnings };
+}
+function applyPairBoundaryAdjustments(resolved, messages) {
+  if (resolved.boundaryKind === "block") {
+    return resolved.messageIds;
+  }
+  let startIndex = resolved.startIndex;
+  let endIndex = resolved.endIndex;
+  for (let pass = 0; pass < 2; pass++) {
+    const reasoningAdjusted = adjustBoundariesForReasoningPairs(
+      startIndex,
+      endIndex,
+      messages
+    );
+    const toolAdjusted = adjustBoundariesForToolPairs(
+      reasoningAdjusted.startIndex,
+      reasoningAdjusted.endIndex,
+      messages
+    );
+    const changed = toolAdjusted.startIndex !== startIndex || toolAdjusted.endIndex !== endIndex;
+    startIndex = toolAdjusted.startIndex;
+    endIndex = toolAdjusted.endIndex;
+    if (!changed) break;
+  }
+  if (startIndex === resolved.startIndex && endIndex === resolved.endIndex) {
+    return resolved.messageIds;
+  }
+  const ids = [];
+  for (let i = startIndex; i <= endIndex; i++) {
+    const msg = messages[i];
+    if (msg) ids.push(msg.id);
+  }
+  return ids;
+}
+function validateCompressionRange(input, directMessageIds, consumedBlockCount) {
+  const cfg = input.config.compress;
+  const summary = input.spec.summary?.trim() ?? "";
+  if (summary.length === 0) {
+    throw new Error(
+      "Summary is empty \u2014 provide a meaningful summary of the compressed range."
+    );
+  }
+  if (cfg.minSummaryLength > 0 && summary.length < cfg.minSummaryLength) {
+    throw new Error(
+      `Summary too short (${summary.length} chars, min ${cfg.minSummaryLength}). The summary must capture the compressed range's key information.`
+    );
+  }
+  const effectiveMax = input.spec.summaryMaxChars ?? cfg.maxSummaryLength;
+  if (effectiveMax > 0 && summary.length > effectiveMax) {
+    throw new Error(
+      `Summary too long (${summary.length} chars, max ${effectiveMax}). Strip noise \u2014 keep critical paths, decisions, errors, and code references. Or pass summaryMaxChars to increase the limit \u2014 don't lose critical info just to fit.`
+    );
+  }
+  if (directMessageIds.length === 0 && consumedBlockCount === 0) {
+    throw new Error(
+      "Range contains no compressible messages \u2014 all are already covered by active blocks or protected."
+    );
+  }
+}
+function filterProtectedToolMessages(directMessageIds, messages, config) {
+  const protectedCallIds = /* @__PURE__ */ new Set();
+  const removedIds = /* @__PURE__ */ new Set();
+  for (const msg of messages) {
+    if (isMessageProtected(msg, config) && msg.toolCallId) {
+      protectedCallIds.add(msg.toolCallId);
+    }
+  }
+  for (const id of directMessageIds) {
+    const msg = messages.find((m) => m.id === id);
+    if (!msg) continue;
+    if (isMessageProtected(msg, config)) {
+      removedIds.add(id);
+      if (msg.toolCallId) protectedCallIds.add(msg.toolCallId);
+    }
+  }
+  for (const id of directMessageIds) {
+    if (removedIds.has(id)) continue;
+    const msg = messages.find((m) => m.id === id);
+    if (!msg) continue;
+    if (msg.contentType === "tool-result" && msg.toolCallId && protectedCallIds.has(msg.toolCallId)) {
+      removedIds.add(id);
+    }
+  }
+  return directMessageIds.filter((id) => !removedIds.has(id));
+}
+function resolveTargetTier(state, nestedBlockIds, isBlockBoundary) {
+  if (!isBlockBoundary) return 1;
+  if (nestedBlockIds.length === 0) return 1;
+  let minTier = 3;
+  for (const id of nestedBlockIds) {
+    const block = blockById(state, id);
+    if (block && block.tier < minTier) minTier = block.tier;
+  }
+  return minTier;
+}
+function collectCoverage(state) {
+  const coverage = /* @__PURE__ */ new Set();
+  for (const block of activeBlocks(state)) {
+    for (const id of block.effectiveMessageIds) coverage.add(id);
+  }
+  return coverage;
+}
+function resolveAdaptiveGrowth(modelContextLimit, nudge) {
+  if (!modelContextLimit || modelContextLimit <= 0) return nudge.growthFloor;
+  return Math.min(
+    nudge.growthCap,
+    Math.max(
+      nudge.growthFloor,
+      Math.round(modelContextLimit * nudge.growthRatio)
+    )
+  );
+}
+function pendingByTier(state, recommendation, countTokens, minCompressRange) {
+  const out = {};
+  const merged = recommendation?.recommendedRanges ?? [];
+  const effective = minCompressRange > 0 ? merged.filter((r) => (r.chars ?? r.tokens * 4) >= minCompressRange) : merged;
+  out[1] = { pending: effective.reduce((s, r) => s + r.tokens, 0), targetBlocks: [] };
+  const active = activeBlocks(state);
+  const t1 = active.filter((b) => b.tier === 1);
+  const t2 = active.filter((b) => b.tier === 2);
+  out[2] = { pending: t1.reduce((s, b) => s + countTokens(b.summary), 0), targetBlocks: t1 };
+  out[3] = { pending: t2.reduce((s, b) => s + countTokens(b.summary), 0), targetBlocks: t2 };
+  return out;
+}
+function decideNudge(input) {
+  const { config, state, tokenCount, recommendation, countTokens } = input;
+  const limit = config.modelContextLimit;
+  const usage = limit > 0 ? tokenCount / limit : 0;
+  const nudgeGrowthTokens = resolveAdaptiveGrowth(limit, config.nudge);
+  const overLimit = usage >= config.nudge.maxContextLimitPct;
+  const emergencyOverride = usage >= config.nudge.emergencyThresholdPct;
+  const pressure = overLimit || emergencyOverride;
+  const baseline = state.nudge.lastPerMessageNudgeTokens;
+  const hadPendingNudge = state.nudge.lastNudgeShownTokens > 0;
+  const hasPendingNudge = hadPendingNudge;
+  const effectiveThreshold = hasPendingNudge ? Math.floor(nudgeGrowthTokens / 2) : nudgeGrowthTokens;
+  const growthReference = state.nudge.lastNudgeShownTokens > 0 ? state.nudge.lastNudgeShownTokens : baseline > 0 ? baseline : tokenCount;
+  const growthFloor = Math.max(
+    config.nudge.minGrowthFloor,
+    config.nudge.minGrowthRatio * nudgeGrowthTokens
+  );
+  const growthSinceReference = tokenCount - growthReference;
+  const rec = recommendation;
+  const tiers = pendingByTier(
+    state,
+    rec,
+    countTokens,
+    config.compress.minCompressRange
+  );
+  const tier2Threshold = Math.round(
+    nudgeGrowthTokens * (config.nudge.tier2GrowthMultiplier ?? 1.5)
+  );
+  let injectedTier = null;
+  let injectedReason = "";
+  const growthReady = growthSinceReference >= growthFloor;
+  const t1Eff = tiers[1]?.pending ?? 0;
+  const t2Pen = tiers[2]?.pending ?? 0;
+  const t3Pen = tiers[3]?.pending ?? 0;
+  if (pressure) {
+    const candidates = [1];
+    if (config.tiers.enabled) {
+      candidates.push(2, 3);
+    }
+    let best = null;
+    let bestPending = 0;
+    for (const t of candidates) {
+      const p = tiers[t]?.pending ?? 0;
+      if (p > bestPending) {
+        bestPending = p;
+        best = t;
+      }
+    }
+    if (best !== null && bestPending > 0) {
+      injectedTier = best;
+      const label = emergencyOverride ? "EMERGENCY" : "OVER-LIMIT";
+      injectedReason = best === 1 ? `${label} T1: max effective pending ${bestPending}, usage ${Math.round(usage * 100)}%` : `${label} T${best} distill: max pending ${bestPending} (T1 effective ${t1Eff}, T2 ${t2Pen}, T3 ${t3Pen}), usage ${Math.round(usage * 100)}%`;
+    }
+  } else if (growthReady) {
+    if (t1Eff >= nudgeGrowthTokens) {
+      injectedTier = 1;
+      injectedReason = `T1 effective ${t1Eff} >= ${nudgeGrowthTokens}, growth ${growthSinceReference}, usage ${Math.round(usage * 100)}%`;
+    } else if (config.tiers.enabled && t2Pen >= tier2Threshold && t2Pen > t1Eff) {
+      const lastShown = state.nudge.lastShownByTier[2] ?? 0;
+      const cadenceMet = lastShown === 0 || tokenCount - lastShown >= growthFloor;
+      if (cadenceMet) {
+        injectedTier = 2;
+        injectedReason = `T2 distill ready: ${tiers[2].targetBlocks.length} tier-1 blocks (${t2Pen} tokens) >= ${tier2Threshold} (1.5x) and > T1 effective ${t1Eff}, usage ${Math.round(usage * 100)}%`;
+      }
+    } else if (config.tiers.enabled && t3Pen >= tier2Threshold && t3Pen > t2Pen && t3Pen > t1Eff) {
+      const lastShown = state.nudge.lastShownByTier[3] ?? 0;
+      const cadenceMet = lastShown === 0 || tokenCount - lastShown >= growthFloor;
+      if (cadenceMet) {
+        injectedTier = 3;
+        injectedReason = `T3 condense ready: ${tiers[3].targetBlocks.length} tier-2 blocks (${t3Pen} tokens) >= ${tier2Threshold} (1.5x) and > T2 ${t2Pen} and > T1 effective ${t1Eff}, usage ${Math.round(usage * 100)}%`;
+      }
+    }
+  }
+  const shouldInject = injectedTier !== null;
+  let reason;
+  if (injectedTier !== null) {
+    reason = injectedReason;
+  } else if (pressure) {
+    const label = emergencyOverride ? "EMERGENCY" : "OVER-LIMIT";
+    reason = `${label}: usage ${Math.round(usage * 100)}% but no tier has effective compressible content (T1 effective ${t1Eff}, T2 ${t2Pen}, T3 ${t3Pen}) \u2014 nudge suppressed to avoid offering ranges below minCompressRange`;
+  } else {
+    const tiersList = [1, 2, 3];
+    const eligible = tiersList.filter((t) => config.tiers.enabled || t === 1);
+    const ready = eligible.filter((t) => (tiers[t]?.pending ?? 0) >= nudgeGrowthTokens).map((t) => `T${t} ${tiers[t].pending}`);
+    const readyHint = ready.length > 0 ? `, ready: ${ready.join(", ")}` : "";
+    const blocked = eligible.filter((t) => (tiers[t]?.pending ?? 0) >= nudgeGrowthTokens && (state.nudge.lastShownByTier[t] ?? 0) > 0 && tokenCount - (state.nudge.lastShownByTier[t] ?? 0) < growthFloor).map((t) => `T${t} (cadence)`);
+    const blockedHint = blocked.length > 0 ? `, blocked: ${blocked.join(", ")}` : "";
+    const maxPending = Math.max(0, ...Object.values(tiers).map((t) => t.pending));
+    const pendingShort = maxPending < nudgeGrowthTokens;
+    const growthShort = growthSinceReference < growthFloor;
+    const parts = [];
+    if (pendingShort) parts.push(`max compressible ${maxPending} < threshold ${nudgeGrowthTokens}`);
+    if (growthShort) parts.push(`growth ${growthSinceReference} < floor ${growthFloor}`);
+    if (parts.length === 0) parts.push(`max compressible ${maxPending}, growth ${growthSinceReference}`);
+    reason = `${parts.join("; ")}${readyHint}${blockedHint}`;
+  }
+  const ctxBreakdown = computeContextBreakdown(input.messages, tokenCount, growthSinceReference, countTokens);
+  return {
+    shouldInject,
+    reason,
+    compressibleRanges: rec?.recommendedRanges ?? [],
+    protectedRanges: rec?.contextRanges.protected ?? [],
+    tierTargetBlocks: injectedTier ? tiers[injectedTier].targetBlocks : [],
+    contextUsage: usage,
+    tier: injectedTier,
+    breakdown: {
+      usage,
+      growth: growthSinceReference,
+      growthReference,
+      effectiveThreshold,
+      nudgeGrowthTokens,
+      growthFloor,
+      hasPendingNudge: hasPendingNudge ? 1 : 0,
+      overLimit: overLimit ? 1 : 0,
+      emergencyOverride: emergencyOverride ? 1 : 0,
+      pendingT1: tiers[1].pending,
+      pendingT2: tiers[2].pending,
+      pendingT3: tiers[3].pending
+    },
+    contextBreakdown: ctxBreakdown
+  };
+}
+function computeContextBreakdown(messages, total, growth, countTokens) {
+  const count = countTokens ?? ((t) => Math.ceil(t.length / 4));
+  let system = 0, tool = 0, summaries = 0, code = 0, text = 0;
+  for (const msg of messages) {
+    const tokens = count(msg.text ?? "");
+    if (msg.text?.startsWith("[Compressed conversation section]")) {
+      summaries += tokens;
+    } else if (msg.contentType === "tool-call" || msg.contentType === "tool-result") {
+      tool += tokens;
+    } else if (msg.role === "system") {
+      system += tokens;
+    } else if (msg.text?.includes("```")) {
+      code += tokens;
+    } else {
+      text += tokens;
+    }
+  }
+  return { system, tool, summaries, code, text, total, growth };
+}
+function cloneState(state) {
+  return {
+    blocks: state.blocks.map((block) => ({
+      ...block,
+      directMessageIds: [...block.directMessageIds],
+      effectiveMessageIds: [...block.effectiveMessageIds],
+      directBlockIds: [...block.directBlockIds]
+    })),
+    messageRefs: {
+      byRaw: { ...state.messageRefs.byRaw },
+      byRef: { ...state.messageRefs.byRef }
+    },
+    tokenSnapshot: { ...state.tokenSnapshot ?? {} },
+    nudge: { ...state.nudge, anchors: { ...state.nudge.anchors } },
+    stats: { ...state.stats },
+    nextBlockId: state.nextBlockId,
+    nextRunId: state.nextRunId
+  };
+}
+function scoreRelevance(block, terms) {
+  const topic = (block.topic ?? "").toLowerCase();
+  const summary = block.summary.toLowerCase();
+  let score = 0;
+  for (const term of terms) {
+    const topicHits = countOccurrences(topic, term);
+    if (topicHits > 0) score += Math.min(topicHits * 0.15, 0.45);
+    const summaryHits = countOccurrences(summary, term);
+    if (summaryHits > 0) score += Math.min(summaryHits * 0.04, 0.2);
+  }
+  return Math.min(score, 1);
+}
+function countOccurrences(haystack, needle) {
+  if (!haystack || !needle) return 0;
+  let count = 0;
+  let position = 0;
+  while ((position = haystack.indexOf(needle, position)) !== -1) {
+    count++;
+    position += needle.length;
+  }
+  return count;
 }
 var COMPRESS_PHILOSOPHY = `Compression Philosophy:
 - All compression serves the primary task, but be frugal.
@@ -302,2389 +2147,13 @@ function renderNudgeText(decision, prompts = defaultPrompts) {
     ].join("\n")
   };
 }
-
-// node_modules/acp-kernel/dist/chunk-UX4LINT7.js
-function createInitialState() {
-  return {
-    blocks: [],
-    messageRefs: { byRaw: {}, byRef: {} },
-    tokenSnapshot: {},
-    nudge: {
-      lastPerMessageNudgeTokens: 0,
-      lastNudgeShownTokens: 0,
-      baselineTokens: 0,
-      anchors: {},
-      lastShownByTier: {}
-    },
-    stats: { tokensCompressed: 0, compressionCount: 0, absorbedTokens: 0 },
-    absorbed: [],
-    nextBlockId: 1,
-    nextRunId: 1
-  };
-}
-function allocateBlockId(state) {
-  const id = state.nextBlockId;
-  state.nextBlockId = Math.max(1, id) + 1;
-  return `b${id}`;
-}
-function allocateRunId(state) {
-  const id = state.nextRunId;
-  state.nextRunId = Math.max(1, id) + 1;
-  return `r${id}`;
-}
-function blockById(state, blockId) {
-  return state.blocks.find((block) => block.blockId === blockId);
-}
-function activeBlocks(state) {
-  return state.blocks.filter((block) => block.active);
-}
-function coveredMessageIds(state) {
-  const covered = /* @__PURE__ */ new Set();
-  for (const block of state.blocks) {
-    if (!block.active) continue;
-    for (const id of block.effectiveMessageIds) covered.add(id);
-  }
-  return covered;
-}
-function advanceSurvival(state, promotionThreshold) {
-  for (const block of state.blocks) {
-    if (!block.active) continue;
-    block.survivedCount += 1;
-    if (block.survivedCount >= promotionThreshold) {
-      block.generation = "old";
-    }
-  }
-}
-
-// node_modules/acp-kernel/dist/index.js
-var REF_WIDTH = 5;
-var MIN_INDEX = 1;
-var MAX_INDEX = 99999;
-var REF_PATTERN = /^m0*(\d{1,5})$/;
-var BLOCKED_REF = "BLOCKED";
-function indexToRef(index) {
-  if (!Number.isInteger(index) || index < MIN_INDEX || index > MAX_INDEX) {
-    throw new RangeError(
-      `ref index out of bounds: ${index} (allowed ${MIN_INDEX}-${MAX_INDEX})`
-    );
-  }
-  return `m${String(index).padStart(REF_WIDTH, "0")}`;
-}
-function refToIndex(ref) {
-  const match = REF_PATTERN.exec(ref.trim().toLowerCase());
-  if (!match) return null;
-  const index = Number(match[1]);
-  if (index < MIN_INDEX || index > MAX_INDEX) return null;
-  return index;
-}
-function refForRaw(map, rawId) {
-  return map.byRaw[rawId] ?? null;
-}
-function assignRefs(messages, options) {
-  const map = {
-    byRaw: { ...options.existing.byRaw },
-    byRef: { ...options.existing.byRef }
-  };
-  let cursor = Number.isInteger(options.nextIndex) && options.nextIndex >= MIN_INDEX ? options.nextIndex : MIN_INDEX;
-  let newlyAssigned = 0;
-  for (const message of messages) {
-    if (!message.id || options.shouldSkip?.(message)) continue;
-    if (map.byRaw[message.id]) continue;
-    if (options.isProtected?.(message)) {
-      map.byRaw[message.id] = BLOCKED_REF;
-      continue;
-    }
-    const ref = allocateFreeRef(map, cursor);
-    cursor = ref.index + 1;
-    map.byRaw[message.id] = ref.text;
-    map.byRef[ref.text] = message.id;
-    newlyAssigned++;
-  }
-  return { map, nextIndex: cursor, newlyAssigned };
-}
-function allocateFreeRef(map, start) {
-  let candidate = Math.max(start, MIN_INDEX);
-  while (candidate <= MAX_INDEX) {
-    const text = indexToRef(candidate);
-    if (!map.byRef[text]) {
-      return { text, index: candidate };
-    }
-    candidate++;
-  }
-  throw new Error(
-    `ref capacity exhausted: cannot allocate beyond ${indexToRef(MAX_INDEX)}`
-  );
-}
-function highestUsedIndex(map) {
-  let highest = 0;
-  for (const ref of Object.values(map.byRaw)) {
-    const index = ref === BLOCKED_REF ? null : refToIndex(ref);
-    if (index !== null && index > highest) highest = index;
-  }
-  return highest;
-}
-var SUMMARY_HEADER = "[Compressed conversation section]";
-var SUMMARY_ID_PREFIX = "acp_summary_";
-function summaryMessageId(blockId) {
-  return `${SUMMARY_ID_PREFIX}${blockId}`;
-}
-function isSummaryMessageId(id) {
-  return id.startsWith(SUMMARY_ID_PREFIX);
-}
-function isRenderedSummaryMessage(message) {
-  return isSummaryMessageId(message.id) && message.role === "system" && message.contentType === "text";
-}
-function prune(messages, state, options = {}) {
-  const covered = coveredMessageIds(state);
-  if (covered.size === 0) return [...messages];
-  const inject = options.injectSummaries ?? true;
-  const firstUserIndex = messages.findIndex(
-    (message) => message.role === "user"
-  );
-  const indexById = /* @__PURE__ */ new Map();
-  const summaryIndexById = /* @__PURE__ */ new Map();
-  messages.forEach((message, index) => {
-    indexById.set(message.id, index);
-    if (isRenderedSummaryMessage(message))
-      summaryIndexById.set(message.id, index);
-  });
-  const anchors = inject ? collectSummaryAnchors(state, indexById, summaryIndexById) : [];
-  return stripOrphanedReasoning(
-    stripOrphanedToolResults(
-      stripOrphanedToolCalls(
-        rebuildMessages(messages, covered, firstUserIndex, anchors)
-      )
-    )
-  );
-}
-function collectSummaryAnchors(state, indexById, summaryIndexById) {
-  const anchors = [];
-  for (const block of activeBlocks(state)) {
-    const existingIndex = summaryIndexById.get(summaryMessageId(block.blockId));
-    if (existingIndex !== void 0) {
-      anchors.push({
-        blockId: block.blockId,
-        summary: block.summary,
-        topic: block.topic,
-        insertAt: existingIndex
-      });
-      continue;
-    }
-    let earliest = null;
-    for (const id of block.effectiveMessageIds) {
-      const index = indexById.get(id);
-      if (index !== void 0 && (earliest === null || index < earliest)) {
-        earliest = index;
-      }
-    }
-    anchors.push({
-      blockId: block.blockId,
-      summary: block.summary,
-      topic: block.topic,
-      insertAt: earliest ?? 0
-    });
-  }
-  anchors.sort((left, right) => left.insertAt - right.insertAt);
-  return anchors;
-}
-function rebuildMessages(messages, covered, firstUserIndex, anchors) {
-  const result = [];
-  const pending = [...anchors];
-  const anchoredSummaryIds = new Set(
-    anchors.map((anchor) => summaryMessageId(anchor.blockId))
-  );
-  for (let index = 0; index < messages.length; index++) {
-    while (pending.length > 0 && pending[0].insertAt === index) {
-      result.push(renderSummary(pending.shift()));
-    }
-    if (index === firstUserIndex && firstUserIndex >= 0) {
-      result.push(messages[index]);
-      continue;
-    }
-    if (covered.has(messages[index].id)) continue;
-    if (isRenderedSummaryMessage(messages[index]) && anchoredSummaryIds.has(messages[index].id))
-      continue;
-    result.push(messages[index]);
-  }
-  while (pending.length > 0) {
-    result.push(renderSummary(pending.shift()));
-  }
-  return result;
-}
-function renderSummary(anchor) {
-  const body = anchor.summary.trim();
-  const topicLine = anchor.topic ? `${SUMMARY_HEADER} \u2014 ${anchor.topic}` : SUMMARY_HEADER;
-  const text = body.length === 0 ? topicLine : `${topicLine}
-${body}`;
-  return {
-    id: summaryMessageId(anchor.blockId),
-    role: "system",
-    contentType: "text",
-    text
-  };
-}
-function stripOrphanedToolResults(messages) {
-  const knownCallIds = /* @__PURE__ */ new Set();
-  for (const m of messages) {
-    if (m.contentType === "tool-call" && m.toolCallId) {
-      knownCallIds.add(m.toolCallId);
-    }
-  }
-  return messages.filter(
-    (m) => m.contentType !== "tool-result" || !m.toolCallId || knownCallIds.has(m.toolCallId)
-  );
-}
-function stripOrphanedToolCalls(messages) {
-  const knownResultIds = /* @__PURE__ */ new Set();
-  for (const m of messages) {
-    if (m.contentType === "tool-result" && m.toolCallId) {
-      knownResultIds.add(m.toolCallId);
-    }
-  }
-  return messages.filter(
-    (m) => m.contentType !== "tool-call" || !m.toolCallId || m.toolName === "compress" || knownResultIds.has(m.toolCallId)
-  );
-}
-function stripOrphanedReasoning(messages) {
-  const drop = /* @__PURE__ */ new Set();
-  for (let i = 0; i < messages.length; i++) {
-    if (drop.has(i)) continue;
-    if (messages[i].contentType !== "reasoning") continue;
-    let j = i;
-    while (j + 1 < messages.length && messages[j + 1].contentType === "reasoning") {
-      j++;
-    }
-    const companion = messages[j + 1];
-    const hasCompanion = companion !== void 0 && companion.role === "assistant" && (companion.contentType === "text" || companion.contentType === "tool-call");
-    if (!hasCompanion) {
-      for (let k = i; k <= j; k++) drop.add(k);
-    }
-  }
-  if (drop.size === 0) return messages;
-  return messages.filter((_, i) => !drop.has(i));
-}
-function syncBlocks(messages, state) {
-  const presentIds = new Set(messages.map((message) => message.id));
-  const deactivated = [];
-  const result = {
-    blocks: state.blocks.map((block) => ({
-      ...block,
-      directMessageIds: [...block.directMessageIds],
-      effectiveMessageIds: [...block.effectiveMessageIds],
-      directBlockIds: [...block.directBlockIds]
-    })),
-    messageRefs: {
-      byRaw: { ...state.messageRefs.byRaw },
-      byRef: { ...state.messageRefs.byRef }
-    },
-    // Snapshot is keyed by ref with primitive values — shallow copy suffices.
-    tokenSnapshot: { ...state.tokenSnapshot ?? {} },
-    nudge: { ...state.nudge, anchors: { ...state.nudge.anchors } },
-    stats: { ...state.stats },
-    absorbed: (state.absorbed ?? []).map((record) => ({ ...record })),
-    nextBlockId: state.nextBlockId,
-    nextRunId: state.nextRunId
-  };
-  const liveRefs = new Set(
-    messages.map((m) => result.messageRefs.byRaw[m.id]).filter((r) => typeof r === "string")
-  );
-  if (Object.keys(result.tokenSnapshot).length !== liveRefs.size) {
-    const pruned = {};
-    for (const [ref, n] of Object.entries(result.tokenSnapshot)) {
-      if (liveRefs.has(ref)) pruned[ref] = n;
-    }
-    result.tokenSnapshot = pruned;
-  }
-  const consumedBlockIds = /* @__PURE__ */ new Set();
-  for (const block of result.blocks) {
-    for (const consumedId of block.directBlockIds) {
-      consumedBlockIds.add(consumedId);
-    }
-  }
-  for (const block of result.blocks) {
-    if (consumedBlockIds.has(block.blockId)) {
-      block.active = false;
-      continue;
-    }
-    block.active = true;
-    const stillPresent = block.effectiveMessageIds.some((id) => presentIds.has(id)) || presentIds.has(summaryMessageId(block.blockId));
-    if (!stillPresent) {
-      block.active = false;
-      deactivated.push(block.blockId);
-    }
-  }
-  return { state: result, deactivated };
-}
-function defaultConfig(modelContextLimit, overrides = {}) {
-  const base = {
-    tiers: { enabled: true, tier2Trigger: 5, tier3Trigger: 10 },
-    nudge: {
-      maxContextLimitPct: 0.75,
-      minContextLimitPct: 0.45,
-      frequency: 5,
-      iterationThreshold: 15,
-      force: "soft",
-      growthRatio: 0.05,
-      growthFloor: 5e4,
-      growthCap: 5e4,
-      minGrowthFloor: 2e4,
-      minGrowthRatio: 0.45,
-      emergencyThresholdPct: 0.95,
-      tier2GrowthMultiplier: 1.5
-    },
-    promotionThreshold: 5,
-    truncate: { threshold: 0.95 },
-    compress: {
-      minCompressRange: 5e3,
-      maxSummaryLength: 2e4,
-      minSummaryLength: 50
-    },
-    protectedTools: [],
-    preserveRecentMessages: 5,
-    preserveRecentTokens: 5e3,
-    modelContextLimit,
-    absorb: {
-      enabled: false,
-      toolName: "absorb",
-      minToolTokens: 1e3,
-      contextThresholdPct: 0,
-      excludeTools: []
-    }
-  };
-  return {
-    ...base,
-    ...overrides,
-    tiers: { ...base.tiers, ...overrides.tiers },
-    nudge: { ...base.nudge, ...overrides.nudge },
-    truncate: { ...base.truncate, ...overrides.truncate },
-    compress: { ...base.compress, ...overrides.compress },
-    absorb: overrides.absorb ? { ...base.absorb, ...overrides.absorb } : base.absorb
-  };
-}
-function validateConfig(config) {
-  const errors = [];
-  if (!Number.isFinite(config.modelContextLimit) || config.modelContextLimit <= 0) {
-    errors.push("modelContextLimit must be a positive number");
-  }
-  if (config.nudge.minContextLimitPct > config.nudge.maxContextLimitPct) {
-    errors.push(
-      "nudge.minContextLimitPct must not exceed nudge.maxContextLimitPct"
-    );
-  }
-  if (config.nudge.maxContextLimitPct > config.nudge.emergencyThresholdPct) {
-    errors.push(
-      "nudge.maxContextLimitPct must not exceed nudge.emergencyThresholdPct"
-    );
-  }
-  if (config.nudge.minPressureBenefitTokens !== void 0 && (!Number.isFinite(config.nudge.minPressureBenefitTokens) || config.nudge.minPressureBenefitTokens < 0)) {
-    errors.push("nudge.minPressureBenefitTokens must be finite and >= 0");
-  }
-  if (config.promotionThreshold < 1) {
-    errors.push("promotionThreshold must be >= 1");
-  }
-  if (config.truncate.threshold <= 0 || config.truncate.threshold > 1) {
-    errors.push("truncate.threshold must be in (0, 1]");
-  }
-  for (const tier of [config.tiers.tier2Trigger, config.tiers.tier3Trigger]) {
-    if (tier < 1) errors.push("tier triggers must be >= 1");
-  }
-  if (config.tiers.tier3Trigger <= config.tiers.tier2Trigger) {
-    errors.push("tiers.tier3Trigger must be greater than tiers.tier2Trigger");
-  }
-  if (config.absorb) {
-    if (config.absorb.enabled && !config.absorb.toolName) {
-      errors.push("absorb.toolName must be a non-empty string when enabled");
-    }
-    if (!Number.isFinite(config.absorb.minToolTokens) || config.absorb.minToolTokens < 0) {
-      errors.push("absorb.minToolTokens must be >= 0");
-    }
-    if (config.absorb.contextThresholdPct < 0 || config.absorb.contextThresholdPct > 1) {
-      errors.push("absorb.contextThresholdPct must be in [0, 1]");
-    }
-  }
-  return errors;
-}
-var MESSAGE_REF_PATTERN = /^m0*(\d{1,5})$/;
-var BLOCK_REF_PATTERN = /^b(\d{1,9})$/;
-function parseBoundary(ref) {
-  const normalized = ref.trim().toLowerCase();
-  const messageMatch = MESSAGE_REF_PATTERN.exec(normalized);
-  if (messageMatch) {
-    const numericId = Number(messageMatch[1]);
-    if (numericId >= 1 && numericId <= 99999) {
-      return { kind: "message", numericId, raw: normalized };
-    }
-  }
-  const blockMatch = BLOCK_REF_PATTERN.exec(normalized);
-  if (blockMatch) {
-    const numericId = Number(blockMatch[1]);
-    if (numericId >= 1) return { kind: "block", numericId, raw: normalized };
-  }
-  return null;
-}
-var BoundaryNotFoundError = class extends Error {
-  code = "BOUNDARY_NOT_FOUND";
-  kind;
-  endpoint;
-  constructor(kind, endpoint, message) {
-    super(message);
-    this.name = "BoundaryNotFoundError";
-    this.code = "BOUNDARY_NOT_FOUND";
-    this.kind = kind;
-    this.endpoint = endpoint;
-  }
-};
-function resolveBoundaries(input) {
-  const start = parseBoundary(input.startRef);
-  const end = parseBoundary(input.endRef);
-  if (!start || !end) {
-    throw new Error(
-      `Invalid boundary ref(s): startId="${input.startRef}", endId="${input.endRef}". Use mNNNNN or bN.`
-    );
-  }
-  const indexByMessageId = /* @__PURE__ */ new Map();
-  input.messages.forEach(
-    (message, index) => indexByMessageId.set(message.id, index)
-  );
-  let snappedBoundaries = [];
-  const startAnchor = resolveAnchorIndex(
-    start,
-    input.state,
-    indexByMessageId,
-    "start"
-  );
-  if (startAnchor.snapped) snappedBoundaries.push(startAnchor.snapped);
-  const endAnchor = resolveAnchorIndex(
-    end,
-    input.state,
-    indexByMessageId,
-    "end"
-  );
-  if (endAnchor.snapped) snappedBoundaries.push(endAnchor.snapped);
-  let startIndex = startAnchor.index;
-  let endIndex = endAnchor.index;
-  if (startIndex > endIndex) {
-    [startIndex, endIndex] = [endIndex, startIndex];
-  }
-  const messageIds = [];
-  for (let index = startIndex; index <= endIndex; index++) {
-    const message = input.messages[index];
-    if (message && !isRenderedSummaryMessage(message))
-      messageIds.push(message.id);
-  }
-  const boundaryKind = start.kind === "block" || end.kind === "block" ? "block" : "message";
-  const nestedBlockIds = [];
-  const nestedSeen = /* @__PURE__ */ new Set();
-  for (const block of activeBlocks(input.state)) {
-    if (blockVisibleInRange(block, indexByMessageId, startIndex, endIndex)) {
-      if (!nestedSeen.has(block.blockId)) {
-        nestedSeen.add(block.blockId);
-        nestedBlockIds.push(block.blockId);
-      }
-    }
-  }
-  const protectedGaps = [];
-  return {
-    startIndex,
-    endIndex,
-    messageIds,
-    nestedBlockIds,
-    boundaryKind,
-    protectedGaps,
-    snappedBoundaries
-  };
-}
-function resolveAnchorIndex(boundary, state, indexByMessageId, endpoint) {
-  const label = endpoint === "start" ? "startId" : "endId";
-  if (boundary.kind === "message") {
-    const rawId = state.messageRefs.byRef[boundary.raw] ?? state.messageRefs.byRef[formatPaddedRef(boundary.numericId)];
-    if (!rawId) {
-      throw new BoundaryNotFoundError(
-        "unknown",
-        endpoint,
-        `${label}="${boundary.raw}" does not exist in this session (typo or wrong session) \u2014 run acp_status for current refs.`
-      );
-    }
-    const index = indexByMessageId.get(rawId);
-    if (index !== void 0) {
-      return { index, snapped: null };
-    }
-    const owner2 = activeOwnerAnchor(state, [rawId], indexByMessageId);
-    if (owner2 !== null) {
-      return {
-        index: owner2,
-        snapped: `${label}="${boundary.raw}" refers to a message already compressed into an active block \u2014 anchored to the active block covering it instead.`
-      };
-    }
-    throw new BoundaryNotFoundError(
-      "consumed",
-      endpoint,
-      `${label}="${boundary.raw}" not found in visible context (likely consumed by an existing block).`
-    );
-  }
-  const block = blockById(state, `b${boundary.numericId}`);
-  if (!block) {
-    throw new BoundaryNotFoundError(
-      "unknown",
-      endpoint,
-      `${label}="b${boundary.numericId}" does not exist in this session (typo or wrong session) \u2014 run acp_status for current refs.`
-    );
-  }
-  if (block.active) {
-    const anchor = visibleBlockAnchor(block, indexByMessageId);
-    if (anchor !== null) {
-      return { index: anchor, snapped: null };
-    }
-  }
-  const owner = activeOwnerAnchor(
-    state,
-    block.effectiveMessageIds,
-    indexByMessageId
-  );
-  if (owner !== null) {
-    return {
-      index: owner,
-      snapped: `${label}="b${boundary.numericId}" was consumed by a higher-tier block \u2014 anchored to the active block covering its content instead.`
-    };
-  }
-  if (!block.active) {
-    throw new BoundaryNotFoundError(
-      "consumed",
-      endpoint,
-      `${label}="b${boundary.numericId}" not found in visible context (block distilled/consumed by a higher-tier block).`
-    );
-  }
-  throw new BoundaryNotFoundError(
-    "consumed",
-    endpoint,
-    `${label}="b${boundary.numericId}" is an active block but none of its content (raw messages or rendered summary) is visible in the current context \u2014 run acp_status to verify.`
-  );
-}
-function activeOwnerAnchor(state, ownedIds, indexByMessageId) {
-  if (ownedIds.length === 0) return null;
-  const owned = new Set(ownedIds);
-  let best = null;
-  for (const block of state.blocks) {
-    if (!block.active) continue;
-    const inherited = inheritedContentIds(state, block);
-    let ownsInherited = false;
-    for (const id of owned) {
-      if (inherited.has(id)) {
-        ownsInherited = true;
-        break;
-      }
-    }
-    if (!ownsInherited) continue;
-    const anchor = visibleBlockAnchor(block, indexByMessageId);
-    if (anchor === null) continue;
-    if (best === null || anchor < best) {
-      best = anchor;
-    }
-  }
-  return best;
-}
-function inheritedContentIds(state, block) {
-  const ids = /* @__PURE__ */ new Set();
-  for (const childId of block.directBlockIds) {
-    const child = blockById(state, childId);
-    if (!child) continue;
-    for (const id of child.effectiveMessageIds) ids.add(id);
-  }
-  return ids;
-}
-function formatPaddedRef(index) {
-  return `m${String(index).padStart(5, "0")}`;
-}
-function visibleBlockAnchor(block, indexByMessageId) {
-  const summaryIndex = indexByMessageId.get(summaryMessageId(block.blockId));
-  if (summaryIndex !== void 0) return summaryIndex;
-  return earliestIndexOfIds(block.effectiveMessageIds, indexByMessageId);
-}
-function blockVisibleInRange(block, indexByMessageId, startIndex, endIndex) {
-  const summaryIndex = indexByMessageId.get(summaryMessageId(block.blockId));
-  if (summaryIndex !== void 0 && summaryIndex >= startIndex && summaryIndex <= endIndex) {
-    return true;
-  }
-  const rawIndex = earliestIndexOfIds(
-    block.effectiveMessageIds,
-    indexByMessageId
-  );
-  return rawIndex !== null && rawIndex >= startIndex && rawIndex <= endIndex;
-}
-function earliestIndexOfIds(ids, indexByMessageId) {
-  let earliest = null;
-  for (const id of ids) {
-    const index = indexByMessageId.get(id);
-    if (index !== void 0 && (earliest === null || index < earliest)) {
-      earliest = index;
-    }
-  }
-  return earliest;
-}
-var TRUNCATION_MARKER = "[truncated for context space]";
-var DEFAULTS = {
-  minOutputTokens: 1e3,
-  keepPrefixChars: 2e3,
-  keepSuffixChars: 2e3,
-  protectRecentMessages: 3
-};
-function truncateLargeToolOutputs(messages, tokenCount, config, countTokens, options = {}) {
-  const opts = { ...DEFAULTS, ...options };
-  if (config.modelContextLimit <= 0) return { messages, truncatedCount: 0, savedTokens: 0 };
-  const threshold = config.truncate.threshold * config.modelContextLimit;
-  if (tokenCount < threshold) return { messages, truncatedCount: 0, savedTokens: 0 };
-  const protectedIndex = messages.length - opts.protectRecentMessages;
-  const candidates = [];
-  for (let index = 0; index < messages.length; index++) {
-    if (index >= protectedIndex) break;
-    const message = messages[index];
-    if (message.contentType !== "tool-result") continue;
-    const text = message.text ?? "";
-    if (text.length === 0 || text.includes(TRUNCATION_MARKER)) continue;
-    const tokens = countTokens(text);
-    if (tokens < opts.minOutputTokens) continue;
-    candidates.push({ index, tokens });
-  }
-  if (candidates.length === 0) return { messages, truncatedCount: 0, savedTokens: 0 };
-  candidates.sort((left, right) => right.tokens - left.tokens);
-  const targetTokens = threshold * 0.9;
-  let savedTokens = 0;
-  const edits = /* @__PURE__ */ new Map();
-  let truncatedCount = 0;
-  for (const candidate of candidates) {
-    if (tokenCount - savedTokens <= targetTokens) break;
-    const original = messages[candidate.index].text ?? "";
-    if (original.length <= opts.keepPrefixChars + opts.keepSuffixChars) continue;
-    const prefix = original.slice(0, opts.keepPrefixChars);
-    const suffix = original.slice(-opts.keepSuffixChars);
-    const replacement = prefix + `
-
-...${TRUNCATION_MARKER} \u2014 original ~${candidate.tokens} tokens]...
-
-` + suffix;
-    edits.set(candidate.index, replacement);
-    savedTokens += candidate.tokens - countTokens(replacement);
-    truncatedCount++;
-  }
-  if (truncatedCount === 0) return { messages, truncatedCount: 0, savedTokens: 0 };
-  const updated = messages.map(
-    (message, index) => edits.has(index) ? { ...message, text: edits.get(index) } : message
-  );
-  return { messages: updated, truncatedCount, savedTokens };
-}
-var KEEP_LAST_ORPHANED = 2;
-function rangeKey(startRef, endRef) {
-  return `${startRef}::${endRef}`;
-}
-function rewriteCompressText(text, liveKeys) {
-  let parsed;
-  try {
-    parsed = JSON.parse(text ?? "");
-  } catch {
-    return null;
-  }
-  if (!parsed || typeof parsed !== "object") return null;
-  const obj = parsed;
-  const content = obj.content;
-  if (!Array.isArray(content) || content.length === 0) return null;
-  const kept = content.filter((entry) => {
-    if (!entry || typeof entry !== "object") return false;
-    const s = typeof entry.startId === "string" ? entry.startId : typeof entry.messageId === "string" ? entry.messageId : "";
-    const e = typeof entry.endId === "string" ? entry.endId : typeof entry.messageId === "string" ? entry.messageId : "";
-    return liveKeys.has(rangeKey(s, e));
-  });
-  if (kept.length === content.length || kept.length === 0) return null;
-  return JSON.stringify({ ...obj, content: kept });
-}
-function hideConsumedCompressCalls(state, messages) {
-  const allBlockCallIds = /* @__PURE__ */ new Set();
-  const activeCallIds = /* @__PURE__ */ new Set();
-  const liveRangeKeysByCallId = /* @__PURE__ */ new Map();
-  const legacyLiveByCallId = /* @__PURE__ */ new Set();
-  for (const block of state.blocks) {
-    if (!block.compressCallId) continue;
-    allBlockCallIds.add(block.compressCallId);
-    if (!block.active) continue;
-    activeCallIds.add(block.compressCallId);
-    if (block.startRef === void 0 || block.endRef === void 0) {
-      legacyLiveByCallId.add(block.compressCallId);
-      continue;
-    }
-    let keys = liveRangeKeysByCallId.get(block.compressCallId);
-    if (!keys) {
-      keys = /* @__PURE__ */ new Set();
-      liveRangeKeysByCallId.set(block.compressCallId, keys);
-    }
-    keys.add(rangeKey(block.startRef, block.endRef));
-  }
-  const lastOrphanedCallIds = [];
-  for (let i = messages.length - 1; i >= 0 && lastOrphanedCallIds.length < KEEP_LAST_ORPHANED; i--) {
-    const message = messages[i];
-    if (message.toolName !== "compress" || message.contentType !== "tool-call") continue;
-    const callId = message.toolCallId;
-    if (callId && !allBlockCallIds.has(callId)) {
-      lastOrphanedCallIds.push(callId);
-    }
-  }
-  const keepCallIds = /* @__PURE__ */ new Set([...activeCallIds, ...lastOrphanedCallIds]);
-  const hiddenCallIds = /* @__PURE__ */ new Set();
-  for (const message of messages) {
-    if (message.toolName === "compress" && message.contentType === "tool-call" && (!message.toolCallId || !keepCallIds.has(message.toolCallId))) {
-      if (message.toolCallId) hiddenCallIds.add(message.toolCallId);
-    }
-  }
-  let hidden = 0;
-  const result = [];
-  for (const message of messages) {
-    if (message.toolName === "compress" && message.contentType === "tool-call" && (!message.toolCallId || !keepCallIds.has(message.toolCallId))) {
-      hidden++;
-      continue;
-    }
-    if (message.contentType === "tool-result" && message.toolCallId && hiddenCallIds.has(message.toolCallId)) {
-      hidden++;
-      continue;
-    }
-    if (message.toolName === "compress" && message.contentType === "tool-call" && message.toolCallId && keepCallIds.has(message.toolCallId)) {
-      const liveKeys = liveRangeKeysByCallId.get(message.toolCallId);
-      if (liveKeys && liveKeys.size > 0 && !legacyLiveByCallId.has(message.toolCallId)) {
-        const rewritten = rewriteCompressText(message.text, liveKeys);
-        if (rewritten !== null) {
-          result.push({ ...message, text: rewritten });
-          continue;
-        }
-      }
-    }
-    result.push(message);
-  }
-  return { messages: result, hidden };
-}
-var COMPRESS_TOOL_NAME = "compress";
-var DECOMPRESS_TOOL_NAME = "decompress";
-var SEARCH_CONTEXT_TOOL_NAME = "search_context";
-var ACP_STATUS_TOOL_NAME = "acp_status";
-var ABSORB_TOOL_NAME = "absorb";
-var COMPRESS_TOOL = {
-  name: COMPRESS_TOOL_NAME,
-  description: "Replace a contiguous range of older conversation with a detailed summary you write. Use when content is genuinely consumed. Batch form: content=[{startId,endId,summary,topic?}]. REQUIRED \u2014 compress without content is invalid.",
-  input_schema: {
-    type: "object",
-    properties: {
-      topic: {
-        type: "string",
-        description: "Optional short title for the compressed range"
-      },
-      content: {
-        type: "array",
-        description: "One or more ranges to compress into separate summary blocks",
-        items: {
-          type: "object",
-          properties: {
-            topic: { type: "string" },
-            startId: {
-              type: "string",
-              description: "mNNNNN ref at the start of the range"
-            },
-            endId: {
-              type: "string",
-              description: "mNNNNN ref at the end of the range"
-            },
-            summary: {
-              type: "string",
-              description: "Self-contained summary replacing the range"
-            }
-          },
-          required: ["startId", "endId", "summary"]
-        }
-      }
-    },
-    required: ["content"]
-  }
-};
-var COMPRESS_TOOL_OPENAI = {
-  type: "function",
-  function: {
-    name: COMPRESS_TOOL_NAME,
-    description: COMPRESS_TOOL.description,
-    parameters: {
-      type: "object",
-      properties: {
-        topic: {
-          type: "string",
-          description: "Optional short title for the compressed range"
-        },
-        content: {
-          type: "array",
-          description: "One or more ranges to compress into separate summary blocks. REQUIRED \u2014 compress without content is invalid.",
-          items: {
-            type: "object",
-            properties: {
-              topic: { type: "string" },
-              startId: {
-                type: "string",
-                description: "mNNNNN ref at the start of the range"
-              },
-              endId: {
-                type: "string",
-                description: "mNNNNN ref at the end of the range"
-              },
-              summary: {
-                type: "string",
-                description: "Self-contained summary replacing the range"
-              }
-            },
-            required: ["startId", "endId", "summary"]
-          }
-        }
-      },
-      required: ["content"]
-    }
-  }
-};
-var DECOMPRESS_TOOL_OPENAI = {
-  type: "function",
-  function: {
-    name: DECOMPRESS_TOOL_NAME,
-    description: "Restores previously compressed content. Use when you need exact details lost in compression. By default restores one tier up. Use full:true for all the way to original messages. Use toFile to write to file instead of inflating context.",
-    parameters: {
-      type: "object",
-      properties: {
-        blockId: {
-          type: "string",
-          description: "Block ID to decompress (e.g. b5)"
-        },
-        toFile: {
-          type: "string",
-          description: "Optional: write content to file instead of context"
-        },
-        full: {
-          type: "boolean",
-          description: "Restore all the way to original messages"
-        }
-      },
-      required: ["blockId"]
-    }
-  }
-};
-var SEARCH_CONTEXT_TOOL_OPENAI = {
-  type: "function",
-  function: {
-    name: SEARCH_CONTEXT_TOOL_NAME,
-    description: "Search through compressed block summaries by keyword. Use BEFORE decompressing to find the right block.",
-    parameters: {
-      type: "object",
-      properties: {
-        query: { type: "string", description: "Search query" },
-        limit: { type: "number", description: "Max results (default 5)" }
-      },
-      required: ["query"]
-    }
-  }
-};
-var ACP_STATUS_TOOL_OPENAI = {
-  type: "function",
-  function: {
-    name: ACP_STATUS_TOOL_NAME,
-    description: "Show context usage and compressible ranges. No args = overview. Use to find what to compress next.",
-    parameters: {
-      type: "object",
-      properties: {}
-    }
-  }
-};
-var DECOMPRESS_TOOL = {
-  name: DECOMPRESS_TOOL_NAME,
-  description: DECOMPRESS_TOOL_OPENAI.function.description,
-  input_schema: DECOMPRESS_TOOL_OPENAI.function.parameters
-};
-var SEARCH_CONTEXT_TOOL = {
-  name: SEARCH_CONTEXT_TOOL_NAME,
-  description: SEARCH_CONTEXT_TOOL_OPENAI.function.description,
-  input_schema: SEARCH_CONTEXT_TOOL_OPENAI.function.parameters
-};
-var ACP_STATUS_TOOL = {
-  name: ACP_STATUS_TOOL_NAME,
-  description: ACP_STATUS_TOOL_OPENAI.function.description,
-  input_schema: ACP_STATUS_TOOL_OPENAI.function.parameters
-};
-var COMPRESS_TOOL_RESPONSES = {
-  type: "function",
-  name: COMPRESS_TOOL_NAME,
-  description: COMPRESS_TOOL.description,
-  parameters: COMPRESS_TOOL_OPENAI.function.parameters
-};
-var DECOMPRESS_TOOL_RESPONSES = {
-  type: "function",
-  name: DECOMPRESS_TOOL_OPENAI.function.name,
-  description: DECOMPRESS_TOOL_OPENAI.function.description,
-  parameters: DECOMPRESS_TOOL_OPENAI.function.parameters
-};
-var SEARCH_CONTEXT_TOOL_RESPONSES = {
-  type: "function",
-  name: SEARCH_CONTEXT_TOOL_OPENAI.function.name,
-  description: SEARCH_CONTEXT_TOOL_OPENAI.function.description,
-  parameters: SEARCH_CONTEXT_TOOL_OPENAI.function.parameters
-};
-var ACP_STATUS_TOOL_RESPONSES = {
-  type: "function",
-  name: ACP_STATUS_TOOL_OPENAI.function.name,
-  description: ACP_STATUS_TOOL_OPENAI.function.description,
-  parameters: ACP_STATUS_TOOL_OPENAI.function.parameters
-};
-var ACP_TOOL_NAMES = /* @__PURE__ */ new Set([
-  COMPRESS_TOOL_NAME,
-  DECOMPRESS_TOOL_NAME,
-  SEARCH_CONTEXT_TOOL_NAME,
-  ACP_STATUS_TOOL_NAME
-]);
-var ALWAYS_PROTECTED_TOOLS = ["compress"];
-var NEVER_PRESERVE_RECENT_TOOLS = [
-  "decompress",
-  "search_context",
-  "read",
-  "bash"
-];
-function isNeverPreserveRecent(msg) {
-  if (msg.contentType !== "tool-call" && msg.contentType !== "tool-result") {
-    return false;
-  }
-  if (!msg.toolName) return false;
-  return NEVER_PRESERVE_RECENT_TOOLS.includes(msg.toolName);
-}
-function matchToolPattern(toolName, pattern) {
-  if (pattern.endsWith("*")) {
-    return toolName.startsWith(pattern.slice(0, -1));
-  }
-  return toolName === pattern;
-}
-function isMessageProtected(msg, config) {
-  if (msg.contentType !== "tool-call" && msg.contentType !== "tool-result" || !msg.toolName) {
-    return false;
-  }
-  if (ALWAYS_PROTECTED_TOOLS.includes(msg.toolName)) {
-    return true;
-  }
-  for (const pattern of config.protectedTools) {
-    if (matchToolPattern(msg.toolName, pattern)) return true;
-  }
-  if (config.isToolProtected?.(msg.toolName, msg.text)) return true;
-  return false;
-}
-function collectProtectedToolCallIds(messages, config) {
-  const ids = /* @__PURE__ */ new Set();
-  for (const m of messages) {
-    if (m.contentType === "tool-call" && m.toolCallId && isMessageProtected(m, config)) {
-      ids.add(m.toolCallId);
-    }
-  }
-  return ids;
-}
-function isMessageProtectedWithPairing(msg, config, protectedCallIds) {
-  if (isMessageProtected(msg, config)) return true;
-  if (msg.contentType === "tool-result" && msg.toolCallId && protectedCallIds.has(msg.toolCallId)) {
-    return true;
-  }
-  return false;
-}
-var ABSORB_PROMPT_MARKER = "[ACP absorb]";
-var DEFAULT_ABSORB_CONFIG = {
-  enabled: false,
-  toolName: ABSORB_TOOL_NAME,
-  minToolTokens: 1e3,
-  contextThresholdPct: 0,
-  excludeTools: []
-};
-function resolveAbsorbConfig(config) {
-  return { ...DEFAULT_ABSORB_CONFIG, ...config.absorb ?? {} };
-}
-function formatTokenCount(tokens) {
-  if (tokens < 1e3) return String(tokens);
-  if (tokens < 1e4) return (tokens / 1e3).toFixed(1) + "K";
-  return Math.round(tokens / 1e3) + "K";
-}
-function buildAbsorbPrompt(ref, tokens, toolName = ABSORB_TOOL_NAME) {
-  return `${ABSORB_PROMPT_MARKER} This tool result (~${formatTokenCount(tokens)} tokens) will be REMOVED from context. Your IMMEDIATE next action: call ${toolName}({ ref: "${ref}", summary: "..." }) \u2014 summary = distilled essentials only (outcome, key values, exact paths:lines, error text verbatim, decisions). Afterwards work from your summary; do NOT re-run this tool. If the result contains nothing you need, call ${toolName} with summary "(nothing needed)".`;
-}
-function isAcpOrConfiguredTool(toolName, cfg) {
-  if (!toolName) return false;
-  if (toolName === cfg.toolName) return true;
-  return ACP_TOOL_NAMES.has(toolName);
-}
-function isAbsorbCandidate(msg, config) {
-  if (msg.contentType !== "tool-result" || !msg.toolCallId) return false;
-  const cfg = resolveAbsorbConfig(config);
-  if (isAcpOrConfiguredTool(msg.toolName, cfg)) return false;
-  if (isMessageProtected(msg, config)) return false;
-  for (const pattern of cfg.excludeTools) {
-    if (msg.toolName && matchToolPattern(msg.toolName, pattern)) return false;
-  }
-  return true;
-}
-function hideAbsorbedMessages(messages, state) {
-  const records = state.absorbed ?? [];
-  if (records.length === 0) return messages;
-  const hidden = /* @__PURE__ */ new Set();
-  for (const record of records) {
-    if (record.callMessageId) hidden.add(record.callMessageId);
-    if (record.resultMessageId) hidden.add(record.resultMessageId);
-  }
-  return messages.filter((msg) => !hidden.has(msg.id));
-}
-function appendAbsorbPrompts(messages, state, config, tokenCount, countTokens) {
-  const cfg = resolveAbsorbConfig(config);
-  if (!cfg.enabled) return { messages, promptedCount: 0 };
-  const limit = config.modelContextLimit;
-  if (cfg.contextThresholdPct > 0 && limit > 0 && tokenCount < cfg.contextThresholdPct * limit) {
-    return { messages, promptedCount: 0 };
-  }
-  const absorbedIds = /* @__PURE__ */ new Set();
-  for (const record of state.absorbed ?? []) {
-    if (record.resultMessageId) absorbedIds.add(record.resultMessageId);
-  }
-  let promptedCount = 0;
-  const out = messages.map((msg) => {
-    if (!isAbsorbCandidate(msg, config)) return msg;
-    if (absorbedIds.has(msg.id)) return msg;
-    const text = msg.text ?? "";
-    if (text.includes(ABSORB_PROMPT_MARKER)) return msg;
-    const tokens = countTokens(text);
-    if (tokens < cfg.minToolTokens) return msg;
-    const ref = refForRaw(state.messageRefs, msg.id);
-    if (!ref || ref === BLOCKED_REF) return msg;
-    promptedCount++;
-    return {
-      ...msg,
-      text: text + "\n\n" + buildAbsorbPrompt(ref, tokens, cfg.toolName)
-    };
-  });
-  return { messages: out, promptedCount };
-}
-var registry = /* @__PURE__ */ new Map();
-function listMessageFilters() {
-  return [...registry.values()];
-}
-function applyMessageFilters(messages, config) {
-  if (!config?.enabled) {
-    return { messages, partsFiltered: 0, partsDropped: 0, partsModified: 0 };
-  }
-  const active = listMessageFilters().filter(
-    (filter) => config.filters?.[filter.name]?.enabled !== false
-  );
-  if (active.length === 0) {
-    return { messages, partsFiltered: 0, partsDropped: 0, partsModified: 0 };
-  }
-  let working = messages.map((message) => ({ ...message }));
-  const tally = { partsFiltered: 0, partsDropped: 0, partsModified: 0 };
-  const total = working.length;
-  const immediate = active.filter((filter) => !filter.keepLastOnly);
-  for (let index = 0; index < working.length; index++) {
-    const message = working[index];
-    const text = message.text ?? "";
-    if (text.length === 0) continue;
-    let current = text;
-    const baseCtx = {
-      text: current,
-      role: message.role,
-      messageIndex: index,
-      totalMessages: total,
-      toolName: message.toolName
-    };
-    for (const filter of immediate) {
-      let decision;
-      try {
-        decision = filter.filter(baseCtx);
-      } catch {
-        continue;
-      }
-      if (decision.action === "keep") continue;
-      tally.partsFiltered++;
-      if (decision.action === "drop") {
-        current = "";
-        tally.partsDropped++;
-      } else if (decision.action === "modify" && decision.text !== void 0) {
-        current = decision.text;
-        tally.partsModified++;
-      }
-      baseCtx.text = current;
-    }
-    if (current !== text) working[index] = { ...message, text: current };
-  }
-  const keepLast = active.filter((filter) => filter.keepLastOnly);
-  for (const filter of keepLast) {
-    let foundLast = false;
-    for (let index = working.length - 1; index >= 0; index--) {
-      const message = working[index];
-      const text = message.text ?? "";
-      if (text.length === 0) continue;
-      const ctx = {
-        text,
-        role: message.role,
-        messageIndex: index,
-        totalMessages: total,
-        toolName: message.toolName
-      };
-      let decision;
-      try {
-        decision = filter.filter(ctx);
-      } catch {
-        continue;
-      }
-      if (decision.action !== "drop" && decision.action !== "modify") continue;
-      if (foundLast) {
-        tally.partsFiltered++;
-        tally.partsDropped++;
-        working[index] = { ...message, text: "" };
-      } else {
-        foundLast = true;
-        if (decision.action === "modify" && decision.text !== void 0) {
-          tally.partsFiltered++;
-          tally.partsModified++;
-          working[index] = { ...message, text: decision.text };
-        }
-      }
-    }
-  }
-  return { messages: working, ...tally };
-}
-function formatTokens(tokens) {
-  if (tokens < 1e3) return String(tokens);
-  if (tokens < 1e4) return (tokens / 1e3).toFixed(1) + "K";
-  return Math.round(tokens / 1e3) + "K";
-}
-function classifyType(message) {
-  if (message.contentType === "tool-call" || message.contentType === "tool-result") {
-    return message.toolName || "tool";
-  }
-  return message.contentType;
-}
-function escapeRegex(s) {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-var LT = "<";
-var GT = ">";
-var TAG_OPEN = LT + "acp ";
-var TAG_CLOSE = LT + "/acp" + GT;
-function acpTag(ref, tokens, type) {
-  return TAG_OPEN + 'tokens="' + formatTokens(tokens) + '" type="' + type + '"' + GT + ref + TAG_CLOSE;
-}
-function renderMessage(message, map, countTokens, strategy, snapshot = null) {
-  const ref = refForRaw(map, message.id);
-  if (!ref || ref === BLOCKED_REF) return message;
-  if (strategy === "none") return message;
-  if (strategy === "text-only" && message.contentType !== "text") {
-    return message;
-  }
-  const ownTagRe = new RegExp(
-    "^" + escapeRegex(TAG_OPEN) + "[^>]*" + GT + escapeRegex(ref) + escapeRegex(TAG_CLOSE) + "\\n?"
-  );
-  const cleanText = (message.text || "").replace(ownTagRe, "");
-  const tokens = snapshot ? snapshot[ref] ?? (snapshot[ref] = countTokens(cleanText)) : countTokens(cleanText);
-  const type = classifyType(message);
-  const prefix = acpTag(ref, tokens, type) + "\n";
-  if (!cleanText) return { ...message, text: prefix };
-  return { ...message, text: prefix + cleanText };
-}
-function renderWithSnapshot(messages, state, countTokens = (text) => Math.ceil(text.length / 4), strategy = "all") {
-  const map = state.messageRefs;
-  const snapshot = { ...state.tokenSnapshot ?? {} };
-  const rendered = messages.map(
-    (message) => renderMessage(message, map, countTokens, strategy, snapshot)
-  );
-  return { messages: rendered, tokenSnapshot: snapshot };
-}
-function createRenderRefsNode(strategy) {
-  return {
-    name: "render-refs",
-    run(io, ctx) {
-      const { messages, tokenSnapshot } = renderWithSnapshot(
-        io.messages,
-        io.state,
-        ctx.countTokens,
-        strategy
-      );
-      const prev = io.state.tokenSnapshot;
-      const changed = !prev || Object.keys(tokenSnapshot).length !== Object.keys(prev).length;
-      return changed ? { ...io, messages, state: { ...io.state, tokenSnapshot } } : { ...io, messages };
-    }
-  };
-}
-var renderRefsNode = createRenderRefsNode("all");
-function adjustBoundariesForToolPairs(startIndex, endIndex, messages, maxScan = 20) {
-  const callIdsInRange = /* @__PURE__ */ new Set();
-  for (let i = startIndex; i <= endIndex; i++) {
-    const msg = messages[i];
-    if (!msg || !msg.toolCallId) continue;
-    if (msg.toolName === "compress") continue;
-    callIdsInRange.add(msg.toolCallId);
-  }
-  if (callIdsInRange.size === 0) {
-    return { startIndex, endIndex };
-  }
-  let newEndIndex = endIndex;
-  for (let i = endIndex + 1; i < messages.length && i <= endIndex + maxScan; i++) {
-    const msg = messages[i];
-    if (!msg) break;
-    if (msg.toolCallId && callIdsInRange.has(msg.toolCallId)) {
-      newEndIndex = i;
-    } else if (newEndIndex > endIndex) {
-      break;
-    }
-  }
-  let newStartIndex = startIndex;
-  for (let i = startIndex - 1; i >= 0 && i >= startIndex - maxScan; i--) {
-    const msg = messages[i];
-    if (!msg) break;
-    if (msg.toolCallId && callIdsInRange.has(msg.toolCallId)) {
-      newStartIndex = i;
-    } else if (newStartIndex < startIndex) {
-      break;
-    }
-  }
-  return { startIndex: newStartIndex, endIndex: newEndIndex };
-}
-function adjustBoundariesForReasoningPairs(startIndex, endIndex, messages) {
-  if (startIndex > endIndex) {
-    return { startIndex, endIndex };
-  }
-  let newStartIndex = startIndex;
-  let newEndIndex = endIndex;
-  for (let i = startIndex; i <= endIndex && i < messages.length; i++) {
-    const msg = messages[i];
-    if (!msg) continue;
-    if (msg.contentType === "reasoning") {
-      let j = i;
-      while (j + 1 < messages.length && messages[j + 1].contentType === "reasoning") {
-        j++;
-      }
-      const companion = messages[j + 1];
-      if (companion !== void 0 && companion.role === "assistant" && (companion.contentType === "text" || companion.contentType === "tool-call") && j + 1 > newEndIndex) {
-        newEndIndex = j + 1;
-      }
-    }
-    if (msg.role === "assistant" && (msg.contentType === "text" || msg.contentType === "tool-call")) {
-      let k = i - 1;
-      while (k >= 0 && messages[k].contentType === "reasoning") {
-        k--;
-      }
-      const runStart = k + 1;
-      if (runStart < i && runStart >= 0 && messages[runStart].contentType === "reasoning" && runStart < newStartIndex) {
-        newStartIndex = runStart;
-      }
-    }
-  }
-  return { startIndex: newStartIndex, endIndex: newEndIndex };
-}
-function refNum(ref) {
-  const n = parseInt(ref.slice(1), 10);
-  return Number.isNaN(n) ? -1 : n;
-}
-function estimateTextTokens(text) {
-  return Math.ceil(text.length / 4);
-}
-function isToolMessage(message) {
-  return message.contentType === "tool-call" || message.contentType === "tool-result";
-}
-function isSyntheticOrPruned(message, state) {
-  if (message.text?.startsWith("[Compressed conversation section]")) return true;
-  for (const block of state.blocks) {
-    if (block.active && block.effectiveMessageIds.includes(message.id)) return true;
-  }
-  return false;
-}
-function computeProtectedRefs(messages, state, config, countTokens = estimateTextTokens) {
-  const preserveN = config.preserveRecentMessages;
-  const preserveTokens = config.preserveRecentTokens;
-  const result = /* @__PURE__ */ new Set();
-  const visible = [];
-  for (const msg of messages) {
-    if (isSyntheticOrPruned(msg, state)) continue;
-    if (isNeverPreserveRecent(msg)) continue;
-    const ref = state.messageRefs.byRaw[msg.id];
-    if (!ref || ref === "BLOCKED") continue;
-    visible.push({ ref, tokens: countTokens(msg.text ?? "") });
-  }
-  if (preserveN > 0) {
-    for (const m of visible.slice(-preserveN)) {
-      result.add(m.ref);
-    }
-  }
-  if (preserveTokens > 0) {
-    let tokenAccum = 0;
-    for (let i = visible.length - 1; i >= 0 && tokenAccum < preserveTokens; i--) {
-      result.add(visible[i].ref);
-      tokenAccum += visible[i].tokens;
-    }
-  }
-  if (preserveN > 0) {
-    for (let i = messages.length - 1; i >= 0; i--) {
-      const msg = messages[i];
-      if (msg.role !== "user" || isSyntheticOrPruned(msg, state)) continue;
-      const ref = state.messageRefs.byRaw[msg.id];
-      if (ref && ref !== "BLOCKED") result.add(ref);
-      break;
-    }
-  }
-  return result;
-}
-function buildCompressibleRanges(messages, state, config, protectedZoneRefs, countTokens = estimateTextTokens) {
-  const compressibleMsgs = [];
-  const protectedMsgs = [];
-  const protectedCallIds = collectProtectedToolCallIds(messages, config);
-  for (const msg of messages) {
-    if (isSyntheticOrPruned(msg, state)) continue;
-    const ref = state.messageRefs.byRaw[msg.id];
-    if (!ref || ref === "BLOCKED") continue;
-    const rn = refNum(ref);
-    if (isMessageProtectedWithPairing(msg, config, protectedCallIds)) {
-      protectedMsgs.push({
-        ref,
-        refNum: rn,
-        tokens: countTokens(msg.text ?? ""),
-        tools: msg.toolName ? [msg.toolName] : []
-      });
-      continue;
-    }
-    if (protectedZoneRefs?.has(ref)) {
-      continue;
-    }
-    compressibleMsgs.push({
-      ref,
-      refNum: rn,
-      tokens: countTokens(msg.text ?? ""),
-      chars: (msg.text ?? "").length,
-      isTool: isToolMessage(msg),
-      isUser: msg.role === "user"
-    });
-  }
-  const compressible = [];
-  let cur = null;
-  let prevRefNum = -2;
-  for (const info of compressibleMsgs) {
-    const hasGap = info.refNum > prevRefNum + 1;
-    if (cur && (info.isUser && cur.count >= 3 || hasGap)) {
-      compressible.push(cur);
-      cur = null;
-    }
-    prevRefNum = info.refNum;
-    if (!cur) {
-      cur = {
-        startRef: info.ref,
-        endRef: info.ref,
-        count: 1,
-        tokens: info.tokens,
-        chars: info.chars,
-        toolPct: info.isTool ? 100 : 0,
-        textPct: info.isTool ? 0 : 100
-      };
-    } else {
-      cur.endRef = info.ref;
-      cur.count++;
-      cur.tokens += info.tokens;
-      cur.chars = (cur.chars ?? 0) + info.chars;
-      if (info.isTool) {
-        cur.toolPct = Math.round((cur.toolPct * (cur.count - 1) + 100) / cur.count);
-      } else {
-        cur.toolPct = Math.round(cur.toolPct * (cur.count - 1) / cur.count);
-      }
-      cur.textPct = 100 - cur.toolPct;
-    }
-  }
-  if (cur) compressible.push(cur);
-  const protectedRanges = [];
-  let pcur = null;
-  let pPrevRefNum = -2;
-  for (const info of protectedMsgs) {
-    const hasGap = info.refNum > pPrevRefNum + 1;
-    if (pcur && hasGap) {
-      protectedRanges.push(pcur);
-      pcur = null;
-    }
-    pPrevRefNum = info.refNum;
-    if (!pcur) {
-      pcur = {
-        startRef: info.ref,
-        endRef: info.ref,
-        count: 1,
-        tokens: info.tokens,
-        tools: [...info.tools]
-      };
-    } else {
-      pcur.endRef = info.ref;
-      pcur.count++;
-      pcur.tokens += info.tokens;
-      for (const t of info.tools) {
-        if (!pcur.tools.includes(t)) pcur.tools.push(t);
-      }
-    }
-  }
-  if (pcur) protectedRanges.push(pcur);
-  return {
-    compressible: compressible.filter((g) => g.tokens > 0),
-    protected: protectedRanges
-  };
-}
-function mergeBatch(batch) {
-  const first = batch[0];
-  const last = batch[batch.length - 1];
-  const count = batch.reduce((s, r) => s + r.count, 0);
-  const tokens = batch.reduce((s, r) => s + r.tokens, 0);
-  const chars = batch.reduce((s, r) => s + rangeChars(r), 0);
-  const toolPct = Math.round(
-    batch.reduce((s, r) => s + r.toolPct * r.count, 0) / count
-  );
-  const merged = {
-    startRef: first.startRef,
-    endRef: last.endRef,
-    count,
-    tokens,
-    chars,
-    toolPct,
-    textPct: 100 - toolPct
-  };
-  if (batch.some((r) => r.dangerous === true)) {
-    merged.dangerous = true;
-  }
-  return merged;
-}
-function rangeChars(r) {
-  return r.chars ?? r.tokens * 4;
-}
-function mergeRangesToThreshold(ranges, minChars) {
-  if (minChars <= 0 || ranges.length === 0) return ranges;
-  const result = [];
-  let batch = [];
-  let batchChars = 0;
-  for (const r of ranges) {
-    batch.push(r);
-    batchChars += rangeChars(r);
-    if (batchChars >= minChars) {
-      result.push(mergeBatch(batch));
-      batch = [];
-      batchChars = 0;
-    }
-  }
-  if (batch.length > 0) {
-    result.push(mergeBatch(batch));
-  }
-  return result;
-}
-function runPipeline(nodes, initial, ctx) {
-  let io = initial;
-  for (const node of nodes) {
-    if (node.enabled && !node.enabled(io, ctx)) continue;
-    io = node.run(io, ctx);
-  }
-  return io;
-}
-function rangeError(spec, message) {
-  return `range ${spec.startRef}..${spec.endRef}: ${message}`;
-}
-function numericBlockId(id) {
-  const parsed = /^b(\d+)$/.exec(id);
-  return parsed ? Number(parsed[1]) : 0;
-}
-function refGateDiagnostics(state, requestedRanges, unknownCount) {
-  const highest = highestUsedIndex(state.messageRefs);
-  const highestRef = highest > 0 ? indexToRef(highest) : "none";
-  return `[diagnostics: session highest ref=${highestRef}, unknown ranges in request=${unknownCount}/${requestedRanges}, session history=${state.stats.compressionCount} compression(s), ${state.blocks.length} block(s)]`;
-}
-function danglingMessageRefs(state, messages, spec) {
-  const visible = new Set(messages.map((m) => m.id));
-  const dangling = [];
-  for (const ref of [spec.startRef, spec.endRef]) {
-    const parsed = parseBoundary(ref);
-    if (!parsed || parsed.kind !== "message") continue;
-    const rawId = state.messageRefs.byRef[parsed.raw] ?? state.messageRefs.byRef[indexToRef(parsed.numericId)];
-    if (!rawId || visible.has(rawId)) continue;
-    const covered = state.blocks.some(
-      (block) => block.active && block.effectiveMessageIds.includes(rawId)
-    );
-    if (!covered) dangling.push(parsed.raw);
-  }
-  return dangling;
-}
-function createCore(ports = {}) {
-  const countTokens = ports.countTokens ?? defaultCountTokens;
-  function applyCompression(input) {
-    const state = cloneState(input.state);
-    const runId = allocateRunId(state);
-    let blocksCreated = 0;
-    let tokensCompressed = 0;
-    const errors = [];
-    const warnings = [];
-    const protectedMessageIds = input.protectedMessageIds ?? computeProtectedRefs(
-      input.messages,
-      input.state,
-      input.config,
-      countTokens
-    );
-    const preExistingCoverage = collectCoverage(state);
-    const classifications = /* @__PURE__ */ new Map();
-    const classificationErrors = [];
-    const consumedRanges = [];
-    for (const spec of input.ranges) {
-      try {
-        const resolved = resolveBoundaries({
-          startRef: spec.startRef,
-          endRef: spec.endRef,
-          messages: input.messages,
-          state
-        });
-        classifications.set(spec, { status: "ok", resolved });
-      } catch (error) {
-        if (error instanceof BoundaryNotFoundError) {
-          classifications.set(
-            spec,
-            error.kind === "unknown" ? { status: "unknown", error } : { status: "consumed", error }
-          );
-          if (error.kind === "consumed") {
-            consumedRanges.push(spec);
-          } else {
-            classificationErrors.push(rangeError(spec, error.message));
-          }
-        } else {
-          classifications.set(spec, {
-            status: "invalid",
-            error: error instanceof Error ? error : new Error(String(error))
-          });
-          classificationErrors.push(
-            rangeError(
-              spec,
-              error instanceof Error ? error.message : String(error)
-            )
-          );
-        }
-      }
-    }
-    let resolvableCount = 0;
-    let unknownCount = 0;
-    for (const resolution of classifications.values()) {
-      if (resolution.status === "ok") resolvableCount++;
-      else if (resolution.status === "unknown") unknownCount++;
-    }
-    const rangeSpans = [];
-    for (const [spec, resolution] of classifications) {
-      if (resolution.status !== "ok") continue;
-      rangeSpans.push({
-        spec,
-        start: resolution.resolved.startIndex,
-        end: resolution.resolved.endIndex
-      });
-    }
-    const sortedRanges = [...rangeSpans].sort((a, b) => a.start - b.start);
-    const skipSpecs = /* @__PURE__ */ new Set();
-    let acceptedMaxIndex = -1;
-    for (const entry of sortedRanges) {
-      if (entry.start <= acceptedMaxIndex) {
-        skipSpecs.add(entry.spec);
-        warnings.push(
-          `Skipped range (${entry.spec.startRef}..${entry.spec.endRef}) \u2014 overlaps an earlier range in the batch; the earlier range takes precedence. Keep ranges disjoint.`
-        );
-        continue;
-      }
-      if (entry.end > acceptedMaxIndex) acceptedMaxIndex = entry.end;
-    }
-    if (input.config.compress.minCompressRange > 0 && input.ranges.length > 0) {
-      let totalRangeChars = 0;
-      let hasBlockBoundaryRange = false;
-      let countedRanges = 0;
-      for (const [spec, resolution] of classifications) {
-        if (resolution.status !== "ok" || skipSpecs.has(spec)) continue;
-        if (resolution.resolved.boundaryKind === "block") {
-          hasBlockBoundaryRange = true;
-          continue;
-        }
-        countedRanges++;
-        for (const id of resolution.resolved.messageIds) {
-          const msg = input.messages.find((m) => m.id === id);
-          totalRangeChars += msg?.text?.length ?? 0;
-        }
-      }
-      if (!hasBlockBoundaryRange && totalRangeChars < input.config.compress.minCompressRange) {
-        const live = activeBlocks(state).map((b) => b.blockId).sort((x, y) => numericBlockId(x) - numericBlockId(y));
-        const liveHint = live.length > 0 ? ` Current active blocks span ${live[0]}..${live[live.length - 1]} \u2014 retry with startId/endId set to active block IDs in that span.` : "";
-        const diagnostics = refGateDiagnostics(
-          state,
-          input.ranges.length,
-          unknownCount
-        );
-        const danglingRefs = consumedRanges.flatMap(
-          (spec) => danglingMessageRefs(state, input.messages, spec)
-        );
-        const gateMessage = resolvableCount === 0 && consumedRanges.length === 0 && unknownCount > 0 ? `None of the ${input.ranges.length} requested range(s) resolved \u2014 every ref is unknown to this session. Refs are per-session snapshots, assigned once when a message is first rendered; no compress reassigns them, so unknown refs cannot come from an earlier compress in this session. They come from a different generation: a previous session instance (switching model or upstream mid-conversation starts a fresh session whose refs restart at m00001), the generation before a native-compaction rebase (which also resets refs to m00001), or a typo. ${diagnostics} Run acp_status, then call the compress tool again using only the refs it reports.` : consumedRanges.length > 0 ? danglingRefs.length > 0 ? `Requested range(s) cannot be anchored (e.g. ${consumedRanges[0].startRef}..${consumedRanges[0].endRef}) \u2014 the refs exist in this session's ref map, but the messages they point to are no longer in the visible context and no active block covers them: the message content changed (or the message was filtered out of the view) and now carries a new ref, leaving your old refs dangling. ${diagnostics} Run acp_status, then call the compress tool again using only the refs it reports.` : `Requested range(s) already compressed (e.g. ${consumedRanges[0].startRef}..${consumedRanges[0].endRef}) \u2014 those refs no longer point to directly compressible content: the range is covered by active block(s) or the block ref(s) are stale (distilled or consumed). ${diagnostics} Run acp_status, then call the compress tool again using only the CURRENT compressible ranges it reports.${liveHint}` : `Total compressible content too small (${totalRangeChars} chars across ${countedRanges} range(s), min ${input.config.compress.minCompressRange}). Combine more messages into your range(s) to meet the threshold.`;
-        return {
-          state: input.state,
-          result: {
-            blocksCreated: 0,
-            tokensCompressed: 0,
-            errors: [gateMessage, ...classificationErrors],
-            warnings: []
-          }
-        };
-      }
-    }
-    for (const spec of input.ranges) {
-      if (skipSpecs.has(spec)) continue;
-      const resolution = classifications.get(spec);
-      if (resolution === void 0) continue;
-      if (resolution.status === "consumed") {
-        warnings.push(
-          `Skipped range (${spec.startRef}..${spec.endRef}) \u2014 already compressed (messages consumed by existing block(s)); nothing to compress.`
-        );
-        continue;
-      }
-      if (resolution.status === "unknown" || resolution.status === "invalid") {
-        errors.push(rangeError(spec, resolution.error.message));
-        continue;
-      }
-      warnings.push(...resolution.resolved.snappedBoundaries);
-      try {
-        const outcome = applySingleRange({
-          spec,
-          messages: input.messages,
-          state,
-          runId,
-          config: input.config,
-          protectedMessageIds,
-          countTokens,
-          preExistingCoverage
-        });
-        blocksCreated++;
-        tokensCompressed += outcome.tokens;
-        warnings.push(...outcome.warnings);
-      } catch (error) {
-        errors.push(
-          rangeError(
-            spec,
-            error instanceof Error ? error.message : String(error)
-          )
-        );
-      }
-    }
-    state.stats.compressionCount += blocksCreated;
-    state.stats.tokensCompressed += tokensCompressed;
-    if (blocksCreated > 0) {
-      state.nudge.lastPerMessageNudgeTokens = 0;
-      state.nudge.lastNudgeShownTokens = 0;
-      state.nudge.lastShownByTier = {};
-    }
-    return {
-      state,
-      result: { blocksCreated, tokensCompressed, errors, warnings }
-    };
-  }
-  function processTurn(input) {
-    const configErrors = validateConfig(input.config);
-    if (configErrors.length > 0) {
-      console.warn(
-        `[acp-kernel] Config validation warnings: ${configErrors.join("; ")}. Thresholds may not fire correctly.`
-      );
-    }
-    const ctx = {
-      config: input.config,
-      tokenCount: input.tokenCount,
-      countTokens
-    };
-    const initial = {
-      messages: input.messages,
-      state: input.state,
-      effects: {}
-    };
-    const strategy = input.renderTags ?? "all";
-    const nodes = buildNodes(strategy);
-    const result = runPipeline(nodes, initial, ctx);
-    return {
-      messages: result.messages,
-      state: result.state,
-      nudge: result.effects.nudge
-    };
-  }
-  function decompress(blockId, state) {
-    return blockById(state, blockId);
-  }
-  function search(query, state) {
-    const terms = query.toLowerCase().split(/\s+/).filter((term) => term.length > 0);
-    if (terms.length === 0) return [];
-    const scored = activeBlocks(state).map((block) => ({ block, score: scoreRelevance(block, terms) })).filter((entry) => entry.score > 0.1).sort((left, right) => right.score - left.score);
-    return scored.map((entry) => entry.block);
-  }
-  function status(state, tokenCount, config) {
-    const active = activeBlocks(state);
-    const usage = config.modelContextLimit > 0 ? tokenCount / config.modelContextLimit : 0;
-    return {
-      contextUsage: usage,
-      tokenCount,
-      modelContextLimit: config.modelContextLimit,
-      activeBlocks: active.length,
-      totalBlocks: state.blocks.length,
-      tokensCompressed: state.stats.tokensCompressed,
-      breakdown: { active: active.length, total: state.blocks.length }
-    };
-  }
-  function defaultNodes() {
-    return buildNodes("all");
-  }
-  function buildNodes(strategy) {
-    const base = [
-      assignRefsNode,
-      syncBlocksNode,
-      pruneNode,
-      absorbHideNode,
-      absorbPromptNode,
-      filterNode,
-      hideCompressCallsNode,
-      recommendNode,
-      nudgeNode,
-      emergencyTruncateNode
-    ];
-    if (strategy === "none") return base;
-    return [...base, createRenderRefsNode(strategy)];
-  }
-  return {
-    processTurn,
-    applyCompression,
-    defaultNodes,
-    decompress,
-    search,
-    status
-  };
-}
-var assignRefsNode = {
-  name: "assign-refs",
-  run(io, ctx) {
-    const hasProtection = ctx.config.protectedTools.length > 0 || !!ctx.config.isToolProtected;
-    const protectedFn = hasProtection ? (m) => isMessageProtected(m, ctx.config) : void 0;
-    const refResult = assignRefs(io.messages, {
-      existing: io.state.messageRefs,
-      nextIndex: highestUsedIndex(io.state.messageRefs) + 1,
-      isProtected: protectedFn
-    });
-    return { ...io, state: { ...io.state, messageRefs: refResult.map } };
-  }
-};
-var syncBlocksNode = {
-  name: "sync-blocks",
-  run(io, ctx) {
-    const synced = syncBlocks(io.messages, io.state);
-    advanceSurvival(synced.state, ctx.config.promotionThreshold);
-    return { ...io, state: synced.state };
-  }
-};
-var pruneNode = {
-  name: "prune",
-  run(io) {
-    return { ...io, messages: prune(io.messages, io.state) };
-  }
-};
-var absorbHideNode = {
-  name: "absorb-hide",
-  enabled: (io) => (io.state.absorbed?.length ?? 0) > 0,
-  run(io) {
-    return { ...io, messages: hideAbsorbedMessages(io.messages, io.state) };
-  }
-};
-var absorbPromptNode = {
-  name: "absorb-prompt",
-  enabled: (_io, ctx) => ctx.config.absorb?.enabled === true,
-  run(io, ctx) {
-    const applied = appendAbsorbPrompts(
-      io.messages,
-      io.state,
-      ctx.config,
-      ctx.tokenCount,
-      ctx.countTokens
-    );
-    return {
-      ...io,
-      messages: applied.messages,
-      effects: { ...io.effects, absorbPromptedCount: applied.promptedCount }
-    };
-  }
-};
-var filterNode = {
-  name: "filter",
-  enabled: (_io, ctx) => !!ctx.config.messageFilters?.enabled && listMessageFilters().length > 0,
-  run(io, ctx) {
-    const applied = applyMessageFilters(io.messages, ctx.config.messageFilters);
-    return { ...io, messages: applied.messages };
-  }
-};
-var hideCompressCallsNode = {
-  name: "hide-compress-calls",
-  run(io) {
-    const hidden = hideConsumedCompressCalls(io.state, io.messages);
-    return { ...io, messages: hidden.messages };
-  }
-};
-var recommendNode = {
-  name: "recommend",
-  run(io, ctx) {
-    const protectedRefs = computeProtectedRefs(
-      io.messages,
-      io.state,
-      ctx.config,
-      ctx.countTokens
-    );
-    const contextRanges = buildCompressibleRanges(
-      io.messages,
-      io.state,
-      ctx.config,
-      protectedRefs,
-      ctx.countTokens
-    );
-    const nothingToCompress = contextRanges.compressible.length === 0;
-    const recommendation = {
-      contextRanges,
-      recommendedRanges: mergeRangesToThreshold(
-        contextRanges.compressible,
-        ctx.config.compress.minCompressRange
-      ),
-      nothingToCompress
-    };
-    return { ...io, effects: { ...io.effects, recommendation } };
-  }
-};
-var nudgeNode = {
-  name: "nudge-inject",
-  run(io, ctx) {
-    const nudge = decideNudge({
-      tokenCount: ctx.tokenCount,
-      config: ctx.config,
-      state: io.state,
-      messages: io.messages,
-      recommendation: io.effects.recommendation,
-      countTokens: ctx.countTokens
-    });
-    const baseline = io.state.nudge.lastPerMessageNudgeTokens;
-    const nudgeGrowthTokens = resolveAdaptiveGrowth(
-      ctx.config.modelContextLimit,
-      ctx.config.nudge
-    );
-    let stamped = { ...io.state.nudge };
-    if (baseline > 0 && ctx.tokenCount < baseline - nudgeGrowthTokens) {
-      stamped.lastPerMessageNudgeTokens = ctx.tokenCount;
-      stamped.lastNudgeShownTokens = 0;
-      stamped.lastShownByTier = {};
-    }
-    if (stamped.lastPerMessageNudgeTokens === 0) {
-      stamped.lastPerMessageNudgeTokens = ctx.tokenCount;
-    }
-    if (nudge.shouldInject) {
-      stamped.lastNudgeShownTokens = ctx.tokenCount;
-      if (nudge.tier !== null) {
-        stamped.lastShownByTier = {
-          ...stamped.lastShownByTier,
-          [nudge.tier]: ctx.tokenCount
-        };
-      }
-    }
-    return {
-      ...io,
-      state: { ...io.state, nudge: stamped },
-      effects: { ...io.effects, nudge }
-    };
-  }
-};
-var emergencyTruncateNode = {
-  name: "emergency-truncate",
-  run(io, ctx) {
-    const usage = ctx.config.modelContextLimit > 0 ? ctx.tokenCount / ctx.config.modelContextLimit : 0;
-    if (usage < ctx.config.truncate.threshold) return io;
-    const trunc = truncateLargeToolOutputs(
-      io.messages,
-      ctx.tokenCount,
-      ctx.config,
-      ctx.countTokens,
-      { protectRecentMessages: ctx.config.preserveRecentMessages }
-    );
-    return {
-      ...io,
-      messages: trunc.messages,
-      effects: { ...io.effects, truncatedCount: trunc.truncatedCount }
-    };
-  }
-};
-function applySingleRange(input) {
-  const warnings = [];
-  const resolved = resolveBoundaries({
-    startRef: input.spec.startRef,
-    endRef: input.spec.endRef,
-    messages: input.messages,
-    state: input.state
-  });
-  const rangeMessageIds = applyPairBoundaryAdjustments(
-    resolved,
-    input.messages
-  ).filter((id) => !isSummaryMessageId(id));
-  if (rangeMessageIds.length > resolved.messageIds.length) {
-    const indexByMessageId = /* @__PURE__ */ new Map();
-    input.messages.forEach((m, i) => indexByMessageId.set(m.id, i));
-    const adjustedStart = rangeMessageIds.length > 0 ? indexByMessageId.get(rangeMessageIds[0]) ?? resolved.startIndex : resolved.startIndex;
-    const adjustedEnd = rangeMessageIds.length > 0 ? indexByMessageId.get(rangeMessageIds[rangeMessageIds.length - 1]) ?? resolved.endIndex : resolved.endIndex;
-    const nestedSeen = new Set(resolved.nestedBlockIds);
-    for (const block2 of activeBlocks(input.state)) {
-      if (nestedSeen.has(block2.blockId)) continue;
-      if (blockVisibleInRange(block2, indexByMessageId, adjustedStart, adjustedEnd)) {
-        nestedSeen.add(block2.blockId);
-        resolved.nestedBlockIds.push(block2.blockId);
-      }
-    }
-  }
-  const isBlockBoundary = resolved.boundaryKind === "block";
-  const targetTier = resolveTargetTier(
-    input.state,
-    resolved.nestedBlockIds,
-    isBlockBoundary
-  );
-  const outputTier = isBlockBoundary ? Math.min(3, targetTier + 1) : 1;
-  const consumedBlockIds = resolved.nestedBlockIds.filter((id) => {
-    const block2 = blockById(input.state, id);
-    return block2?.active && block2.tier === targetTier;
-  });
-  const effectiveMessageIds = new Set(rangeMessageIds);
-  for (const consumedId of consumedBlockIds) {
-    const consumed = blockById(input.state, consumedId);
-    if (consumed) {
-      for (const id of consumed.effectiveMessageIds)
-        effectiveMessageIds.add(id);
-    }
-  }
-  const directMessageIds = [...effectiveMessageIds].filter(
-    (id) => !input.preExistingCoverage.has(id)
-  );
-  let filteredIds = filterProtectedToolMessages(
-    directMessageIds,
-    input.messages,
-    input.config
-  );
-  if (filteredIds.length < directMessageIds.length) {
-    const kept = new Set(filteredIds);
-    for (const id of directMessageIds) {
-      if (!kept.has(id)) effectiveMessageIds.delete(id);
-    }
-  }
-  const protectedRefs = input.protectedMessageIds;
-  const hitProtectedRaw = protectedRefs ? filteredIds.filter((id) => {
-    const ref = input.state.messageRefs.byRaw[id];
-    return ref !== void 0 && protectedRefs.has(ref);
-  }) : [];
-  if (hitProtectedRaw.length > 0) {
-    const protectedSet = new Set(hitProtectedRaw);
-    filteredIds = filteredIds.filter((id) => !protectedSet.has(id));
-    for (const id of hitProtectedRaw) effectiveMessageIds.delete(id);
-    const hitRefs = hitProtectedRaw.map((id) => input.state.messageRefs.byRaw[id]).filter((v) => typeof v === "string");
-    if (filteredIds.length === 0 && consumedBlockIds.length === 0) {
-      const recentN = input.config.preserveRecentMessages;
-      throw new Error(
-        `Range is entirely within the protected zone (the last ${recentN} messages and/or the most recent user message): ${hitRefs.join(
-          ", "
-        )}. Adjust startId/endId to older messages.`
-      );
-    }
-    warnings.push(
-      `Excluded ${hitProtectedRaw.length} protected message(s) ${hitRefs.join(
-        ", "
-      )} from compression range (recent/last-user zone).`
-    );
-  }
-  if (!isBlockBoundary && filteredIds.length === 0 && consumedBlockIds.length > 0) {
-    const first = consumedBlockIds[0];
-    const last = consumedBlockIds[consumedBlockIds.length - 1];
-    throw new Error(
-      `Range ${input.spec.startRef}..${input.spec.endRef} contains no new compressible messages \u2014 every message in it is already covered by active block(s) ${consumedBlockIds.join(
-        ", "
-      )}. Nothing was compressed. To rewrite or merge those blocks, reference them by block ID (${first}..${last}); otherwise run acp_status and compress a range it reports as compressible.`
-    );
-  }
-  validateCompressionRange(input, filteredIds, consumedBlockIds.length);
-  let compressedTokens = 0;
-  for (const id of filteredIds) {
-    const message = input.messages.find((entry) => entry.id === id);
-    compressedTokens += input.countTokens(message?.text ?? "");
-  }
-  for (const consumedId of consumedBlockIds) {
-    const consumed = blockById(input.state, consumedId);
-    if (consumed) {
-      compressedTokens += input.countTokens(consumed.summary);
-    }
-  }
-  const blockId = allocateBlockId(input.state);
-  const block = {
-    blockId,
-    runId: input.runId,
-    tier: outputTier,
-    topic: input.spec.topic,
-    summary: input.spec.summary,
-    directMessageIds: filteredIds,
-    effectiveMessageIds: [...effectiveMessageIds],
-    directBlockIds: [...consumedBlockIds],
-    compressedTokens,
-    createdAt: Date.now(),
-    survivedCount: 0,
-    generation: "young",
-    active: true,
-    compressCallId: input.spec.compressCallId,
-    startRef: input.spec.startRef,
-    endRef: input.spec.endRef
-  };
-  input.state.blocks.push(block);
-  for (const consumedId of consumedBlockIds) {
-    const consumed = blockById(input.state, consumedId);
-    if (consumed) consumed.active = false;
-  }
-  return { tokens: compressedTokens, warnings };
-}
-function applyPairBoundaryAdjustments(resolved, messages) {
-  if (resolved.boundaryKind === "block") {
-    return resolved.messageIds;
-  }
-  let startIndex = resolved.startIndex;
-  let endIndex = resolved.endIndex;
-  for (let pass = 0; pass < 2; pass++) {
-    const reasoningAdjusted = adjustBoundariesForReasoningPairs(
-      startIndex,
-      endIndex,
-      messages
-    );
-    const toolAdjusted = adjustBoundariesForToolPairs(
-      reasoningAdjusted.startIndex,
-      reasoningAdjusted.endIndex,
-      messages
-    );
-    const changed = toolAdjusted.startIndex !== startIndex || toolAdjusted.endIndex !== endIndex;
-    startIndex = toolAdjusted.startIndex;
-    endIndex = toolAdjusted.endIndex;
-    if (!changed) break;
-  }
-  if (startIndex === resolved.startIndex && endIndex === resolved.endIndex) {
-    return resolved.messageIds;
-  }
-  const ids = [];
-  for (let i = startIndex; i <= endIndex; i++) {
-    const msg = messages[i];
-    if (msg) ids.push(msg.id);
-  }
-  return ids;
-}
-function validateCompressionRange(input, directMessageIds, consumedBlockCount) {
-  const cfg = input.config.compress;
-  const summary = input.spec.summary?.trim() ?? "";
-  if (summary.length === 0) {
-    throw new Error(
-      "Summary is empty \u2014 provide a meaningful summary of the compressed range."
-    );
-  }
-  if (cfg.minSummaryLength > 0 && summary.length < cfg.minSummaryLength) {
-    throw new Error(
-      `Summary too short (${summary.length} chars, min ${cfg.minSummaryLength}). The summary must capture the compressed range's key information.`
-    );
-  }
-  const effectiveMax = input.spec.summaryMaxChars ?? cfg.maxSummaryLength;
-  if (effectiveMax > 0 && summary.length > effectiveMax) {
-    throw new Error(
-      `Summary too long (${summary.length} chars, max ${effectiveMax}). Strip noise \u2014 keep critical paths, decisions, errors, and code references. Or pass summaryMaxChars to increase the limit \u2014 don't lose critical info just to fit.`
-    );
-  }
-  if (directMessageIds.length === 0 && consumedBlockCount === 0) {
-    throw new Error(
-      "Range contains no compressible messages \u2014 all are already covered by active blocks or protected."
-    );
-  }
-}
-function filterProtectedToolMessages(directMessageIds, messages, config) {
-  const protectedCallIds = /* @__PURE__ */ new Set();
-  const removedIds = /* @__PURE__ */ new Set();
-  for (const msg of messages) {
-    if (isMessageProtected(msg, config) && msg.toolCallId) {
-      protectedCallIds.add(msg.toolCallId);
-    }
-  }
-  for (const id of directMessageIds) {
-    const msg = messages.find((m) => m.id === id);
-    if (!msg) continue;
-    if (isMessageProtected(msg, config)) {
-      removedIds.add(id);
-      if (msg.toolCallId) protectedCallIds.add(msg.toolCallId);
-    }
-  }
-  for (const id of directMessageIds) {
-    if (removedIds.has(id)) continue;
-    const msg = messages.find((m) => m.id === id);
-    if (!msg) continue;
-    if (msg.contentType === "tool-result" && msg.toolCallId && protectedCallIds.has(msg.toolCallId)) {
-      removedIds.add(id);
-    }
-  }
-  return directMessageIds.filter((id) => !removedIds.has(id));
-}
-function resolveTargetTier(state, nestedBlockIds, isBlockBoundary) {
-  if (!isBlockBoundary) return 1;
-  if (nestedBlockIds.length === 0) return 1;
-  let minTier = 3;
-  for (const id of nestedBlockIds) {
-    const block = blockById(state, id);
-    if (block && block.tier < minTier) minTier = block.tier;
-  }
-  return minTier;
-}
-function collectCoverage(state) {
-  const coverage = /* @__PURE__ */ new Set();
-  for (const block of activeBlocks(state)) {
-    for (const id of block.effectiveMessageIds) coverage.add(id);
-  }
-  return coverage;
-}
-function resolveAdaptiveGrowth(modelContextLimit, nudge) {
-  if (!modelContextLimit || modelContextLimit <= 0) return nudge.growthFloor;
-  return Math.min(
-    nudge.growthCap,
-    Math.max(
-      nudge.growthFloor,
-      Math.round(modelContextLimit * nudge.growthRatio)
-    )
-  );
-}
-function resolveMinPressureBenefit(modelContextLimit, nudge) {
-  return nudge.minPressureBenefitTokens ?? Math.max(5e3, Math.round(modelContextLimit * 0.01));
-}
-function pendingByTier(state, recommendation, countTokens, minCompressRange) {
-  const out = {};
-  const merged = recommendation?.recommendedRanges ?? [];
-  const effective = minCompressRange > 0 ? merged.filter((r) => (r.chars ?? r.tokens * 4) >= minCompressRange) : merged;
-  out[1] = {
-    pending: effective.reduce((s, r) => s + r.tokens, 0),
-    targetBlocks: []
-  };
-  const active = activeBlocks(state);
-  const t1 = active.filter((b) => b.tier === 1);
-  const t2 = active.filter((b) => b.tier === 2);
-  out[2] = {
-    pending: t1.reduce((s, b) => s + countTokens(b.summary), 0),
-    targetBlocks: t1
-  };
-  out[3] = {
-    pending: t2.reduce((s, b) => s + countTokens(b.summary), 0),
-    targetBlocks: t2
-  };
-  return out;
-}
-function decideNudge(input) {
-  const { config, state, tokenCount, recommendation, countTokens } = input;
-  const limit = config.modelContextLimit;
-  const usage = limit > 0 ? tokenCount / limit : 0;
-  const nudgeGrowthTokens = resolveAdaptiveGrowth(limit, config.nudge);
-  const minPressureBenefit = resolveMinPressureBenefit(limit, config.nudge);
-  const overLimit = usage >= config.nudge.maxContextLimitPct;
-  const emergencyOverride = usage >= config.nudge.emergencyThresholdPct;
-  const pressure = overLimit || emergencyOverride;
-  const baseline = state.nudge.lastPerMessageNudgeTokens;
-  const hadPendingNudge = state.nudge.lastNudgeShownTokens > 0;
-  const hasPendingNudge = hadPendingNudge;
-  const effectiveThreshold = hasPendingNudge ? Math.floor(nudgeGrowthTokens / 2) : nudgeGrowthTokens;
-  const growthReference = state.nudge.lastNudgeShownTokens > 0 ? state.nudge.lastNudgeShownTokens : baseline > 0 ? baseline : tokenCount;
-  const growthFloor = Math.max(
-    config.nudge.minGrowthFloor,
-    config.nudge.minGrowthRatio * nudgeGrowthTokens
-  );
-  const growthSinceReference = tokenCount - growthReference;
-  const rec = recommendation;
-  const tiers = pendingByTier(
-    state,
-    rec,
-    countTokens,
-    config.compress.minCompressRange
-  );
-  const tier2Threshold = Math.round(
-    nudgeGrowthTokens * (config.nudge.tier2GrowthMultiplier ?? 1.5)
-  );
-  let injectedTier = null;
-  let injectedReason = "";
-  let bestPending = 0;
-  const t1Eff = tiers[1]?.pending ?? 0;
-  const t2Pen = tiers[2]?.pending ?? 0;
-  const t3Pen = tiers[3]?.pending ?? 0;
-  const firstSightMassReady = state.nudge.lastNudgeShownTokens === 0 && baseline === 0 && usage >= config.nudge.minContextLimitPct && Math.max(t1Eff, t2Pen, t3Pen) >= nudgeGrowthTokens;
-  const growthReady = firstSightMassReady || growthSinceReference >= growthFloor;
-  const t2Count = tiers[2]?.targetBlocks.length ?? 0;
-  const t3Count = tiers[3]?.targetBlocks.length ?? 0;
-  if (pressure) {
-    const candidates = [1];
-    if (config.tiers.enabled) {
-      candidates.push(2, 3);
-    }
-    let best = null;
-    for (const t of candidates) {
-      const p = tiers[t]?.pending ?? 0;
-      if (p > bestPending) {
-        bestPending = p;
-        best = t;
-      }
-    }
-    if (best !== null && bestPending >= minPressureBenefit) {
-      injectedTier = best;
-      const label = emergencyOverride ? "EMERGENCY" : "OVER-LIMIT";
-      injectedReason = best === 1 ? `${label} T1: max effective pending ${bestPending}, usage ${Math.round(usage * 100)}%` : `${label} T${best} distill: max pending ${bestPending} (T1 effective ${t1Eff}, T2 ${t2Pen}, T3 ${t3Pen}), usage ${Math.round(usage * 100)}%`;
-    }
-  } else if (growthReady) {
-    if (t1Eff >= nudgeGrowthTokens) {
-      injectedTier = 1;
-      injectedReason = `T1 effective ${t1Eff} >= ${nudgeGrowthTokens}, growth ${growthSinceReference}, usage ${Math.round(usage * 100)}%`;
-    } else if (config.tiers.enabled && (t2Count >= config.tiers.tier2Trigger || t2Pen >= tier2Threshold && t2Pen > t1Eff)) {
-      const lastShown = state.nudge.lastShownByTier[2] ?? 0;
-      const cadenceMet = lastShown === 0 || tokenCount - lastShown >= growthFloor;
-      if (cadenceMet) {
-        injectedTier = 2;
-        injectedReason = t2Count >= config.tiers.tier2Trigger ? `T2 distill ready: ${t2Count} tier-1 blocks >= tier2Trigger ${config.tiers.tier2Trigger} (${t2Pen} tokens), usage ${Math.round(usage * 100)}%` : `T2 distill ready: ${tiers[2].targetBlocks.length} tier-1 blocks (${t2Pen} tokens) >= ${tier2Threshold} (1.5x) and > T1 effective ${t1Eff}, usage ${Math.round(usage * 100)}%`;
-      }
-    } else if (config.tiers.enabled && (t3Count >= config.tiers.tier3Trigger || t3Pen >= tier2Threshold && t3Pen > t2Pen && t3Pen > t1Eff)) {
-      const lastShown = state.nudge.lastShownByTier[3] ?? 0;
-      const cadenceMet = lastShown === 0 || tokenCount - lastShown >= growthFloor;
-      if (cadenceMet) {
-        injectedTier = 3;
-        injectedReason = t3Count >= config.tiers.tier3Trigger ? `T3 condense ready: ${t3Count} tier-2 blocks >= tier3Trigger ${config.tiers.tier3Trigger} (${t3Pen} tokens), usage ${Math.round(usage * 100)}%` : `T3 condense ready: ${tiers[3].targetBlocks.length} tier-2 blocks (${t3Pen} tokens) >= ${tier2Threshold} (1.5x) and > T2 ${t2Pen} and > T1 effective ${t1Eff}, usage ${Math.round(usage * 100)}%`;
-      }
-    }
-  }
-  const shouldInject = injectedTier !== null;
-  if (shouldInject && firstSightMassReady) {
-    injectedReason += " [first-sight mass]";
-  }
-  let reason;
-  if (injectedTier !== null) {
-    reason = injectedReason;
-  } else if (pressure) {
-    const label = emergencyOverride ? "EMERGENCY" : "OVER-LIMIT";
-    reason = bestPending === 0 ? `${label}: usage ${Math.round(usage * 100)}% but no tier has effective compressible content (T1 effective ${t1Eff}, T2 ${t2Pen}, T3 ${t3Pen}) \u2014 nudge suppressed to avoid offering ranges below minCompressRange` : `${label}: usage ${Math.round(usage * 100)}% but max pending ${bestPending} < min benefit ${minPressureBenefit} tokens (T1 effective ${t1Eff}, T2 ${t2Pen}, T3 ${t3Pen}) \u2014 suppressed: rewriting below the benefit floor reclaims almost nothing while usage stays high; truncate.threshold remains the safety valve`;
-  } else {
-    const tiersList = [1, 2, 3];
-    const eligible = tiersList.filter((t) => config.tiers.enabled || t === 1);
-    const countReady = (t) => t === 2 ? t2Count >= config.tiers.tier2Trigger : t === 3 ? t3Count >= config.tiers.tier3Trigger : false;
-    const ready = eligible.filter((t) => (tiers[t]?.pending ?? 0) >= nudgeGrowthTokens).map((t) => `T${t} ${tiers[t].pending}`);
-    const readyCount = eligible.filter((t) => (tiers[t]?.pending ?? 0) < nudgeGrowthTokens && countReady(t)).map((t) => `T${t} ${t === 2 ? t2Count : t3Count} blocks (count)`);
-    const readyAll = [...ready, ...readyCount];
-    const readyHint = readyAll.length > 0 ? `, ready: ${readyAll.join(", ")}` : "";
-    const blocked = eligible.filter(
-      (t) => ((tiers[t]?.pending ?? 0) >= nudgeGrowthTokens || countReady(t)) && (state.nudge.lastShownByTier[t] ?? 0) > 0 && tokenCount - (state.nudge.lastShownByTier[t] ?? 0) < growthFloor
-    ).map((t) => `T${t} (cadence)`);
-    const blockedHint = blocked.length > 0 ? `, blocked: ${blocked.join(", ")}` : "";
-    const maxPending = Math.max(
-      0,
-      ...Object.values(tiers).map((t) => t.pending)
-    );
-    const pendingShort = maxPending < nudgeGrowthTokens;
-    const growthShort = growthSinceReference < growthFloor;
-    const parts = [];
-    if (pendingShort)
-      parts.push(
-        `max compressible ${maxPending} < threshold ${nudgeGrowthTokens}`
-      );
-    if (growthShort)
-      parts.push(`growth ${growthSinceReference} < floor ${growthFloor}`);
-    if (parts.length === 0)
-      parts.push(
-        `max compressible ${maxPending}, growth ${growthSinceReference}`
-      );
-    reason = `${parts.join("; ")}${readyHint}${blockedHint}`;
-  }
-  const ctxBreakdown = computeContextBreakdown(
-    input.messages,
-    tokenCount,
-    growthSinceReference,
-    countTokens
-  );
-  return {
-    shouldInject,
-    reason,
-    compressibleRanges: rec?.recommendedRanges ?? [],
-    protectedRanges: rec?.contextRanges.protected ?? [],
-    tierTargetBlocks: injectedTier ? tiers[injectedTier].targetBlocks : [],
-    contextUsage: usage,
-    tier: injectedTier,
-    breakdown: {
-      usage,
-      growth: growthSinceReference,
-      growthReference,
-      effectiveThreshold,
-      nudgeGrowthTokens,
-      growthFloor,
-      hasPendingNudge: hasPendingNudge ? 1 : 0,
-      overLimit: overLimit ? 1 : 0,
-      emergencyOverride: emergencyOverride ? 1 : 0,
-      minPressureBenefit,
-      pendingT1: tiers[1].pending,
-      pendingT2: tiers[2].pending,
-      pendingT3: tiers[3].pending
-    },
-    contextBreakdown: ctxBreakdown
-  };
-}
-function computeContextBreakdown(messages, total, growth, countTokens) {
-  const count = countTokens ?? ((t) => Math.ceil(t.length / 4));
-  let system = 0, tool = 0, summaries = 0, code = 0, text = 0;
-  for (const msg of messages) {
-    const tokens = count(msg.text ?? "");
-    if (msg.text?.startsWith("[Compressed conversation section]")) {
-      summaries += tokens;
-    } else if (msg.contentType === "tool-call" || msg.contentType === "tool-result") {
-      tool += tokens;
-    } else if (msg.role === "system") {
-      system += tokens;
-    } else if (msg.text?.includes("```")) {
-      code += tokens;
-    } else {
-      text += tokens;
-    }
-  }
-  return { system, tool, summaries, code, text, total, growth };
-}
-function cloneState(state) {
-  return {
-    blocks: state.blocks.map((block) => ({
-      ...block,
-      directMessageIds: [...block.directMessageIds],
-      effectiveMessageIds: [...block.effectiveMessageIds],
-      directBlockIds: [...block.directBlockIds]
-    })),
-    messageRefs: {
-      byRaw: { ...state.messageRefs.byRaw },
-      byRef: { ...state.messageRefs.byRef }
-    },
-    tokenSnapshot: { ...state.tokenSnapshot ?? {} },
-    nudge: { ...state.nudge, anchors: { ...state.nudge.anchors } },
-    stats: { ...state.stats },
-    absorbed: (state.absorbed ?? []).map((record) => ({ ...record })),
-    nextBlockId: state.nextBlockId,
-    nextRunId: state.nextRunId
-  };
-}
-function scoreRelevance(block, terms) {
-  const topic = (block.topic ?? "").toLowerCase();
-  const summary = block.summary.toLowerCase();
-  let score = 0;
-  for (const term of terms) {
-    const topicHits = countOccurrences(topic, term);
-    if (topicHits > 0) score += Math.min(topicHits * 0.15, 0.45);
-    const summaryHits = countOccurrences(summary, term);
-    if (summaryHits > 0) score += Math.min(summaryHits * 0.04, 0.2);
-  }
-  return Math.min(score, 1);
-}
-function countOccurrences(haystack, needle) {
-  if (!haystack || !needle) return 0;
-  let count = 0;
-  let position = 0;
-  while ((position = haystack.indexOf(needle, position)) !== -1) {
-    count++;
-    position += needle.length;
-  }
-  return count;
-}
 function formatTokens2(n) {
   if (!Number.isFinite(n) || n <= 0) return "0";
   return n >= 1e3 ? `${(n / 1e3).toFixed(1)}K` : String(n);
 }
 function pct(n, total) {
   if (n <= 0 || total <= 0) return 0;
-  return Math.round(n / total * 100);
+  return Math.max(1, Math.round(n / total * 100));
 }
 function numericPart2(blockId) {
   const match = /^b(\d+)$/.exec(blockId);
@@ -2723,18 +2192,12 @@ function collectVisible(messages, state, countTokens) {
     if (block.active) summaryTokens += summaryTokensOf(block, countTokens);
   }
   const visible = [];
-  const toolCallNames = /* @__PURE__ */ new Map();
-  for (const message of messages) {
-    if (message.contentType === "tool-call" && message.toolCallId && message.toolName) {
-      toolCallNames.set(message.toolCallId, message.toolName);
-    }
-  }
   messages.forEach((message, index) => {
     if (coveredIds.has(message.id)) return;
     const ref = refForRaw(state.messageRefs, message.id);
     if (!ref) return;
     const tokens = countTokens(message.text ?? "");
-    const tool = isToolMessage(message) ? message.toolName ?? (message.toolCallId ? toolCallNames.get(message.toolCallId) : void 0) ?? "tool" : "text";
+    const tool = message.toolName ?? "text";
     if (tokens > 0) visible.push({ ref, tokens, tool, index });
   });
   return { visible, summaryTokens };
@@ -2822,17 +2285,6 @@ function renderUncompressedRanges(visible) {
     const m = ref.match(/\d+/);
     return m ? parseInt(m[0], 10) : 0;
   };
-  const dominantTool = (toolTokens) => {
-    let best = "text";
-    let bestN = -1;
-    for (const [tool, n] of toolTokens) {
-      if (n > bestN) {
-        best = tool;
-        bestN = n;
-      }
-    }
-    return best;
-  };
   const merged = [];
   for (const m of visible) {
     const num = refNum2(m.ref);
@@ -2841,15 +2293,13 @@ function renderUncompressedRanges(visible) {
       last.endRef = m.ref;
       last.count += 1;
       last.tokens += m.tokens;
-      last.toolTokens.set(m.tool, (last.toolTokens.get(m.tool) ?? 0) + m.tokens);
     } else {
-      const toolTokens = /* @__PURE__ */ new Map([[m.tool, m.tokens]]);
-      merged.push({ startRef: m.ref, endRef: m.ref, startNum: num, count: 1, tokens: m.tokens, toolTokens });
+      merged.push({ startRef: m.ref, endRef: m.ref, startNum: num, count: 1, tokens: m.tokens, tool: m.tool });
     }
   }
   for (const r of merged.slice(0, 30)) {
     const range = r.count === 1 ? r.startRef : `${r.startRef}\u2013${r.endRef}`;
-    lines.push(`  ${range}  (${r.count} msgs, ${formatTokens2(r.tokens)}${r.count > 1 ? ` (${Math.round(r.tokens / r.count)}/msg)` : ""}) ${dominantTool(r.toolTokens)}`);
+    lines.push(`  ${range}  (${r.count} msgs, ${formatTokens2(r.tokens)}${r.count > 1 ? ` (${Math.round(r.tokens / r.count)}/msg)` : ""}) ${r.tool}`);
   }
   if (merged.length > 30) {
     lines.push(`  ... and ${merged.length - 30} more ranges`);
@@ -3007,6 +2457,14 @@ function docFeatures(text) {
     cachedChars += text.length;
   }
   return f;
+}
+function setDocCacheCap(chars) {
+  capChars = Math.max(1, chars);
+  while (cachedChars > capChars && cache.size > 0) {
+    const k = cache.keys().next().value;
+    cachedChars -= k.length;
+    cache.delete(k);
+  }
 }
 var substringAlgorithm = {
   name: "substring",
@@ -3185,15 +2643,37 @@ function makePreview(text, query, len) {
   return prefix + text.slice(start, end).trim() + suffix;
 }
 
+// src/lru.ts
+var DEFAULT_SESSION_CACHE_LIMIT = 512;
+var LruMap = class extends Map {
+  maxEntries;
+  constructor(maxEntries) {
+    super();
+    this.maxEntries = Math.max(1, Math.floor(maxEntries));
+  }
+  get(key) {
+    if (!super.has(key)) return void 0;
+    const value = super.get(key);
+    super.delete(key);
+    super.set(key, value);
+    return value;
+  }
+  set(key, value) {
+    super.delete(key);
+    super.set(key, value);
+    while (this.size > this.maxEntries) {
+      const oldest = this.keys().next().value;
+      if (oldest === void 0) break;
+      super.delete(oldest);
+    }
+    return this;
+  }
+};
+
 // src/region.ts
 import { randomUUID } from "crypto";
-import {
-  CompactionId,
-  compactCheckpointSource,
-  toolPairingBalancedAfter,
-  toolPairingBalancedBefore
-} from "@deepseek-ai/dsh-compaction";
-import { createAssistantMessage, createUserMessage } from "@deepseek-ai/dsh-llm";
+import { CompactionId, compactCheckpointSource, toolPairingBalancedAfter, toolPairingBalancedBefore } from "@deepseek-ai/dsh-compaction";
+import { createUserMessage } from "@deepseek-ai/dsh-llm";
 
 // src/session-events.ts
 function sessionEventsOf(session) {
@@ -3258,10 +2738,16 @@ function buildToolCallIndex(events) {
   }
   return index;
 }
+var SUMMARY_FRAME_PREFIX = "[Model-written summary \u2014 not user words; re-verify any obligations before relying on them]";
+function withSummaryFramePrefix(text) {
+  return text.startsWith(SUMMARY_FRAME_PREFIX) ? text : `${SUMMARY_FRAME_PREFIX}
+${text}`;
+}
 function projectEvent(event, toolNames) {
   switch (event.type) {
     case "user/message": {
-      const text = extractText(event.data.content);
+      const raw = extractText(event.data.content);
+      const text = isCheckpointNode(event) ? withSummaryFramePrefix(raw) : raw;
       return text.length > 0 ? [{ id: String(event.seq), role: "user", contentType: "text", text }] : [];
     }
     case "assistant/message": {
@@ -3336,6 +2822,56 @@ function extractEventText(event) {
       return "";
   }
 }
+function isCheckpointNode(event) {
+  if (event.type !== "user/message") return false;
+  const source = event.data.source;
+  return source?.plugin === "compact";
+}
+var METADATA_PLUGINS = /* @__PURE__ */ new Set([
+  "acp-nudge",
+  // nudge echo (src/nudge.ts)
+  "billion-context-dsh"
+  // compress-pair replacement stub (src/region.ts)
+]);
+var REAL_CONTENT_PLUGINS = /* @__PURE__ */ new Set([
+  "@deepseek-ai/dsh-system-prompt",
+  "user-approval",
+  "tools-ptc"
+]);
+var HOST_INSTRUCTION_KINDS = /* @__PURE__ */ new Set([
+  "agent-instructions",
+  // AGENTS.md injection (hook shape: {kind:'agent-instructions', form:'instructions'})
+  "skill-catalog"
+  // skill catalog (form:'catalog')
+]);
+function isAgentInstructionsRow(event) {
+  if (event.type !== "user/message") return false;
+  const source = event.data.source;
+  if (!source) return false;
+  return source.kind === "agent-instructions" || source.kind === "plugin" && source.plugin === "agent-instructions";
+}
+function classifySurfaceEvent(event) {
+  if (isCheckpointNode(event)) return "checkpoint";
+  if (event.type !== "user/message") return "real";
+  const source = event.data.source;
+  if (!source) return "real";
+  const kind = source.kind;
+  if (kind === "user") return "real";
+  if (kind === "plugin") {
+    if (source.plugin !== void 0 && METADATA_PLUGINS.has(source.plugin)) return "metadata";
+    if (source.plugin !== void 0 && REAL_CONTENT_PLUGINS.has(source.plugin)) return "real";
+    return "instruction";
+  }
+  if (kind !== void 0 && HOST_INSTRUCTION_KINDS.has(kind)) return "instruction";
+  return "real";
+}
+function isRealUserTurn(event) {
+  if (event.type !== "user/message") return false;
+  if (classifySurfaceEvent(event) !== "real") return false;
+  const source = event.data.source;
+  if (source?.plugin !== void 0 && REAL_CONTENT_PLUGINS.has(source.plugin)) return false;
+  return source?.kind !== "subagent-report" && source?.kind !== "subagent-settled";
+}
 
 // src/host-tokens.ts
 import { deriveEventMessage } from "@deepseek-ai/dsh-session";
@@ -3397,7 +2933,7 @@ function shadowedTokensViaMeter(session, seqs, ctx) {
   try {
     const meter = ctx?.get?.("tokenMeter");
     if (meter?.measure !== void 0) {
-      const bySeq = new Map(meter.measure(session).nodes.map((node) => [node.seq, node.tokens]));
+      const bySeq = new Map(meter.measure(session).nodes.map((node) => [node.seq, node.heuristicTokens ?? node.tokens]));
       let total = 0;
       let missing = false;
       for (const seq of seqs) {
@@ -3413,6 +2949,59 @@ function shadowedTokensViaMeter(session, seqs, ctx) {
   } catch {
   }
   return shadowedHostTokens(session, seqs);
+}
+
+// src/block-ledger.ts
+var ACP_BLOCK_LEDGER_MARKER = "$dshAcpBlockLedger";
+var ACP_BLOCK_LEDGER_VERSION = 1;
+function isStringArray(value) {
+  return Array.isArray(value) && value.every((item) => typeof item === "string");
+}
+function encodeAcpBlockLedger(payload) {
+  const obj = { [ACP_BLOCK_LEDGER_MARKER]: ACP_BLOCK_LEDGER_VERSION };
+  if (payload.tier !== void 0) obj.tier = payload.tier;
+  if (payload.kernelBlockId !== void 0) obj.kernelBlockId = payload.kernelBlockId;
+  if (payload.topic !== void 0) obj.topic = payload.topic;
+  if (payload.parentBlockIds !== void 0 && payload.parentBlockIds.length > 0) {
+    obj.parentBlockIds = [...payload.parentBlockIds];
+  }
+  if (payload.directMessageIds !== void 0) obj.directMessageIds = [...payload.directMessageIds];
+  if (payload.effectiveMessageIds !== void 0) obj.effectiveMessageIds = [...payload.effectiveMessageIds];
+  if (payload.verifiedReadings !== void 0 && payload.verifiedReadings.length > 0) {
+    obj.verifiedReadings = [...payload.verifiedReadings];
+  }
+  return [{ type: "text", text: JSON.stringify(obj) }];
+}
+function decodeAcpBlockLedger(rawOutput) {
+  try {
+    if (!Array.isArray(rawOutput)) return {};
+    for (const block of rawOutput) {
+      if (block === null || typeof block !== "object") continue;
+      const candidate = block;
+      if (candidate.type !== "text" || typeof candidate.text !== "string") continue;
+      let parsed;
+      try {
+        parsed = JSON.parse(candidate.text);
+      } catch {
+        continue;
+      }
+      if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) continue;
+      const record = parsed;
+      if (record[ACP_BLOCK_LEDGER_MARKER] !== ACP_BLOCK_LEDGER_VERSION) continue;
+      const result = {};
+      if (record.tier === 1 || record.tier === 2 || record.tier === 3) result.tier = record.tier;
+      if (typeof record.kernelBlockId === "string") result.kernelBlockId = record.kernelBlockId;
+      if (typeof record.topic === "string") result.topic = record.topic;
+      if (isStringArray(record.parentBlockIds)) result.parentBlockIds = [...record.parentBlockIds];
+      if (isStringArray(record.directMessageIds)) result.directMessageIds = [...record.directMessageIds];
+      if (isStringArray(record.effectiveMessageIds)) result.effectiveMessageIds = [...record.effectiveMessageIds];
+      if (isStringArray(record.verifiedReadings)) result.verifiedReadings = [...record.verifiedReadings];
+      return result;
+    }
+    return {};
+  } catch {
+    return {};
+  }
 }
 
 // src/region.ts
@@ -3473,7 +3062,10 @@ function recoverStaleRange(session, start, end) {
     return { kind: "unresolvable", failedEdge };
   }
   const liveInside = session.surface.nodes.filter((seq) => seq >= start && seq <= end).sort((a, b) => a - b);
-  const plain = liveInside.filter((seq) => !isCheckpointNode(eventAtOf(session, seq)));
+  const plain = liveInside.filter((seq) => {
+    const event = eventAtOf(session, seq);
+    return !isCheckpointNode(event) && !isSystemNode(event);
+  });
   if (plain.length === 0) {
     const coveringBlockIds = rebuildBlockLedger(sessionEventsOf(session)).filter((entry) => entry.shadowedSeqs.some((seq) => seq >= start && seq <= end)).map((entry) => entry.blockId);
     return { kind: "already-compressed", coveringBlockIds };
@@ -3515,8 +3107,14 @@ function resolveSurfaceRange(session, start, end) {
   if (start > end) {
     throw new Error(`billion-context-dsh: reversed range ${start}..${end}`);
   }
-  const cleanBefore = (index) => toolPairingBalancedBefore(session, nodes[index]) && hasPlainRef(session, nodes[index]);
-  const cleanAfter = (index) => toolPairingBalancedAfter(session, nodes[index]) && hasPlainRef(session, nodes[index]);
+  const cleanBefore = (index) => {
+    const event = eventAtOf(session, nodes[index]);
+    return event !== void 0 && !isSystemNode(event) && toolPairingBalancedBefore(session, nodes[index]) && hasPlainRef(session, nodes[index]);
+  };
+  const cleanAfter = (index) => {
+    const event = eventAtOf(session, nodes[index]);
+    return event !== void 0 && !isSystemNode(event) && toolPairingBalancedAfter(session, nodes[index]) && hasPlainRef(session, nodes[index]);
+  };
   let startIdx = requestedStartIdx;
   let endIdx = requestedEndIdx;
   while (startIdx <= endIdx && !cleanBefore(startIdx)) {
@@ -3557,6 +3155,15 @@ function shadowedSeqsOf(session, start, end) {
 function readCompactionSummary(event) {
   return event.data;
 }
+function prefixSummaryBlocks(blocks) {
+  let done = false;
+  return blocks.map((block) => {
+    if (done || block.type !== "text") return block;
+    done = true;
+    const textBlock = block;
+    return { ...textBlock, text: withSummaryFramePrefix(textBlock.text) };
+  });
+}
 function runCompactionTransaction(session, input) {
   assertNoActiveCompaction(sessionEventsOf(session));
   const turn = findOpenTurn(sessionEventsOf(session));
@@ -3573,27 +3180,32 @@ function runCompactionTransaction(session, input) {
   }
   try {
     seqs.push(session.append("compaction/start", { compactionId, turn }).seq);
-    seqs.push(session.append("compaction/summary", {
-      compactionId,
-      summary: input.summary,
-      shadowedRange: { start: input.start, end: input.end },
-      shadowedSeqs: [...input.shadowedSeqs],
-      shadowedTokenCount: input.shadowedTokenCount,
-      provider: input.provider,
-      model: input.model,
+    const ledgerPayload = {
       tier: input.tier ?? 1,
       ...input.kernelBlockId === void 0 ? {} : { kernelBlockId: input.kernelBlockId },
       ...input.topic === void 0 ? {} : { topic: input.topic },
       ...input.parentBlockIds === void 0 || input.parentBlockIds.length === 0 ? {} : { parentBlockIds: [...input.parentBlockIds] },
       ...input.directMessageIds === void 0 ? {} : { directMessageIds: [...input.directMessageIds] },
-      ...input.effectiveMessageIds === void 0 ? {} : { effectiveMessageIds: [...input.effectiveMessageIds] }
+      ...input.effectiveMessageIds === void 0 ? {} : { effectiveMessageIds: [...input.effectiveMessageIds] },
+      ...input.verifiedReadings === void 0 || input.verifiedReadings.length === 0 ? {} : { verifiedReadings: [...input.verifiedReadings] }
+    };
+    const framedSummary = prefixSummaryBlocks(input.summary);
+    seqs.push(session.append("compaction/summary", {
+      compactionId,
+      summary: framedSummary,
+      shadowedRange: { start: input.start, end: input.end },
+      shadowedSeqs: [...input.shadowedSeqs],
+      shadowedTokenCount: input.shadowedTokenCount,
+      provider: input.provider,
+      model: input.model,
+      rawOutput: encodeAcpBlockLedger(ledgerPayload)
     }).seq);
     const message = createUserMessage({
-      content: input.summary,
+      content: framedSummary,
       source: compactCheckpointSource(compactionId)
     });
     seqs.push(session.append("user/message", message, {
-      surfaceOp: { op: "replace", start: input.start, end: input.end },
+      surfaceOp: { op: "replace", startSeq: input.start, endSeq: input.end },
       sourceEventSeqs: [...input.shadowedSeqs]
     }).seq);
     seqs.push(session.append("compaction/end", { compactionId, turn }).seq);
@@ -3607,15 +3219,21 @@ function runCompactionTransaction(session, input) {
   }
   return { compactionId, seqs };
 }
-function summarySeqOfCompaction(events, compactionId) {
+function summarySeqIndex(events) {
+  const index = /* @__PURE__ */ new Map();
   for (const event of events) {
     if (event.type !== "user/message") continue;
     const source = event.data.source;
-    if (source?.plugin === "compact" && source.compactionId === compactionId) return event.seq;
+    const compactionId = source?.plugin === "compact" ? source.compactionId : void 0;
+    if (compactionId !== void 0 && !index.has(compactionId)) index.set(compactionId, event.seq);
   }
-  return null;
+  return index;
 }
+var blockLedgerCache = /* @__PURE__ */ new WeakMap();
 function rebuildBlockLedger(events) {
+  const cached = blockLedgerCache.get(events);
+  if (cached !== void 0 && cached.len === events.length) return cached.ledger;
+  const summarySeqs = summarySeqIndex(events);
   const ledger = [];
   for (const event of events) {
     if (event.type !== "compaction/summary") continue;
@@ -3628,28 +3246,34 @@ function rebuildBlockLedger(events) {
         if (original !== void 0) shadowedTokenCount += defaultCountTokens(extractEventText(original));
       }
     }
-    const tier = data.tier === 2 || data.tier === 3 ? data.tier : 1;
-    const parentBlockIds = Array.isArray(data.parentBlockIds) ? [...data.parentBlockIds] : [];
-    const directMessageIds = Array.isArray(data.directMessageIds) ? [...data.directMessageIds] : void 0;
-    const effectiveMessageIds = Array.isArray(data.effectiveMessageIds) ? [...data.effectiveMessageIds] : void 0;
-    const summarySeq = summarySeqOfCompaction(events, data.compactionId);
+    const embedded = decodeAcpBlockLedger(data.rawOutput);
+    const tier = embedded.tier ?? (data.tier === 2 || data.tier === 3 ? data.tier : 1);
+    const parentBlockIds = embedded.parentBlockIds ? [...embedded.parentBlockIds] : Array.isArray(data.parentBlockIds) ? [...data.parentBlockIds] : [];
+    const directMessageIds = embedded.directMessageIds ? [...embedded.directMessageIds] : Array.isArray(data.directMessageIds) ? [...data.directMessageIds] : void 0;
+    const effectiveMessageIds = embedded.effectiveMessageIds ? [...embedded.effectiveMessageIds] : Array.isArray(data.effectiveMessageIds) ? [...data.effectiveMessageIds] : void 0;
+    const topic = embedded.topic ?? (typeof data.topic === "string" ? data.topic : void 0);
+    const kernelBlockId = embedded.kernelBlockId ?? (typeof data.kernelBlockId === "string" ? data.kernelBlockId : void 0);
+    const verifiedReadings = embedded.verifiedReadings ? [...embedded.verifiedReadings] : Array.isArray(data.verifiedReadings) ? [...data.verifiedReadings] : void 0;
+    const summarySeq = summarySeqs.get(data.compactionId) ?? null;
     ledger.push({
       blockId: data.compactionId,
       summary: extractText(data.summary),
-      ...typeof data.topic === "string" ? { topic: data.topic } : {},
+      ...topic === void 0 ? {} : { topic },
       shadowedSeqs: [...data.shadowedSeqs],
       shadowedTokenCount,
       start: data.shadowedRange.start,
       end: data.shadowedRange.end,
       tier,
       parentBlockIds,
-      ...typeof data.kernelBlockId === "string" ? { kernelBlockId: data.kernelBlockId } : {},
+      ...kernelBlockId === void 0 ? {} : { kernelBlockId },
       ...summarySeq === null ? {} : { summarySeq },
       ...directMessageIds === void 0 ? {} : { directMessageIds },
       ...effectiveMessageIds === void 0 ? {} : { effectiveMessageIds },
+      ...verifiedReadings === void 0 ? {} : { verifiedReadings },
       createdAt: event.time
     });
   }
+  blockLedgerCache.set(events, { len: events.length, ledger });
   return ledger;
 }
 function isToolEvent(event) {
@@ -3658,10 +3282,8 @@ function isToolEvent(event) {
   const content = event.data.message?.content;
   return Array.isArray(content) && content.some((block) => block?.type === "tool-call");
 }
-function isCheckpointNode(event) {
-  if (event.type !== "user/message") return false;
-  const source = event.data.source;
-  return source?.plugin === "compact";
+function isSystemNode(event) {
+  return event.type === "system/message";
 }
 function toolCallIdsOfEvent(event) {
   if (event.type !== "assistant/message") return [];
@@ -3675,17 +3297,8 @@ function toolCallIdsOfEvent(event) {
   }
   return ids;
 }
-function assistantProviderModel(event) {
-  if (event.type === "assistant/message") {
-    const message = event.data.message;
-    return {
-      provider: typeof message?.source?.provider === "string" ? message.source.provider : "billion-context-dsh",
-      model: typeof message?.source?.model === "string" ? message.source.model : "surface-prune"
-    };
-  }
-  return { provider: "billion-context-dsh", model: "surface-prune" };
-}
-function hideSurfaceSeqs(session, seqs, provider, model, text, priceEvent = hostPriceEvent) {
+var PRUNE_NOTE = "(removed by context management)";
+function hideSurfaceSeqs(session, seqs, text, priceEvent = hostPriceEvent) {
   if (seqs.length === 0) return;
   const start = seqs[0];
   const end = seqs[seqs.length - 1];
@@ -3699,22 +3312,12 @@ function hideSurfaceSeqs(session, seqs, provider, model, text, priceEvent = host
     shadowedSeqs: [...seqs],
     shadowedTokenCount
   });
-  if (text !== void 0) {
-    session.append("user/message", createUserMessage({
-      content: [{ type: "text", text }],
-      source: { kind: "plugin", plugin: "billion-context-dsh" }
-    }), {
-      surfaceOp: { op: "replace", start, end },
-      sourceEventSeqs: [...seqs]
-    });
-    return;
-  }
-  session.append("assistant/message", {
-    turn: findOpenTurn(sessionEventsOf(session)) ?? 0,
-    step: 0,
-    message: createAssistantMessage({ content: [], source: { provider, model } })
-  }, {
-    surfaceOp: { op: "replace", start, end },
+  const body = text !== void 0 && text.trim().length > 0 ? text : PRUNE_NOTE;
+  session.append("user/message", createUserMessage({
+    content: [{ type: "text", text: body }],
+    source: { kind: "plugin", plugin: "billion-context-dsh" }
+  }), {
+    surfaceOp: { op: "replace", startSeq: start, endSeq: end },
     sourceEventSeqs: [...seqs]
   });
 }
@@ -3745,10 +3348,9 @@ function hideCompressToolPair(session, callId, resultSeq) {
   const startIdx = nodes.indexOf(callSeq);
   const endIdx = nodes.indexOf(resolvedResultSeq);
   if (startIdx < 0 || endIdx < 0 || endIdx - startIdx !== 1) return false;
-  const { provider, model } = assistantProviderModel(events[callSeq]);
   const resultEvent = events[resolvedResultSeq];
   const resultText = resultEvent === void 0 ? "" : extractEventText(resultEvent);
-  hideSurfaceSeqs(session, [callSeq, resolvedResultSeq], provider, model, resultText.trim().length > 0 ? resultText : void 0);
+  hideSurfaceSeqs(session, [callSeq, resolvedResultSeq], resultText);
   return true;
 }
 function stripOrphanedSurfaceToolMessages(session, inFlightCallIds = /* @__PURE__ */ new Set()) {
@@ -3816,10 +3418,8 @@ function stripOrphanedSurfaceToolMessages(session, inFlightCallIds = /* @__PURE_
   const hidden = [...hiddenSet].sort((a, b) => a - b);
   let count = 0;
   for (const seq of hidden) {
-    const event = eventAtOf(session, seq);
-    if (event === void 0) continue;
-    const { provider, model } = assistantProviderModel(event);
-    hideSurfaceSeqs(session, [seq], provider, model);
+    if (eventAtOf(session, seq) === void 0) continue;
+    hideSurfaceSeqs(session, [seq]);
     count += 1;
   }
   return count;
@@ -3847,6 +3447,32 @@ function deferCompressPairHide(session, callId, resultSeq, onError) {
     }
   });
 }
+function newestInstructionSeqsOf(session) {
+  const newest = /* @__PURE__ */ new Map();
+  const events = sessionEventsOf(session);
+  for (let seq = 0; seq < events.length; seq += 1) {
+    const event = events[seq];
+    if (event === void 0 || !isAgentInstructionsRow(event)) continue;
+    const source = event.data.source;
+    const changes = Array.isArray(source?.changes) ? source.changes : [];
+    const scopes = changes.map((change) => typeof change?.scope === "string" ? change.scope : "").filter((scope) => scope.length > 0);
+    if (scopes.length === 0) {
+      continue;
+    }
+    for (const scope of scopes) newest.set(scope, seq);
+  }
+  return new Set(newest.values());
+}
+function guardedSurfaceSeqsOf(session) {
+  const guarded = /* @__PURE__ */ new Set();
+  const newestInstructions = newestInstructionSeqsOf(session);
+  for (const seq of session.surface.nodes) {
+    const event = eventAtOf(session, seq);
+    if (event === void 0) continue;
+    if (isAgentInstructionsRow(event) && newestInstructions.has(seq)) guarded.add(seq);
+  }
+  return guarded;
+}
 function buildCompressibleSeqRanges(session, opts = {}) {
   stripOrphanedSurfaceToolMessages(session);
   const nodes = session.surface.nodes;
@@ -3857,11 +3483,12 @@ function buildCompressibleSeqRanges(session, opts = {}) {
   }
   for (let index = nodes.length - 1; index >= 0; index -= 1) {
     const event = eventAtOf(session, nodes[index]);
-    if (event?.type === "user/message" && !isCheckpointNode(event)) {
+    if (event !== void 0 && isRealUserTurn(event)) {
       protectedSeqs.add(nodes[index]);
       break;
     }
   }
+  for (const seq of newestInstructionSeqsOf(session)) protectedSeqs.add(seq);
   const raw = [];
   let cur = null;
   const flush = () => {
@@ -3870,7 +3497,11 @@ function buildCompressibleSeqRanges(session, opts = {}) {
   };
   for (const seq of nodes) {
     const event = eventAtOf(session, seq);
-    if (event === void 0 || protectedSeqs.has(seq) || isCheckpointNode(event)) {
+    if (event === void 0 || protectedSeqs.has(seq) || isCheckpointNode(event) || isSystemNode(event)) {
+      flush();
+      continue;
+    }
+    if (classifySurfaceEvent(event) === "instruction") {
       flush();
       continue;
     }
@@ -3999,6 +3630,26 @@ function expandShadowedSeqs(session, blockId) {
   visit(root);
   return out;
 }
+var DEFAULT_DECOMPRESS_PAGE = 100;
+var DEFAULT_DECOMPRESS_PAGE_CHARS = 7e3;
+function sliceDecompressPage(expanded, offset, limit, charBudget, renderLen) {
+  const offN = typeof offset === "number" ? offset : Number(offset);
+  const safeOffset = Number.isFinite(offN) && offN > 0 ? Math.floor(offN) : 0;
+  const limN = typeof limit === "number" ? limit : Number(limit);
+  const safeLimit = Number.isFinite(limN) && limN >= 1 ? Math.min(Math.floor(limN), DEFAULT_DECOMPRESS_PAGE) : DEFAULT_DECOMPRESS_PAGE;
+  const start = Math.min(safeOffset, expanded.length);
+  const endCap = Math.min(start + safeLimit, expanded.length);
+  let end = start;
+  let acc = 0;
+  for (let i = start; i < endCap; i += 1) {
+    const seq = expanded[i];
+    const len = renderLen(seq);
+    if (i > start && acc + len > charBudget) break;
+    acc += len;
+    end = i + 1;
+  }
+  return { offset: safeOffset, limit: safeLimit, total: expanded.length, seqs: expanded.slice(start, end), exhausted: end >= expanded.length };
+}
 
 // src/state.ts
 function rebuildKernelBlocks(events) {
@@ -4059,8 +3710,29 @@ function nextBlockIdAfter(events) {
   }
   return max + 1;
 }
+function nextRunIdAfter(blocks) {
+  let max = 0;
+  for (const block of blocks) {
+    const num = Number(block.runId.slice(1));
+    if (Number.isInteger(num)) max = Math.max(max, num);
+  }
+  return max + 1;
+}
 var AcpStateStore = class {
-  states = /* @__PURE__ */ new Map();
+  /**
+   * Live kernel states, capped by an LRU policy (issue #113): once the cap is
+   * reached the coldest session's state is dropped, and its next access
+   * rehydrates through stateFor's log-rebuild path below. Rehydration is
+   * deterministic — bN ids are recorded in the durable event or synthesised
+   * in ledger order, and run ids continue after the rehydrated max — so block
+   * identity survives eviction exactly as it survives a restart. Kernel
+   * fields that reset on eviction (tokenSnapshot, nudge cadence, stats
+   * counters) all self-heal on the session's next turn.
+   */
+  states;
+  constructor(limit = DEFAULT_SESSION_CACHE_LIMIT) {
+    this.states = new LruMap(limit);
+  }
   /** Kernel state for one session, initialised on first access. */
   stateFor(session) {
     const id = session.id;
@@ -4071,6 +3743,7 @@ var AcpStateStore = class {
     if (events.some((event) => event.type === "compaction/summary")) {
       state.blocks = rebuildKernelBlocks(events);
       state.nextBlockId = nextBlockIdAfter(events);
+      state.nextRunId = nextRunIdAfter(state.blocks);
     }
     this.states.set(id, state);
     return state;
@@ -4162,7 +3835,7 @@ function mergeGroup(defaults, override, allowed, path) {
   }
   return out;
 }
-function resolvePrompts2(input) {
+function resolvePrompts(input) {
   if (input === void 0) return DEFAULT_RESOLVED;
   return {
     nudge: mergeGroup(DEFAULT_PROMPTS.nudge, input.nudge, NUDGE_ALLOWED, "prompts.nudge"),
@@ -4183,8 +3856,10 @@ var DEFAULT_PROMPTS = {
   nudge: {
     // 与 kernel nudge-text.ts EFFICIENCY_NOTE 逐字对齐——不含 "Context usage is at X%"
     // 陈述(usage 只通过 breakdown 传达);{pct} 仍可用作自定义占位符。
-    normal: "This is an efficiency nudge to compress early and keep context lean \u2014 not an overflow warning. A separate, stronger alert will appear if the context is actually full.\n\n{philosophy}",
-    emergency: "\u26A0\uFE0F Context limit reached \u2014 compress now. Prioritize consumed tool outputs.\n\n{philosophy}",
+    // B6（2026-09-08）：正文 ≤300 B——philosophy 段移出 nudge（已住系统提示与工具描述），
+    // 每拍复读同一份 6 KB 文本=重复计费。
+    normal: "Efficiency nudge: compress consumed ranges early to keep context lean \u2014 not an overflow warning. A stronger alert appears only if the context is actually full.",
+    emergency: "\u26A0\uFE0F Context limit reached \u2014 compress now. Prioritize consumed tool outputs.",
     guidance: HOW_TO_COMPRESS_RULES,
     tier: "Tier {tier}: {count} tier-{prevTier} block(s) distillable ({tokens} tokens) \u2014 distill them by compressing their checkpoint seq(s) [seqs {seqs}] as one range: compress({ content: [{ startSeq: {firstSeq}, endSeq: {lastSeq}, summary }] }).",
     breakdown: "Context breakdown: {system}K system | {tool}K tool | {summaries}K summaries | {code}K code | {text}K text",
@@ -4198,8 +3873,8 @@ var DEFAULT_PROMPTS = {
     footer: "Compress with: compress({ content: [{ startSeq, endSeq, summary }] }) \u2014 content is an array: batch multiple unrelated segments in one call, each entry its own block. Keep ranges disjoint.\nSnapshot taken at nudge time: the seqs go stale once the surface moves (a later compress shadows them), so re-run acp_status for fresh refs before compressing."
   },
   tools: {
-    compress: "Replace older conversation ranges with dense summaries you write. Each message seq is a surface reference. Single range: compress({ content: [{ startSeq, endSeq, summary }] }). Batch multiple unrelated ranges in one call (each content entry becomes its own block); keep ranges disjoint. Never compress content the current step is actively using. Compress boundaries are SURFACE SEQS (acp_status Surface: row, latest nudge table) \u2014 NOT the block refs (bN, e.g. b1) that acp_status COMPRESSED BLOCKS shows, which are for decompress only. Drilldown mN refs (e.g. m00306) are ALSO accepted as startSeq/endSeq \u2014 they are auto-mapped to the live surface seq; an unknown mN (never assigned on the current surface) fails with guidance. Seq refs must come from the CURRENT surface (acp_status or the latest nudge): a span whose edges were shadowed by an earlier compress is auto-remapped to its still-live content, a fully compressed span is reported as already compressed, and invented/other-session seqs fail with guidance. Good compression moments: stage or subtask completion whose details you have fully consumed and will not re-check, strategy switches, intermediate milestones, and wrapping up failed exploration \u2014 when the details are consumed and no longer critical for the task ahead. Before compressing, ask: will I need to re-verify any detail from this range in this task? If yes, keep it live. When you write a summary, turn dead-end exploration into a conclusion (what was tried, why it failed, the next step) \u2014 not a blow-by-blow; and keep the summary the ONLY record: self-contained, so a later reader (or you, after decompress) can continue without the original.",
-    decompress: "Recover the original content of a compressed block by its blockId \u2014 the kernel block ref `bN` shown by acp_status (e.g. b1), or a compaction id from search_context (read-only; does not unshadow the range).",
+    compress: 'Replace older conversation ranges with dense summaries you write. Each message seq is a surface reference. Single range: compress({ content: [{ startSeq, endSeq, summary }] }). Batch multiple unrelated ranges in one call (each content entry becomes its own block); keep ranges disjoint. Never compress content the current step is actively using. Compress boundaries are SURFACE SEQS (acp_status Surface: row, latest nudge table) \u2014 NOT the block refs (bN, e.g. b1) that acp_status COMPRESSED BLOCKS shows, which are for decompress only. Drilldown mN refs (e.g. m00306) are ALSO accepted as startSeq/endSeq \u2014 they are auto-mapped to the live surface seq; an unknown mN (never assigned on the current surface) fails with guidance. Seq refs must come from the CURRENT surface (acp_status or the latest nudge): a span whose edges were shadowed by an earlier compress is auto-remapped to its still-live content, a fully compressed span is reported as already compressed, and invented/other-session seqs fail with guidance. Good compression moments: stage or subtask completion whose details you have fully consumed and will not re-check, strategy switches, intermediate milestones, and wrapping up failed exploration \u2014 when the details are consumed and no longer critical for the task ahead. Before compressing, ask: will I need to re-verify any detail from this range in this task? If yes, keep it live. When you write a summary, turn dead-end exploration into a conclusion (what was tried, why it failed, the next step) \u2014 not a blow-by-blow; and keep the summary the ONLY record: self-contained, so a later reader (or you, after decompress) can continue without the original. Optional verifiedReadings: string[] per content entry records acceptance readings that are already green (e.g. "t0-fastpath 8/8") \u2014 stored structurally on the compaction event so later steps need not re-run them.',
+    decompress: "Recover the original content of a compressed block by its blockId \u2014 the kernel block ref `bN` shown by acp_status (e.g. b1), or a compaction id from search_context (read-only; does not unshadow the range). Large blocks are paged so each page stays under the host tool-result trim budget (up to 100 messages per call): pass offset/limit to walk them and follow the continue hint in the result.",
     searchContext: "Search inside compressed blocks (summaries and original content) for information the model no longer sees in context. When a summary lacks a detail you need (exact values, error strings, decisions, verbatim code), SEARCH the compressed blocks FIRST \u2014 never guess or reconstruct from memory: search_context(query) locates the right block, then decompress only that block to recover the original.",
     acpStatus: 'Context status: overview of the current context \u2014 CONTEXT BREAKDOWN (tool/text/summaries token shares of the visible total), COMPRESSED BLOCKS ledger, and the nudge decision. No args = overview. Percentages are shares of the visible content, not the context window. Note: the block refs in COMPRESSED BLOCKS (bN, e.g. b1) are for decompress; compress uses the Surface: seq range, not bN. Drilldown: pass scope:"compressed" for a per-block list, or scope:"uncompressed" with view:"messages" (every visible message) / view:"ranges" (merged ranges); tool filters to one tool name, sort reorders (size/time/tool; age for compressed), limit caps rows (default 30). Drilldown row refs are kernel ids (mN) \u2014 feed them straight to compress as startSeq/endSeq (auto-mapped to the live surface seq); bN is for decompress, Surface: seqs also work in compress.'
   },
@@ -4228,7 +3903,7 @@ WHEN NOT TO COMPRESS:
 
 Compression tools (refs are SURFACE SEQS, not ids):
 - compress: replace one or more seq ranges, each with your own dense summary. Single range: compress({ content: [{ startSeq, endSeq, summary }] }). Batch multiple unrelated segments in one call (each entry becomes its own block): compress({ content: [{ startSeq: 1, endSeq: 5, summary: '...' }, { startSeq: 12, endSeq: 18, summary: '...' }] }). Keep ranges disjoint \u2014 overlapping entries in one batch are skipped. Edges are auto-balanced to tool-call/result boundaries; a trailing #callId fragment in a seq is ignored. Seq refs must be on the current surface: seqs from older nudges or earlier compresses go stale as the surface moves, so a stale span is auto-remapped to its still-live remainder (the result reports the adjusted span), a fully compressed span is reported as already compressed, and invented/other-session seqs fail with guidance. The block refs (bN, e.g. b1) in acp_status COMPRESSED BLOCKS are for decompress, NOT compress boundaries.
-- decompress: recover a compressed block's original content, read-only. decompress({ blockId }) \u2014 accept the bN ref shown by acp_status (e.g. b1) or a compaction id.
+- decompress: recover a compressed block's original content, read-only. decompress({ blockId }) \u2014 accept the bN ref shown by acp_status (e.g. b1) or a compaction id. Large blocks page (each page sized to stay under the host tool-result trim budget, up to 100 messages): pass offset/limit and follow the continue hint in the result.
 - search_context: when a summary lacks the details you need (exact values, error strings, decisions, verbatim code), SEARCH the compressed blocks FIRST \u2014 never guess or reconstruct from memory; search_context(query) locates the right block, decompress only that block.
 - acp_status: current context usage and the live compressible-range list. Run it right before compressing \u2014 the only seqs that never go stale are the ones you just read. Drilldown (scope/view/tool/sort/limit) lists per-message or per-block sizes; drilldown rows are kernel ids (mN) \u2014 compress accepts them directly (auto-mapped to the live surface seq).
 
@@ -4243,6 +3918,12 @@ When you write a summary, it becomes the ONLY record of that range: keep file pa
 var DEFAULT_RESOLVED = DEFAULT_PROMPTS;
 
 // src/nudge.ts
+var GUIDANCE_BLOCKS = [COMPRESS_PHILOSOPHY, HOW_TO_COMPRESS_RULES, TIER2_DISTILL_RULES, TIER3_CONDENSE_RULES];
+function stripNudgeGuidance(text) {
+  let out = text;
+  for (const block of GUIDANCE_BLOCKS) out = out.split(block).join("");
+  return out.replace(/\n{3,}/g, "\n\n").trim();
+}
 function resolveTokenCount(agent, coreMessages) {
   const projections = agent.ctx?.get?.("sessionProjections");
   const projected = projections?.snapshot?.(agent.session)?.values?.contextPressure?.projectedTokens;
@@ -4277,22 +3958,63 @@ function rangeTable(session, prompts = DEFAULT_RESOLVED) {
 function measuredTokenCount(agent, coreMessages) {
   return resolveTokenCount(agent, coreMessages);
 }
-function buildNudge(agent, env, lastNudgeTurn) {
+function computeSurfaceBreakdown(state, messages, total, growth) {
+  let system = 0;
+  let tool = 0;
+  let code = 0;
+  let text = 0;
+  for (const message of messages) {
+    const tokens = defaultCountTokens(message.text ?? "");
+    if (message.contentType === "tool-call" || message.contentType === "tool-result") {
+      tool += tokens;
+    } else if (message.role === "system") {
+      system += tokens;
+    } else if ((message.text ?? "").includes("```")) {
+      code += tokens;
+    } else {
+      text += tokens;
+    }
+  }
+  let summaries = 0;
+  for (const block of state.blocks) {
+    if (block.active) summaries += defaultCountTokens(block.summary);
+  }
+  return { system, tool, summaries, code, text, total, growth };
+}
+var EMERGENCY_NUDGE_MAX_PER_TURN = 3;
+function buildNudge(agent, env, lastNudgeTurn, emergencyNudges, onEmergencyCapHit) {
   const session = agent.session;
   const state = env.store.stateFor(session);
   const coreMessages = allLogMessages(session);
-  const surfaceMessages = eventsToCoreMessages(surfaceEventsOf(session));
+  const surfaceEvents = surfaceEventsOf(session);
+  const surfaceMessages = eventsToCoreMessages(surfaceEvents);
   const tokenCount = measuredTokenCount(agent, surfaceMessages);
   const config = kernelConfigFor(env);
   const turn = env.kernel.processTurn({ messages: coreMessages, state, config, tokenCount });
   env.store.set(session, turn.state);
   const nudge = turn.nudge;
   if (nudge === void 0 || !nudge.shouldInject) return null;
+  const statusMessages = eventsToCoreMessages(
+    surfaceEvents.filter((event) => isCheckpointNode(event) === false)
+  );
+  nudge.contextBreakdown = computeSurfaceBreakdown(turn.state, statusMessages, tokenCount, nudge.contextBreakdown?.growth ?? 0);
   const emergency = nudge.breakdown?.emergencyOverride === 1;
   const turnNumber = findOpenTurn(sessionEventsOf(session)) ?? 0;
-  const alreadyShown = !emergency && lastNudgeTurn.get(session.id) === turnNumber;
-  if (alreadyShown) return null;
-  lastNudgeTurn.set(session.id, turnNumber);
+  if (!emergency) {
+    if (lastNudgeTurn.get(session.id) === turnNumber) return null;
+    lastNudgeTurn.set(session.id, turnNumber);
+  } else {
+    const record = emergencyNudges.get(session.id);
+    if (record !== void 0 && record.turn === turnNumber) {
+      if (record.count >= EMERGENCY_NUDGE_MAX_PER_TURN) {
+        onEmergencyCapHit?.();
+        return null;
+      }
+      record.count += 1;
+    } else {
+      emergencyNudges.set(session.id, { turn: turnNumber, count: 1 });
+    }
+  }
   const text = buildNudgeText(nudge, emergency, session, env.prompts);
   const message = createUserMessage2({
     content: [{ type: "text", text }],
@@ -4308,7 +4030,7 @@ function buildNudgeText(nudge, emergency, session, prompts = DEFAULT_RESOLVED) {
   return adaptKernelNudgeToSeq(rendered.text, nudge, session, prompts);
 }
 function adaptKernelNudgeToSeq(text, nudge, session, prompts) {
-  let out = text;
+  let out = stripNudgeGuidance(text);
   if ((nudge.tier === 2 || nudge.tier === 3) && (nudge.tierTargetBlocks?.length ?? 0) > 0) {
     out = replaceTierTrigger(out, nudge, session, prompts);
   } else if (out.includes('"startId"')) {
@@ -4403,7 +4125,65 @@ function renderNudgeFromTemplates(nudge, emergency, session, prompts) {
     parts.push(rangeTable(session, prompts));
   }
   if (prompts.nudge.tip !== "") parts.push("", prompts.nudge.tip);
-  return parts.join("\n");
+  return stripNudgeGuidance(parts.join("\n"));
+}
+
+// src/window.ts
+var DEFAULT_CONTEXT_WINDOW = 128e3;
+function windowSourceLabel(window) {
+  if (window.source === "explicit") return "configured";
+  if (window.source === "projection") {
+    return `session projection current route (auto-refreshes on model switch)`;
+  }
+  if (window.source === "auto") {
+    return `auto-detected from ${window.provider ?? "?"}/${window.model ?? "?"}`;
+  }
+  if (window.probeFailed === true) return "default (auto-detection failed \u2014 see /acp config)";
+  return "default (auto-detection unavailable)";
+}
+function projectedContextWindow(agent) {
+  const projections = agent.ctx?.get?.("sessionProjections");
+  const window = projections?.snapshot?.(agent.session)?.values?.contextPressure?.contextWindow;
+  if (typeof window === "number" && Number.isInteger(window) && window > 0) return window;
+  return null;
+}
+function liveRoute(agent) {
+  let rc;
+  try {
+    rc = agent.session.requestContext();
+  } catch {
+    return null;
+  }
+  if (rc === void 0 || rc === null) return null;
+  const { provider, model } = rc;
+  if (typeof provider !== "string" || provider === "") return null;
+  if (typeof model !== "string" || model === "") return null;
+  return { provider, model };
+}
+function routeFor(agent) {
+  const live = liveRoute(agent);
+  return {
+    provider: live?.provider ?? agent.options.provider ?? "",
+    model: live?.model ?? agent.options.model ?? ""
+  };
+}
+async function probeModelWindow(agent, provider, model) {
+  const llm = agent.ctx?.get?.("llm");
+  if (llm?.resolveModelInfo === void 0) return { contextWindow: null, outputReservation: null };
+  try {
+    const info = await llm.resolveModelInfo(provider, model);
+    const window = info?.context?.contextWindow;
+    const cap = info?.defaultMaxTokens;
+    return {
+      contextWindow: typeof window === "number" && Number.isInteger(window) && window > 0 ? window : null,
+      outputReservation: typeof cap === "number" && Number.isInteger(cap) && cap > 0 ? cap : null
+    };
+  } catch {
+    return { contextWindow: null, outputReservation: null };
+  }
+}
+async function detectContextWindow(agent, provider, model) {
+  return (await probeModelWindow(agent, provider, model)).contextWindow;
 }
 
 // src/tools.ts
@@ -4471,7 +4251,20 @@ var compressParameters = {
           ]
         },
         summary: { type: "string", required: true, description: "Complete technical summary replacing the range; keep paths, decisions, values verbatim. Minimum 50 characters." },
-        topic: { type: "string", description: "Short label (3-5 words) for this range." }
+        topic: { type: "string", description: "Short label (3-5 words) for this range." },
+        // B3 (2026-09-08 governance plan): the handler and region.ts have
+        // accepted verifiedReadings since the plan landed, but the declared
+        // parameter schema did not list it — `additionalProperties: false`
+        // then rejected every live call that carried it
+        // (`invalid arguments: "content[0].verifiedReadings" is not a declared
+        // property`), so the structured-loss-stopping field was unreachable
+        // from the model's tool interface. Declared here; additionalProperties
+        // stays false so unknown fields are still rejected.
+        verifiedReadings: {
+          type: "array",
+          items: { type: "string" },
+          description: 'Optional: acceptance readings that are already green before this compression (e.g. "t0-fastpath 8/8", "closedloop 414/414"). Stored structurally on the compaction/summary event and recovered by verifiedReadingsOf, so later steps need not re-run the checks.'
+        }
       },
       additionalProperties: false
     }
@@ -4553,6 +4346,21 @@ function validateContentItems(content) {
   });
   if (violations.length > 0) throw new ToolArgsError(violations);
 }
+function guardedRowsInSpan(guarded, shadowed) {
+  const inSpan = new Set(shadowed);
+  return [...guarded].filter((seq) => inSpan.has(seq)).sort((a, b) => a - b);
+}
+function protectedRowRejectionNote(start, end, hits, shadowed) {
+  const preview = hits.slice(0, 4).join(", ");
+  const more = hits.length > 4 ? ` +${hits.length - 4} more` : "";
+  const first = shadowed.indexOf(hits[0]);
+  const last = shadowed.indexOf(hits[hits.length - 1]);
+  const before = first > 0 ? shadowed.slice(0, first) : [];
+  const after = last >= 0 && last < shadowed.length - 1 ? shadowed.slice(last + 1) : [];
+  const slices = [before, after].filter((slice) => slice.length > 0).map((slice) => `${slice[0]}..${slice[slice.length - 1]}`);
+  const recovery = slices.length === 0 ? "no part of this span is compressible while those rows are current \u2014 pick an OLDER span instead (acp_status lists the live ranges)" : `the compressible part of this span is seq ${slices.join(" and ")} \u2014 submit them as separate content entries (or two compress calls), each with its own summary`;
+  return `  seqs ${start}..${end} rejected \u2014 the span covers ${hits.length} CURRENT injected instruction row(s) (seq ${preview}${more}); the host re-injects the newest AGENTS.md copy the moment it leaves the surface, so compressing it reclaims nothing \u2014 ${recovery} (older/stale copies of the same file are fine to compress)`;
+}
 async function handleCompress(env, args, exec) {
   const agent = requireAgent(exec);
   const session = agent.session;
@@ -4577,6 +4385,8 @@ async function handleCompress(env, args, exec) {
   validateContentItems(args.content);
   const ranges = [];
   const alreadyCompressedNotes = [];
+  const rejectedNotes = [];
+  const guardedSeqs = guardedSurfaceSeqsOf(session);
   for (const range of args.content) {
     const startSeq = parseBoundary2(range.startSeq, byRef);
     const endSeq = parseBoundary2(range.endSeq, byRef);
@@ -4594,6 +4404,12 @@ async function handleCompress(env, args, exec) {
       }
       throw error;
     }
+    const shadowedSpan = shadowedSeqsOf(session, resolved.start, resolved.end);
+    const instructionHits = guardedRowsInSpan(guardedSeqs, shadowedSpan);
+    if (instructionHits.length > 0) {
+      rejectedNotes.push(protectedRowRejectionNote(resolved.start, resolved.end, instructionHits, shadowedSpan));
+      continue;
+    }
     const startBlockRef = blockRefForSummarySeq(session, resolved.start);
     const endBlockRef = blockRefForSummarySeq(session, resolved.end);
     const startRef = startBlockRef ?? byRaw[String(resolved.start)];
@@ -4609,14 +4425,18 @@ async function handleCompress(env, args, exec) {
       endSeq,
       startRef,
       endRef,
+      // B3：把该段声明的已绿验收读数带上（缺位=不写键）
+      ...Array.isArray(range.verifiedReadings) && range.verifiedReadings.length > 0 ? { verifiedReadings: range.verifiedReadings.map(String) } : {},
       summary: range.summary,
       ...(range.topic ?? args.topic) === void 0 ? {} : { topic: range.topic ?? args.topic }
     });
   }
   if (ranges.length === 0) {
-    const text = ["Compressed 0 block(s), ~0 tokens reclaimed.", ...alreadyCompressedNotes];
+    const text = ["Compressed 0 block(s), ~0 tokens reclaimed.", ...alreadyCompressedNotes, ...rejectedNotes];
     if (alreadyCompressedNotes.length > 0) {
       text.push("  (all requested ranges were already compressed \u2014 decompress a block to recover its originals)");
+    } else if (rejectedNotes.length > 0) {
+      text.push("  (nothing compressed \u2014 every range covered a current injected instruction row; see the rejections above)");
     }
     return { text: text.join("\n") };
   }
@@ -4669,14 +4489,15 @@ async function handleCompress(env, args, exec) {
     const shadowedTokens = shadowedTokensViaMeter(session, shadowed, agent.ctx);
     const tier = block.tier === 2 || block.tier === 3 ? block.tier : 1;
     const parentBlockIds = compactionIdsOfKernelBlocks(session, block.directBlockIds);
+    const { provider, model } = routeFor(agent);
     const { compactionId } = runCompactionTransaction(session, {
       start,
       end,
       shadowedSeqs: shadowed,
       summary: [{ type: "text", text: range.summary }],
       shadowedTokenCount: shadowedTokens,
-      provider: agent.options.provider ?? "",
-      model: agent.options.model ?? "",
+      provider,
+      model,
       tier,
       kernelBlockId: block.blockId,
       ...range.topic === void 0 ? {} : { topic: range.topic },
@@ -4685,25 +4506,36 @@ async function handleCompress(env, args, exec) {
       // rehydrates the SAME effective messages (a tier-2 block's coverage is
       // its parents' originals, not the checkpoint node).
       directMessageIds: block.directMessageIds,
-      effectiveMessageIds: block.effectiveMessageIds
+      effectiveMessageIds: block.effectiveMessageIds,
+      // B3：已绿验收读数随压缩块落盘（缺位=不写键）
+      ...range.verifiedReadings === void 0 ? {} : { verifiedReadings: range.verifiedReadings }
     });
     const adjusted = start !== range.startSeq || end !== range.endSeq;
     const tierLabel2 = `, tier ${tier}`;
+    const readingsLabel = range.verifiedReadings !== void 0 && range.verifiedReadings.length > 0 ? `, verified: ${range.verifiedReadings.join("; ")}` : "";
     const note = range.recovered === true ? ` (seqs ${range.startSeq}..${range.endSeq} were already shadowed \u2014 compressed the live remainder ${start}..${end})` : adjusted ? ` (adjusted from ${range.startSeq}..${range.endSeq} to balanced edges)` : "";
     lines.push(
-      `  block ${compactionId.slice(0, 8)}: seqs ${start}..${end}, ${shadowed.length} messages shadowed${tierLabel2}${note}`
+      `  block ${compactionId.slice(0, 8)}: seqs ${start}..${end}, ${shadowed.length} messages shadowed${tierLabel2}${readingsLabel}${note}`
     );
   }
   const summaryLine = `Compressed ${applied.result.blocksCreated} block(s), ~${applied.result.tokensCompressed} tokens reclaimed.`;
-  const totalSkipped = skippedRanges + alreadyCompressedNotes.length;
+  const totalSkipped = skippedRanges + alreadyCompressedNotes.length + rejectedNotes.length;
   const failedLines = applied.result.errors.map((error) => `  ${error}`);
-  const warningLines = [...freeWarnings.map((warning) => `  ${warning}`), ...failedLines, ...alreadyCompressedNotes, ...lines];
+  const warningLines = [
+    ...freeWarnings.map((warning) => `  ${warning}`),
+    ...failedLines,
+    ...alreadyCompressedNotes,
+    ...rejectedNotes,
+    ...lines
+  ];
   const footer = totalSkipped > 0 ? `  (${totalSkipped} range(s) skipped or failed \u2014 see above)` : "";
   return { text: `${summaryLine}
 ${[...warningLines, footer].filter((line) => line !== "").join("\n")}` };
 }
 var decompressParameters = {
-  blockId: { type: "string", required: true, description: "Block id: the kernel block ref `bN` shown by acp_status (e.g. b1), or a compaction id / prefix from search_context." }
+  blockId: { type: "string", required: true, description: "Block id: the kernel block ref `bN` shown by acp_status (e.g. b1), or a compaction id / prefix from search_context." },
+  offset: { type: "integer", description: "Start position in the block's message list (default 0). Blocks are paged by size \u2014 each page stays under the host tool-result trim budget (up to 100 messages) \u2014 so follow the continue hint in the result to walk the rest." },
+  limit: { type: "integer", description: "Messages per page (default 100; values above 100 are capped to 100). Pages are also bounded by a character budget, so long messages return fewer than this per call." }
 };
 function resolveBlockId(session, arg) {
   const byKernelRef = blockIdOfKernelRef(session, arg);
@@ -4724,17 +4556,40 @@ function handleDecompress(_env, rawArgs, exec) {
   if (block === void 0) {
     return { text: `decompress: block "${args.blockId}" not found (see acp_status for the block list)` };
   }
+  const expanded = expandShadowedSeqs(session, block.blockId);
+  const page = sliceDecompressPage(
+    expanded,
+    args.offset ?? 0,
+    args.limit ?? DEFAULT_DECOMPRESS_PAGE,
+    DEFAULT_DECOMPRESS_PAGE_CHARS,
+    (seq) => {
+      const event = eventAtOf(session, seq);
+      const text = event === void 0 ? "" : extractEventText(event);
+      return text.length === 0 ? 0 : `[seq ${seq}] ${text}`.length;
+    }
+  );
+  if (page.total === 0 || page.seqs.length === 0) {
+    const where = page.total === 0 ? "" : ` has ${page.total} messages; offset ${page.offset} is past the end \u2014 use an offset below ${page.total}, or omit it`;
+    return { text: page.total === 0 ? `Block ${block.blockId} \u2014 ${block.summary}
+
+(no recoverable content)` : `decompress: block ${block.blockId}${where}` };
+  }
   const parts = [];
-  for (const seq of expandShadowedSeqs(session, block.blockId)) {
+  for (const seq of page.seqs) {
     const event = eventAtOf(session, seq);
     const text = event === void 0 ? "" : extractEventText(event);
     if (text.length > 0) parts.push(`[seq ${seq}] ${text}`);
   }
   const tierNote = block.tier > 1 ? ` (tier ${block.tier}, distills ${block.parentBlockIds.length} block(s))` : "";
+  const lines = [];
+  lines.push(`[messages ${page.offset + 1}..${page.offset + page.seqs.length} of ${page.total}]`);
+  if (!page.exhausted) lines.push(`More available \u2014 continue with decompress({ blockId: "${block.blockId}", offset: ${page.offset + page.seqs.length} })`);
   return {
     text: `Block ${block.blockId} \u2014 ${block.summary}${tierNote}
 
-${parts.join("\n\n") || "(no recoverable content)"}`
+${lines.join("\n")}
+
+${parts.join("\n\n") || "(no text content on this page)"}`
   };
 }
 var searchParameters = {
@@ -4753,8 +4608,12 @@ function roleOfEvent(event) {
       return null;
   }
 }
+var searchDocsCache = /* @__PURE__ */ new WeakMap();
 function buildSearchDocs(session) {
-  const ledger = rebuildBlockLedger(sessionEventsOf(session));
+  const events = sessionEventsOf(session);
+  const cached = searchDocsCache.get(events);
+  if (cached !== void 0) return cached;
+  const ledger = rebuildBlockLedger(events);
   const docs = [];
   const claimed = /* @__PURE__ */ new Set();
   for (const block of ledger) {
@@ -4787,6 +4646,7 @@ function buildSearchDocs(session) {
       });
     }
   }
+  searchDocsCache.set(events, docs);
   return docs;
 }
 function handleSearch(_env, rawArgs, exec) {
@@ -4832,11 +4692,6 @@ var statusParameters = {
     description: "Cap on rows or blocks shown (default 30)."
   }
 };
-function isCheckpointEvent(event) {
-  if (event.type !== "user/message") return false;
-  const source = event.data.source;
-  return source?.plugin === "compact";
-}
 async function handleStatus(env, rawArgs, exec) {
   const args = unwrapEnvelope(rawArgs);
   const agent = requireAgent(exec);
@@ -4851,7 +4706,7 @@ async function handleStatus(env, rawArgs, exec) {
   const config = kernelConfigFor({ ...env, modelContextLimit: window.limit });
   const turn = env.kernel.processTurn({ messages: coreMessages, state, config, tokenCount });
   const statusMessages = eventsToCoreMessages(
-    surface.filter((event) => !isCheckpointEvent(event)),
+    surface.filter((event) => isCheckpointNode(event) === false),
     toolNames
   );
   const report = buildStatusReport(turn.state, statusMessages, defaultCountTokens, args);
@@ -4914,42 +4769,109 @@ function makeTools(env) {
   ];
 }
 
-// src/window.ts
-var DEFAULT_CONTEXT_WINDOW = 128e3;
-function windowSourceLabel(window) {
-  if (window.source === "explicit") return "configured";
-  if (window.source === "projection") {
-    return `session projection current route (auto-refreshes on model switch)`;
-  }
-  if (window.source === "auto") {
-    return `auto-detected from ${window.provider ?? "?"}/${window.model ?? "?"}`;
-  }
-  if (window.probeFailed === true) return "default (auto-detection failed \u2014 restart to re-probe)";
-  return "default (auto-detection unavailable)";
+// src/commands.ts
+import { SettingsConflictError } from "@deepseek-ai/dsh-settings";
+
+// src/settings.ts
+import z from "@deepseek-ai/schemastery";
+var ACP_SETTINGS_NAMESPACE = "compaction-acp";
+var SETTINGS_KEYS = [
+  "modelContextLimit",
+  "autoModelContextLimit",
+  "nudgeMinContextLimitPct",
+  "nudgeMaxContextLimitPct",
+  "nudgeEmergencyThresholdPct",
+  "autoNudge"
+];
+var SETTING_DEFAULTS = {
+  autoModelContextLimit: true,
+  nudgeMaxContextLimitPct: 0.7,
+  nudgeEmergencyThresholdPct: 0.85,
+  autoNudge: true
+};
+function filterSettingsEntry(entry) {
+  return {
+    ...entry.modelContextLimit !== void 0 ? { modelContextLimit: entry.modelContextLimit } : {},
+    ...entry.autoModelContextLimit !== void 0 ? { autoModelContextLimit: entry.autoModelContextLimit } : {},
+    ...entry.nudgeMinContextLimitPct !== void 0 ? { nudgeMinContextLimitPct: entry.nudgeMinContextLimitPct } : {},
+    ...entry.nudgeMaxContextLimitPct !== void 0 ? { nudgeMaxContextLimitPct: entry.nudgeMaxContextLimitPct } : {},
+    ...entry.nudgeEmergencyThresholdPct !== void 0 ? { nudgeEmergencyThresholdPct: entry.nudgeEmergencyThresholdPct } : {},
+    ...entry.autoNudge !== void 0 ? { autoNudge: entry.autoNudge } : {}
+  };
 }
-function projectedContextWindow(agent) {
-  const projections = agent.ctx?.get?.("sessionProjections");
-  const window = projections?.snapshot?.(agent.session)?.values?.contextPressure?.contextWindow;
-  if (typeof window === "number" && Number.isInteger(window) && window > 0) return window;
-  return null;
+function resolveAcpSettings(input) {
+  return {
+    modelContextLimit: input.modelContextLimit,
+    autoModelContextLimit: input.autoModelContextLimit ?? SETTING_DEFAULTS.autoModelContextLimit,
+    nudgeMinContextLimitPct: input.nudgeMinContextLimitPct,
+    nudgeMaxContextLimitPct: input.nudgeMaxContextLimitPct ?? SETTING_DEFAULTS.nudgeMaxContextLimitPct,
+    nudgeEmergencyThresholdPct: input.nudgeEmergencyThresholdPct ?? SETTING_DEFAULTS.nudgeEmergencyThresholdPct,
+    autoNudge: input.autoNudge ?? SETTING_DEFAULTS.autoNudge
+  };
 }
-async function probeModelWindow(agent, provider, model) {
-  const llm = agent.ctx?.get?.("llm");
-  if (llm?.resolveModelInfo === void 0) return { contextWindow: null, outputReservation: null };
-  try {
-    const info = await llm.resolveModelInfo(provider, model);
-    const window = info?.context?.contextWindow;
-    const cap = info?.defaultMaxTokens;
-    return {
-      contextWindow: typeof window === "number" && Number.isInteger(window) && window > 0 ? window : null,
-      outputReservation: typeof cap === "number" && Number.isInteger(cap) && cap > 0 ? cap : null
-    };
-  } catch {
-    return { contextWindow: null, outputReservation: null };
+var AcpSettingsSchema = z.object({
+  modelContextLimit: z.number().step(1).min(1),
+  autoModelContextLimit: z.boolean().default(SETTING_DEFAULTS.autoModelContextLimit),
+  nudgeMinContextLimitPct: z.number().min(0).max(1),
+  nudgeMaxContextLimitPct: z.number().min(0).max(1).default(SETTING_DEFAULTS.nudgeMaxContextLimitPct),
+  nudgeEmergencyThresholdPct: z.number().min(0).max(1).default(SETTING_DEFAULTS.nudgeEmergencyThresholdPct),
+  autoNudge: z.boolean().default(SETTING_DEFAULTS.autoNudge)
+});
+function describeSettingsChange(prev, next) {
+  const warnings = [];
+  if (next.nudgeMinContextLimitPct !== void 0 && next.nudgeMinContextLimitPct >= next.nudgeMaxContextLimitPct) {
+    warnings.push(
+      `nudgeMinContextLimitPct (${next.nudgeMinContextLimitPct}) >= nudgeMaxContextLimitPct (${next.nudgeMaxContextLimitPct}) \u2014 the lower bound never engages`
+    );
   }
+  if (next.nudgeMaxContextLimitPct >= next.nudgeEmergencyThresholdPct) {
+    warnings.push(
+      `nudgeMaxContextLimitPct (${next.nudgeMaxContextLimitPct}) >= nudgeEmergencyThresholdPct (${next.nudgeEmergencyThresholdPct}) \u2014 the emergency tier loses its headroom`
+    );
+  }
+  return {
+    clearWindowCache: prev.modelContextLimit !== next.modelContextLimit || prev.autoModelContextLimit !== next.autoModelContextLimit,
+    clearNudgeDedup: prev.autoNudge === false && next.autoNudge === true,
+    warnings
+  };
 }
-async function detectContextWindow(agent, provider, model) {
-  return (await probeModelWindow(agent, provider, model)).contextWindow;
+function parseSettingValue(raw) {
+  const text = raw.trim();
+  if (text === "true") return { ok: true, value: true };
+  if (text === "false") return { ok: true, value: false };
+  const num = Number(text);
+  if (text !== "" && Number.isFinite(num)) return { ok: true, value: num };
+  if (text === "null") return { ok: true, value: null };
+  return {
+    ok: false,
+    reason: `"${text}" is not a valid value \u2014 use a number (0.65), true/false, or null to reset the key`
+  };
+}
+function requireService(getService) {
+  const service = getService();
+  if (service === void 0) {
+    throw new Error("runtime settings are not available in this process");
+  }
+  return service;
+}
+function makeSettingsCommandSurface(getService, getSnapshot) {
+  return {
+    get available() {
+      return getService() !== void 0;
+    },
+    snapshot: getSnapshot,
+    describe() {
+      const service = getService();
+      if (service === void 0) return void 0;
+      return service.describe().find((descriptor) => String(descriptor.ns) === ACP_SETTINGS_NAMESPACE);
+    },
+    async update(patch) {
+      await requireService(getService).update(ACP_SETTINGS_NAMESPACE, patch);
+    },
+    async replaceSection(section) {
+      await requireService(getService).replace(ACP_SETTINGS_NAMESPACE, section);
+    }
+  };
 }
 
 // src/commands.ts
@@ -4971,7 +4893,7 @@ async function statusText(env, agent) {
     windowLine
   ];
   if (window.probeFailed === true) {
-    lines.push(`  \u26A0 window auto-detection failed \u2014 using the ${limit} fallback (restart to re-probe, or set modelContextLimit explicitly)`);
+    lines.push(`  \u26A0 window auto-detection failed \u2014 using the ${limit} fallback (change modelContextLimit or autoModelContextLimit via /acp config \u2014 or restart \u2014 to re-probe)`);
   }
   const state = structuredClone(env.store.stateFor(session));
   const config = kernelConfigFor({ ...env, modelContextLimit: limit });
@@ -5008,38 +4930,69 @@ function compressText(env, agent, args) {
     return "/acp compress: the range touches a compressed block summary node \u2014 distill it with the compress tool (seq-based batch), not /acp compress";
   }
   const shadowed = shadowedSeqsOf(session, start, end);
+  const instructionHits = guardedRowsInSpan(guardedSurfaceSeqsOf(session), shadowed);
+  if (instructionHits.length > 0) {
+    return protectedRowRejectionNote(start, end, instructionHits, shadowed);
+  }
   const shadowedTokens = shadowedTokensViaMeter(session, shadowed, agent.ctx);
+  const { provider, model } = routeFor(agent);
   const { compactionId } = runCompactionTransaction(session, {
     start,
     end,
     shadowedSeqs: shadowed,
     summary: [{ type: "text", text: summary }],
     shadowedTokenCount: shadowedTokens,
-    provider: agent.options.provider ?? "",
-    model: agent.options.model ?? ""
+    provider,
+    model
   });
   return `Compressed seqs ${start}..${end} (${shadowed.length} messages) as block ${compactionId.slice(0, 8)}`;
 }
+var DECOMPRESS_USAGE = "/acp decompress <blockId> [offset] [limit]";
 function decompressText(_env, agent, args) {
-  if (args.length < 1) return "/acp decompress <blockId>";
+  if (args.length < 1) return DECOMPRESS_USAGE;
+  const offset = args[1] === void 0 ? 0 : Number(args[1]);
+  if (!Number.isInteger(offset) || offset < 0) return `${DECOMPRESS_USAGE} \u2014 offset must be a non-negative integer`;
+  const limit = args[2] === void 0 ? DEFAULT_DECOMPRESS_PAGE : Number(args[2]);
+  if (!Number.isInteger(limit) || limit < 1 || limit > DEFAULT_DECOMPRESS_PAGE) return `${DECOMPRESS_USAGE} \u2014 limit must be an integer between 1 and ${DEFAULT_DECOMPRESS_PAGE}`;
   const session = agent.session;
   const blockId = blockIdOfKernelRef(session, args[0]);
   const ledger = rebuildBlockLedger(sessionEventsOf(session));
   const block = blockId === null ? ledger.find((entry) => entry.blockId.startsWith(args[0])) : ledger.find((entry) => entry.blockId === blockId);
   if (block === void 0) return `block "${args[0]}" not found (see /acp status)`;
-  const parts = expandShadowedSeqs(session, block.blockId).map((seq) => extractEventText(eventAtOf(session, seq))).filter((text) => text.length > 0);
-  return `Block ${block.blockId} \u2014 ${block.summary}
+  const expanded = expandShadowedSeqs(session, block.blockId);
+  const page = sliceDecompressPage(
+    expanded,
+    offset,
+    limit,
+    DEFAULT_DECOMPRESS_PAGE_CHARS,
+    (seq) => extractEventText(eventAtOf(session, seq)).length
+  );
+  if (page.seqs.length === 0) {
+    if (page.total === 0) return `Block ${block.blockId} \u2014 ${block.summary}
 
-${parts.join("\n\n") || "(no recoverable content)"}`;
+(no recoverable content)`;
+    return `block ${block.blockId} has ${page.total} messages; offset ${offset} is past the end \u2014 use an offset below ${page.total}`;
+  }
+  const parts = page.seqs.map((seq) => extractEventText(eventAtOf(session, seq))).filter((text) => text.length > 0);
+  const lines = [
+    `Block ${block.blockId} \u2014 ${block.summary}`,
+    `[messages ${page.offset + 1}..${page.offset + page.seqs.length} of ${page.total}]`
+  ];
+  if (!page.exhausted) lines.push(`Continue with: /acp decompress ${block.blockId.slice(0, 8)} ${page.offset + page.seqs.length}`);
+  lines.push("", parts.join("\n\n") || "(no recoverable content)");
+  return lines.join("\n");
 }
 function acpCommand(env) {
   return {
     name: "acp",
-    description: "Active Context Pruning \u2014 model-driven context compression. Usage: /acp status | /acp compress <startSeq> <endSeq> <summary> | /acp decompress <blockId>",
+    description: "Active Context Pruning \u2014 model-driven context compression. Usage: /acp status | /acp compress <startSeq> <endSeq> <summary> | /acp decompress <blockId> [offset] [limit] | /acp config [list|set <key> <value>|reset <key>|all]",
     handler: async (invocation) => {
       const raw = invocation.rawInput.trim();
       if (raw === "" || raw === "status") {
         return { kind: "success", text: await statusText(env, invocation.agent) };
+      }
+      if (raw === "config" || raw.startsWith("config ")) {
+        return { kind: "success", text: await configText(env, raw.slice("config".length).trim()) };
       }
       if (raw.startsWith("compress")) {
         return { kind: "success", text: compressText(env, invocation.agent, raw.slice("compress".length).trim().split(/\s+/)) };
@@ -5047,9 +5000,115 @@ function acpCommand(env) {
       if (raw.startsWith("decompress")) {
         return { kind: "success", text: decompressText(env, invocation.agent, raw.slice("decompress".length).trim().split(/\s+/)) };
       }
-      return { kind: "error", text: `unknown /acp subcommand "${raw.split(/\s+/)[0]}" \u2014 use status | compress | decompress` };
+      return { kind: "error", text: `unknown /acp subcommand "${raw.split(/\s+/)[0]}" \u2014 use status | compress | decompress | config` };
     }
   };
+}
+function isRecord(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+function isSettingsKey(key) {
+  return SETTINGS_KEYS.includes(key);
+}
+function settingsWriteFailure(error) {
+  if (error instanceof SettingsConflictError) {
+    return "conflict: another writer changed this setting at the same time \u2014 run /acp config again";
+  }
+  return `rejected: ${String(error)}`;
+}
+function formatSettingsValue(key, value) {
+  if (value === void 0) {
+    if (key === "modelContextLimit") return "auto";
+    if (key === "nudgeMinContextLimitPct") return "0.45 (kernel)";
+    return "\u2014";
+  }
+  return String(value);
+}
+function configListText(surface) {
+  if (surface === void 0) return "runtime settings are not wired in this engine build";
+  const snapshot = surface.snapshot();
+  const descriptor = surface.describe();
+  const lines = [
+    'ACP runtime settings \u2014 namespace "compaction-acp"',
+    "  key                         value        source"
+  ];
+  for (const key of SETTINGS_KEYS) {
+    const userSection = isRecord(descriptor?.user) ? descriptor.user : {};
+    const baseSection = isRecord(descriptor?.base) ? descriptor.base : {};
+    const source = key in userSection ? "user" : key in baseSection ? "base" : "default";
+    lines.push(`  ${key.padEnd(27)} ${formatSettingsValue(key, snapshot[key]).padEnd(12)} ${source}`);
+  }
+  lines.push("", "  changes apply to running sessions immediately (no restart)");
+  lines.push("  coreOverrides (composition layer) merge LAST and beat these values on same-name keys");
+  lines.push("  /acp config reset <key> returns the key to the composition row / engine default");
+  return lines.join("\n");
+}
+async function configSetText(surface, key, rawValue) {
+  if (!isSettingsKey(key)) {
+    return `unknown key "${key}" \u2014 keys: ${SETTINGS_KEYS.join(", ")}`;
+  }
+  if (surface === void 0) return "runtime settings are not wired in this engine build";
+  if (!surface.available) {
+    return "no settings provider in this process \u2014 edit the compaction-acp row in cordis.patch.yml instead (a restart applies it)";
+  }
+  const parsed = parseSettingValue(rawValue);
+  if (!parsed.ok) return parsed.reason;
+  if (parsed.value === null) {
+    return configResetText(surface, key);
+  }
+  if ((key === "autoNudge" || key === "autoModelContextLimit") && typeof parsed.value !== "boolean") {
+    return `${key} takes true or false (got "${String(parsed.value)}")`;
+  }
+  const patch = key === "autoNudge" || key === "autoModelContextLimit" ? { [key]: parsed.value } : { [key]: parsed.value };
+  try {
+    await surface.update(patch);
+  } catch (error) {
+    return settingsWriteFailure(error);
+  }
+  const windowNote = key === "modelContextLimit" || key === "autoModelContextLimit" ? "\n  window cache cleared \u2014 the next step re-resolves the context window" : "";
+  return `\u2713 ${key} = ${String(parsed.value)} \u2014 applied to running sessions${windowNote}`;
+}
+async function configResetText(surface, target) {
+  if (surface === void 0) return "runtime settings are not wired in this engine build";
+  if (!surface.available) {
+    return "no settings provider in this process \u2014 edit the compaction-acp row in cordis.patch.yml instead (a restart applies it)";
+  }
+  if (target === "all") {
+    try {
+      await surface.replaceSection({});
+    } catch (error) {
+      return settingsWriteFailure(error);
+    }
+    return "\u2713 all runtime settings reset \u2014 values now come from the composition row / engine defaults";
+  }
+  if (!isSettingsKey(target)) {
+    return `unknown key "${target}" \u2014 keys: ${SETTINGS_KEYS.join(", ")}`;
+  }
+  const descriptor = surface.describe();
+  const userSection = isRecord(descriptor?.user) ? { ...descriptor.user } : {};
+  delete userSection[target];
+  try {
+    await surface.replaceSection(userSection);
+  } catch (error) {
+    return settingsWriteFailure(error);
+  }
+  const baseSection = isRecord(descriptor?.base) ? descriptor.base : {};
+  const baseValue = baseSection[target];
+  return `\u2713 ${target} reset \u2014 it now reads ${baseValue === void 0 ? "the engine default" : `the composition value ${String(baseValue)}`}`;
+}
+async function configText(env, rest) {
+  const surface = env.settingsCommand;
+  const args = rest.split(/\s+/).filter((part) => part.length > 0);
+  const verb = args[0] ?? "list";
+  if (verb === "list") return configListText(surface);
+  if (verb === "set") {
+    if (args.length < 3) return "usage: /acp config set <key> <value> (e.g. /acp config set nudgeMaxContextLimitPct 0.72)";
+    return configSetText(surface, args[1], args.slice(2).join(" "));
+  }
+  if (verb === "reset") {
+    return configResetText(surface, args[1] ?? "all");
+  }
+  return `unknown /acp config verb "${verb}" \u2014 use list | set <key> <value> | reset <key>|all`;
 }
 
 // src/system-prompt.ts
@@ -5092,32 +5151,87 @@ var AcpCompactionEngine = class extends CompactionEngine {
    * revive lost-config bugs with every unit test green.
    */
   env;
-  lastNudgeTurn = /* @__PURE__ */ new Map();
+  lastNudgeTurn = new LruMap(DEFAULT_SESSION_CACHE_LIMIT);
+  /** Per-session emergency-nudge injection budget for the current user turn (issue #108). */
+  emergencyNudges = /* @__PURE__ */ new Map();
   /** Successful compress call ids awaiting their tool/result so the pair can be hidden. */
   compressCallIdsToHide = /* @__PURE__ */ new Set();
   /** Per provider/model route the resolved window (probe failures cached too). */
   windowCache = /* @__PURE__ */ new Map();
+  /** Live settings snapshot thunk (composition → user settings layer); swapped when the settings provider attaches (SettingsProvider.installSection). */
+  readSettingsSource = () => resolveAcpSettings({});
+  /** The settings service, captured lazily for /acp config (undefined in provider-less processes). */
+  settingsService;
+  /** /acp config read/write surface. */
+  settingsCommand;
   /** Per route the adapter's per-request output cap (the output reservation); null = undisclosed. */
   outputReservationCache = /* @__PURE__ */ new Map();
   constructor(ctx, config = {}) {
     super(ctx);
     this.config = resolveAcpConfig(config);
-    this.prompts = resolvePrompts2(config.prompts);
+    this.prompts = resolvePrompts(config.prompts);
     const ports = this.config.countTokens !== void 0 ? { countTokens: this.config.countTokens } : {};
     this.kernel = createCore(ports);
+    setDocCacheCap(128 * 1024 * 1024);
     this.store = new AcpStateStore();
+    const compositionEntry = filterSettingsEntry(config);
+    let current = resolveAcpSettings(compositionEntry);
+    this.readSettingsSource = () => current;
+    const engine = this;
+    const applySettings = () => {
+      const next = this.readSettingsSource();
+      const prev = current;
+      current = next;
+      try {
+        engine.onSettingsChanged(prev, next);
+      } catch (error) {
+        this.ctx.logger.warn(`billion-context-dsh: applying settings change failed: ${String(error)}`);
+      }
+    };
+    this.settingsCommand = makeSettingsCommandSurface(() => this.settingsService, () => current);
+    if (this.config.settingsEnabled !== false) {
+      ctx.inject(["settings"], (settingsCtx) => {
+        settingsCtx.settings.installSection(ctx, ACP_SETTINGS_NAMESPACE, AcpSettingsSchema, compositionEntry, {
+          // The seam's source type follows the entry it registered, so `source`
+          // is a partial view of the settings; re-resolve it into a
+          // fully-defaulted snapshot so every reader sees the same shape the
+          // composition path produced.
+          setSource: (source) => {
+            this.readSettingsSource = () => resolveAcpSettings(source());
+          },
+          onChange: applySettings
+        });
+        this.settingsService = settingsCtx.settings;
+        return () => {
+          this.settingsService = void 0;
+          this.readSettingsSource = () => current;
+        };
+      });
+    }
     const env = {
       kernel: this.kernel,
       store: this.store,
-      // Initial value before any probe; windowFor() replaces it per pre-step.
-      modelContextLimit: this.config.modelContextLimit ?? DEFAULT_CONTEXT_WINDOW,
-      nudgeMinContextLimitPct: this.config.nudgeMinContextLimitPct,
-      nudgeMaxContextLimitPct: this.config.nudgeMaxContextLimitPct,
-      nudgeEmergencyThresholdPct: this.config.nudgeEmergencyThresholdPct,
+      // The settings-exposed knobs read LIVE from the settings source, so a
+      // settings.yaml edit (or /acp config set) hot-applies to every
+      // subsequent call — consumers never see stale numbers. (ToolEnvironment
+      // fields are readonly properties; getters satisfy them.)
+      get modelContextLimit() {
+        return engine.readSettingsSource().modelContextLimit ?? DEFAULT_CONTEXT_WINDOW;
+      },
+      get nudgeMinContextLimitPct() {
+        return engine.readSettingsSource().nudgeMinContextLimitPct;
+      },
+      get nudgeMaxContextLimitPct() {
+        return engine.readSettingsSource().nudgeMaxContextLimitPct;
+      },
+      get nudgeEmergencyThresholdPct() {
+        return engine.readSettingsSource().nudgeEmergencyThresholdPct;
+      },
       coreOverrides: this.config.coreOverrides,
       windowFor: (agent) => this.windowFor(agent),
       prompts: this.prompts,
-      compressCallIdsToHide: this.compressCallIdsToHide
+      compressCallIdsToHide: this.compressCallIdsToHide,
+      settingsCommand: this.settingsCommand
     };
     this.env = env;
     const tools = ctx.get("tools");
@@ -5165,11 +5279,21 @@ var AcpCompactionEngine = class extends CompactionEngine {
     });
     ctx.on("agent/pre-step", async (payload, next) => {
       stripOrphanedSurfaceToolMessages(payload.agent.session);
-      if (!this.config.autoNudge) return next();
+      if (!engine.readSettingsSource().autoNudge) return next();
       const decision = await next();
       if (decision.kind === "reject") return decision;
       const window = await this.windowFor(payload.agent);
-      const outcome = buildNudge(payload.agent, { ...env, modelContextLimit: window.limit }, this.lastNudgeTurn);
+      const outcome = buildNudge(
+        payload.agent,
+        { ...env, modelContextLimit: window.limit },
+        this.lastNudgeTurn,
+        this.emergencyNudges,
+        () => {
+          ctx.logger.warn(
+            `billion-context-dsh: emergency nudge suppressed \u2014 per-turn budget of ${EMERGENCY_NUDGE_MAX_PER_TURN} spent (session ${payload.agent.session.id}); pressure is still above the emergency threshold`
+          );
+        }
+      );
       if (outcome === null) return decision;
       return { kind: "enter", messages: [...decision.messages, outcome.message] };
     });
@@ -5218,13 +5342,13 @@ var AcpCompactionEngine = class extends CompactionEngine {
    * fallback.
    */
   async windowFor(agent) {
-    if (this.config.modelContextLimit !== void 0) {
-      return { limit: this.config.modelContextLimit, source: "explicit" };
+    const live = this.readSettingsSource();
+    if (live.modelContextLimit !== void 0) {
+      return { limit: live.modelContextLimit, source: "explicit" };
     }
-    const provider = agent.options.provider ?? "";
-    const model = agent.options.model ?? "";
+    const { provider, model } = routeFor(agent);
     const key = `${provider}\0${model}`;
-    if (this.config.autoModelContextLimit) {
+    if (live.autoModelContextLimit) {
       const projected = projectedContextWindow(agent);
       if (projected !== null) {
         const cap2 = await this.outputCapFor(agent, provider, model);
@@ -5235,14 +5359,14 @@ var AcpCompactionEngine = class extends CompactionEngine {
     if (cached !== void 0) return cached;
     let window;
     let cap = null;
-    if (!this.config.autoModelContextLimit) {
+    if (!live.autoModelContextLimit) {
       window = { limit: DEFAULT_CONTEXT_WINDOW, source: "default", provider, model };
     } else {
       const probe = await probeModelWindow(agent, provider, model);
       cap = probe.outputReservation;
       if (probe.contextWindow === null) {
         this.ctx.logger.warn(
-          `billion-context-dsh: context-window auto-detection failed for ${provider}/${model} \u2014 using the ${DEFAULT_CONTEXT_WINDOW} fallback (restart to re-probe, or set modelContextLimit explicitly)`
+          `billion-context-dsh: context-window auto-detection failed for ${provider}/${model} \u2014 using the ${DEFAULT_CONTEXT_WINDOW} fallback (change modelContextLimit or autoModelContextLimit via /acp config \u2014 or restart \u2014 to re-probe)`
         );
         window = { limit: DEFAULT_CONTEXT_WINDOW, source: "default", provider, model, probeFailed: true };
         cap = null;
@@ -5253,6 +5377,23 @@ var AcpCompactionEngine = class extends CompactionEngine {
     window = this.applyReservation(window, cap);
     this.windowCache.set(key, window);
     return window;
+  }
+  /**
+   * Diff handler for runtime settings changes: drop the window cache when a
+   * window-related key changed (probe FAILURES are cached too — clearing is
+   * what lets the next pre-step re-probe after a fix), clear the per-turn
+   * nudge dedup when nudges come back on, and warn on order anomalies
+   * (accepted, never rejected — rejecting a write cannot fix an externally
+   * edited settings.yaml, and an invalid stored section would fail the next
+   * boot loud anyway).
+   */
+  onSettingsChanged(prev, next) {
+    const effect = describeSettingsChange(prev, next);
+    for (const warning of effect.warnings) {
+      this.ctx.logger.warn(`billion-context-dsh: ${warning}`);
+    }
+    if (effect.clearWindowCache) this.windowCache.clear();
+    if (effect.clearNudgeDedup) this.lastNudgeTurn.clear();
   }
   /**
    * The adapter's per-request output cap for a route, from one
@@ -5304,14 +5445,19 @@ var AcpCompactionEngine = class extends CompactionEngine {
 };
 var index_default = AcpCompactionEngine;
 export {
+  ACP_SETTINGS_NAMESPACE,
   ACP_SYSTEM_PROMPT,
   ACP_SYSTEM_PROMPT_ORDER,
   AcpCompactionEngine,
+  AcpSettingsSchema,
   AcpStateStore,
   AlreadyCompressedRangeError,
   DEFAULT_CONTEXT_WINDOW,
   DEFAULT_PROMPTS,
   DEFAULT_RESOLVED,
+  EMERGENCY_NUDGE_MAX_PER_TURN,
+  SETTINGS_KEYS,
+  SETTING_DEFAULTS,
   acpCommand,
   assertNoActiveCompaction,
   blockRefForSummarySeq,
@@ -5319,21 +5465,26 @@ export {
   buildNudge,
   compactionIdsOfKernelBlocks,
   index_default as default,
+  describeSettingsChange,
   detectContextWindow,
   eventsToCoreMessages,
   expandShadowedSeqs,
   extractEventText,
+  filterSettingsEntry,
   findOpenTurn,
   hideCompressToolPair,
   kernelConfigFor,
+  makeSettingsCommandSurface,
   makeTools,
+  parseSettingValue,
   projectEvent,
   projectedContextWindow,
   rebuildBlockLedger,
   renderSystemPrompt,
   renderTemplate,
   resolveAcpConfig,
-  resolvePrompts2 as resolvePrompts,
+  resolveAcpSettings,
+  resolvePrompts,
   resolveSurfaceRange,
   resolveTokenCount,
   runCompactionTransaction,

@@ -10,3 +10,10 @@ scratch-*
 docs/fix-issue-*-plan.md
 docs/video-script.md
 .npm-cache/
+
+# Local-only working artifacts (never push)
+scripts/e2e/out/
+dsh-routing-suite/
+.agent-teams/
+0001-*.patch
+压缩的仓库用法.txt

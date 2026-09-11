@@ -9,12 +9,13 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { Context } from '@deepseek-ai/cordis'
 import { createCore, type CompressionCore } from 'acp-kernel'
+import { Session } from '@deepseek-ai/dsh-session'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { AcpStateStore } from '../src/state.ts'
 import { makeTools, type ToolEnvironment } from '../src/tools.ts'
 import { rebuildBlockLedger } from '../src/region.ts'
-import { buildTextSession } from './helpers.ts'
+import { appendAssistant, appendTurn, appendUser, buildTextSession, longText } from './helpers.ts'
 
 function makeEnv(limit = 128000): ToolEnvironment {
   return {
@@ -54,7 +55,7 @@ test('M2: kernel blocks rehydrate from the log with tier and original coverage',
   const session = buildTextSession(12)
   const compress = toolOf(env, 'compress')
   await compress.execute({ content: [{ startSeq: 1, endSeq: 5, summary: TIER_SUMMARY }] } as never, fakeExec(session))
-  const summarySeq = rebuildBlockLedger(session.events)[0]!.summarySeq!
+  const summarySeq = rebuildBlockLedger(session.snapshotEvents())[0]!.summarySeq!
   await compress.execute({ content: [{ startSeq: summarySeq, endSeq: summarySeq, summary: TIER_SUMMARY }] } as never, fakeExec(session))
 
   // A FRESH store (restarted engine) rebuilds the kernel state from the log.
@@ -78,9 +79,9 @@ test('M2: rehydrated blocks stay anchorable — tier 3 works after a restart', a
   const session = buildTextSession(12)
   const compress = toolOf(env, 'compress')
   await compress.execute({ content: [{ startSeq: 1, endSeq: 5, summary: TIER_SUMMARY }] } as never, fakeExec(session))
-  const summarySeq = rebuildBlockLedger(session.events)[0]!.summarySeq!
+  const summarySeq = rebuildBlockLedger(session.snapshotEvents())[0]!.summarySeq!
   await compress.execute({ content: [{ startSeq: summarySeq, endSeq: summarySeq, summary: TIER_SUMMARY }] } as never, fakeExec(session))
-  const ledger2 = rebuildBlockLedger(session.events)
+  const ledger2 = rebuildBlockLedger(session.snapshotEvents())
   const tier2Seq = ledger2[1]!.summarySeq!
   assert.equal(ledger2[1]!.tier, 2)
 
@@ -92,7 +93,7 @@ test('M2: rehydrated blocks stay anchorable — tier 3 works after a restart', a
   } as never, fakeExec(session))
   assert.match((result as { text: string }).text, /tier 3/, 'the rehydrated tier-2 block anchors after a restart')
 
-  const after = rebuildBlockLedger(session.events)
+  const after = rebuildBlockLedger(session.snapshotEvents())
   assert.equal(after.length, 3)
   assert.equal(after[2]!.tier, 3)
   assert.deepEqual(after[2]!.parentBlockIds, [ledger2[1]!.blockId])
@@ -108,7 +109,7 @@ test('M2: block topic persists through the log — the acp_status block title su
   } as never, fakeExec(session))
 
   // The durable compaction/summary event and the log-rebuilt ledger carry the topic.
-  const ledger = rebuildBlockLedger(session.events)
+  const ledger = rebuildBlockLedger(session.snapshotEvents())
   assert.equal(ledger[0]!.topic, 'auth subsystem')
 
   // A FRESH store (restarted engine) rehydrates the kernel block WITH the
@@ -127,8 +128,46 @@ test('M2: block topic persists through the log — the acp_status block title su
   await toolOf(env, 'compress').execute({
     content: [{ startSeq: 1, endSeq: 5, summary: TIER_SUMMARY }],
   } as never, fakeExec(plain))
-  const plainLedger = rebuildBlockLedger(plain.events)
+  const plainLedger = rebuildBlockLedger(plain.snapshotEvents())
   assert.equal(plainLedger[0]!.topic, undefined)
   const plainState = new AcpStateStore().stateFor(plain)
   assert.equal(plainState.blocks[0]!.topic, undefined)
+})
+
+function buildNamedTextSession(id: string, count: number): Session {
+  const session = Session.create(id)
+  appendTurn(session, 1)
+  for (let index = 0; index < count; index += 1) {
+    if (index % 2 === 0) appendUser(session, longText('msg', index))
+    else appendAssistant(session, longText('reply', index), 1, index)
+  }
+  return session
+}
+
+test('M2: store cap evicts cold sessions losslessly — rehydration reproduces identical block identity', async () => {
+  const env = makeEnv()
+  const cold = buildNamedTextSession('lru-cold', 12)
+  const warm = buildNamedTextSession('lru-warm', 12)
+  const compress = toolOf(env, 'compress')
+  await compress.execute({ content: [{ startSeq: 1, endSeq: 5, summary: TIER_SUMMARY }] } as never, fakeExec(cold))
+  await compress.execute({ content: [{ startSeq: 1, endSeq: 5, summary: TIER_SUMMARY }] } as never, fakeExec(warm))
+
+  // A cap of ONE keeps only the most recently used session's live state.
+  const capped = new AcpStateStore(1)
+  const before = capped.stateFor(cold)
+  assert.equal(before.blocks.length, 1)
+  assert.equal(before.blocks[0]!.blockId, 'b1')
+  assert.equal(before.nextBlockId, 2)
+  assert.equal(before.nextRunId, 2)
+  capped.stateFor(warm)
+
+  // Cold's next access rehydrates from its log: same bN numbering and the
+  // same continuation counters — indistinguishable from the live state.
+  const after = capped.stateFor(cold)
+  assert.notEqual(after, before, 'the old live state was actually evicted')
+  assert.equal(after.blocks.length, 1)
+  assert.equal(after.blocks[0]!.blockId, 'b1')
+  assert.deepEqual(after.blocks[0]!.effectiveMessageIds, before.blocks[0]!.effectiveMessageIds)
+  assert.equal(after.nextBlockId, 2)
+  assert.equal(after.nextRunId, 2, 'run ids continue after the rehydrated max, not back at r1')
 })

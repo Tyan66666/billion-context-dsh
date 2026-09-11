@@ -1,0 +1,18 @@
+{
+  "name": "basic-compress",
+  "persona": "You are a concise coding agent.",
+  "engine": { "modelContextLimit": 2000, "autoCommand": false },
+  "userTurns": [
+  { "filler": { "topic": "pruning", "count": 250 } },
+  { "filler": { "topic": "ledger", "count": 250 } },
+  { "filler": { "topic": "regions", "count": 250 } },
+  "Please compress the oldest exchange now."
+],
+  "responses": [
+  { "kind": "text", "filler": { "topic": "pruning", "count": 250 } },
+  { "kind": "text", "filler": { "topic": "ledger", "count": 250 } },
+  { "kind": "text", "filler": { "topic": "regions", "count": 250 } },
+  { "kind": "tool", "name": "compress", "argsTemplate": "{\"content\": [{\"startSeq\": {{U1}}, \"endSeq\": {{A1}}, \"summary\": \"Exchange 1: the user asked for a survey of the durable surface model; the assistant answered with 110 numbered notes on pruning behavior, ledger reconciliation, and region transactions. Core topics: surface replacement, checkpoint ledger, replay rebuild.\"}]}" },
+  { "kind": "text", "text": "Compressed the oldest exchange into a checkpoint summary. The ledger now carries it as one block." }
+]
+}

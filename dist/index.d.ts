@@ -33,16 +33,18 @@ import { AcpStateStore } from './state.ts';
 import { type ToolEnvironment } from './tools.ts';
 import { type AcpPrompts, type ResolvedPrompts } from './prompts.ts';
 import { type AcpWindow } from './window.ts';
+import { type SettingsCommandSurface } from './settings.ts';
 export { AcpStateStore } from './state.ts';
 export { kernelConfigFor, type KernelConfigInput } from './config.ts';
 export { ACP_SYSTEM_PROMPT, ACP_SYSTEM_PROMPT_ORDER } from './system-prompt.ts';
 export { DEFAULT_PROMPTS, DEFAULT_RESOLVED, renderSystemPrompt, renderTemplate, resolvePrompts, type AcpPrompts, type NudgePrompts, type PromptInput, type PromptOverride, type RangeTablePrompts, type ResolvedPrompts, type ToolPrompts, } from './prompts.ts';
 export { makeTools, type ToolEnvironment } from './tools.ts';
 export { acpCommand } from './commands.ts';
-export { buildNudge, resolveTokenCount, type NudgeEnvironment, type NudgeOutcome } from './nudge.ts';
+export { buildNudge, resolveTokenCount, EMERGENCY_NUDGE_MAX_PER_TURN, type NudgeEnvironment, type NudgeOutcome } from './nudge.ts';
 export { DEFAULT_CONTEXT_WINDOW, detectContextWindow, projectedContextWindow, windowSourceLabel, type AcpWindow, } from './window.ts';
 export { AlreadyCompressedRangeError, rebuildBlockLedger, resolveSurfaceRange, runCompactionTransaction, shadowedSeqsOf, findOpenTurn, assertNoActiveCompaction, blockRegistry, blockRefForSummarySeq, compactionIdsOfKernelBlocks, summarySeqOfKernelBlock, expandShadowedSeqs, hideCompressToolPair, stripOrphanedSurfaceToolMessages, type AcpBlockLedgerEntry, type CompactionTransactionInput, type ResolvedSurfaceRange, } from './region.ts';
 export { eventsToCoreMessages, projectEvent, surfaceEventsOf, extractEventText } from './messages.ts';
+export { ACP_SETTINGS_NAMESPACE, AcpSettingsSchema, describeSettingsChange, filterSettingsEntry, makeSettingsCommandSurface, parseSettingValue, resolveAcpSettings, SETTINGS_KEYS, SETTING_DEFAULTS, type AcpSettings, type AcpSettingsInput, type SettingsChangeEffect, type SettingsCommandSurface, type SettingsKey, } from './settings.ts';
 export interface AcpConfig {
     /**
      * The context window used for pressure decisions, in tokens. When omitted,
@@ -67,10 +69,11 @@ export interface AcpConfig {
      */
     readonly nudgeMaxContextLimitPct?: number;
     /**
-     * Emergency nudge threshold (bypasses the per-turn dedup). Engine default
-     * 0.85 (down from the kernel/billion-context-pi default 0.95: 95% leaves
-     * the model no room to act before the API rejects, and the host's 80%
-     * compaction-basic line shadows it in standard/code/cordis modes).
+     * Emergency nudge threshold (bypasses the per-turn dedup, but is capped at
+     * EMERGENCY_NUDGE_MAX_PER_TURN = 3 injections per user turn — issue #108).
+     * Engine default 0.85 (down from the kernel/billion-context-pi default 0.95:
+     * 95% leaves the model no room to act before the API rejects, and the host's
+     * 80% compaction-basic line shadows it in standard/code/cordis modes).
      */
     readonly nudgeEmergencyThresholdPct?: number;
     /**
@@ -97,6 +100,13 @@ export interface AcpConfig {
     readonly autoCommand: boolean;
     /** Inject the nudge into `agent/pre-step` when the kernel recommends it. Default true. */
     readonly autoNudge: boolean;
+    /**
+     * Escape hatch: disable the runtime-settings integration entirely
+     * (composition-layer ONLY — deliberately not exposed through the settings
+     * layer itself: a switch that turns off its own plumbing could not be
+     * reached if the plumbing broke). Default: enabled.
+     */
+    readonly settingsEnabled?: boolean;
     /** Per-stage prompt template overrides (nudge / range table / system prompt / tool descriptions). See docs/configurable-prompts-design.md. */
     readonly prompts?: AcpPrompts;
 }
@@ -124,10 +134,18 @@ export declare class AcpCompactionEngine extends CompactionEngine {
      */
     readonly env: ToolEnvironment;
     private readonly lastNudgeTurn;
+    /** Per-session emergency-nudge injection budget for the current user turn (issue #108). */
+    private readonly emergencyNudges;
     /** Successful compress call ids awaiting their tool/result so the pair can be hidden. */
     private readonly compressCallIdsToHide;
     /** Per provider/model route the resolved window (probe failures cached too). */
     private readonly windowCache;
+    /** Live settings snapshot thunk (composition → user settings layer); swapped when the settings provider attaches (SettingsProvider.installSection). */
+    private readSettingsSource;
+    /** The settings service, captured lazily for /acp config (undefined in provider-less processes). */
+    private settingsService;
+    /** /acp config read/write surface. */
+    readonly settingsCommand: SettingsCommandSurface;
     /** Per route the adapter's per-request output cap (the output reservation); null = undisclosed. */
     private readonly outputReservationCache;
     constructor(ctx: Context, config?: Partial<AcpConfig>);
@@ -151,6 +169,16 @@ export declare class AcpCompactionEngine extends CompactionEngine {
      * fallback.
      */
     windowFor(agent: Agent): Promise<AcpWindow>;
+    /**
+     * Diff handler for runtime settings changes: drop the window cache when a
+     * window-related key changed (probe FAILURES are cached too — clearing is
+     * what lets the next pre-step re-probe after a fix), clear the per-turn
+     * nudge dedup when nudges come back on, and warn on order anomalies
+     * (accepted, never rejected — rejecting a write cannot fix an externally
+     * edited settings.yaml, and an invalid stored section would fail the next
+     * boot loud anyway).
+     */
+    private onSettingsChanged;
     /**
      * The adapter's per-request output cap for a route, from one
      * probeModelWindow call (a local catalog lookup — no request is sent),

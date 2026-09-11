@@ -87,13 +87,14 @@ test('config: a lowered over-limit threshold triggers the nudge', () => {
   const session = bigSession()
   const agent = fakeAgent(session)
 
-  const withDefaults = buildNudge(agent, envOf({ modelContextLimit: 300000 }), new Map())
-  assert.ok(withDefaults !== null, '61% fresh usage is mass-ready under kernel 0.0.54 firstSight')
+  const withDefaults = buildNudge(agent, envOf({ modelContextLimit: 300000 }), new Map(), new Map())
+  assert.ok(withDefaults !== null, '61% fresh usage is mass-ready under kernel firstSight')
   assert.equal(withDefaults!.emergency, false)
 
   const withLowMax = buildNudge(
     agent,
     envOf({ modelContextLimit: 300000, nudgeMaxContextLimitPct: 0.5 }),
+    new Map(),
     new Map(),
   )
   assert.ok(withLowMax !== null, 'lowering the over-limit threshold to 50% forces the nudge')
