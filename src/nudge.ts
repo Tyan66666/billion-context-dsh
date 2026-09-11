@@ -21,7 +21,7 @@ import {
 import { createUserMessage, type UserMessage } from '@deepseek-ai/dsh-llm'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { AcpStateStore } from './state.ts'
-import { allLogMessages, eventsToCoreMessages, surfaceEventsOf } from './messages.ts'
+import { allLogMessages, eventsToCoreMessages, isCheckpointNode, surfaceEventsOf } from './messages.ts'
 import { buildCompressibleSeqRanges, findOpenTurn, summarySeqOfKernelBlock, surfaceSummary } from './region.ts'
 import { sessionEventsOf } from './session-events.ts'
 import { kernelConfigFor, type KernelConfigInput } from './config.ts'
@@ -118,17 +118,6 @@ function measuredTokenCount(agent: Agent, coreMessages: CoreMessage[]): number {
   return resolveTokenCount(agent, coreMessages)
 }
 
-/** A compaction checkpoint summary node (`source.plugin === 'compact'`). These
- *  are NOT in any block's `effectiveMessageIds`, so feeding them to the
- *  surface breakdown would count the summary twice — once as `block.summary`
- *  and once as a visible text message (mirror of `/acp` status's exclusion in
- *  src/tools.ts `isCheckpointEvent`). */
-function isCheckpointEvent(event: import('@deepseek-ai/dsh-session').SessionEvent): boolean {
-  if (event.type !== 'user/message') return false
-  const source = (event.data as { source?: { plugin?: string } }).source
-  return source?.plugin === 'compact'
-}
-
 /**
  * Compute a SURFACE-ONLY context breakdown for display, aligned with
  * `acp_status` (kernel `buildStatusReport`/`renderOverview`).
@@ -152,7 +141,7 @@ function isCheckpointEvent(event: import('@deepseek-ai/dsh-session').SessionEven
  * state (same source `buildStatusReport` uses), and the caller must exclude
  * checkpoint summary nodes from `messages` (they are not in any block's
  * `effectiveMessageIds` and would double-count — mirror of `/acp` status's
- * `isCheckpointEvent` exclusion).
+ * `isCheckpointNode` exclusion).
  */
 export function computeSurfaceBreakdown(
   state: CompressionState,
@@ -236,7 +225,7 @@ export function buildNudge(
   // breakdown is display-only and never drives injection, so this override is
   // safe for the decision path.
   const statusMessages = eventsToCoreMessages(
-    surfaceEvents.filter((event) => isCheckpointEvent(event) === false),
+    surfaceEvents.filter((event) => isCheckpointNode(event) === false),
   )
   nudge.contextBreakdown = computeSurfaceBreakdown(turn.state, statusMessages, tokenCount, nudge.contextBreakdown?.growth ?? 0)
   const emergency = nudge.breakdown?.emergencyOverride === 1

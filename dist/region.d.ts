@@ -205,11 +205,52 @@ export declare function openToolCallIds(session: Session): Set<string>;
  */
 export declare function deferCompressPairHide(session: Session, callId: string, resultSeq: number, onError?: (error: unknown) => void): void;
 /**
+ * Newest AGENTS.md instruction row per scope (source file). The host
+ * re-injects a file's instructions when its CURRENT copy is absent from the
+ * surface (deepseek-harness packages/context/agent-instructions presence
+ * gate, index.ts:137/:163 — presence+identity, not payload diff), so
+ * compressing the newest row of a scope makes that file come straight back,
+ * while compressing a STALE copy of the same file is silent. Live-audited
+ * shape (session-f25e4fad): EVERY injection row — baseline and worktree —
+ * carries `source.changes[].scope` = `"<dir>\u0000<file>"` (root
+ * `.\u0000AGENTS.md`, worktree `worktrees/<name>\u0000AGENTS.md`), which is
+ * stable across config tweaks unlike `baselineIdentity`. Tail-scan the log,
+ * group by scope, keep the last seq of each group. O(events), mirrors
+ * indexWatermarkOf. Rows without `changes[]` (legacy shapes) are SKIPPED
+ * entirely: identity is what the host's presence gate needs in order to
+ * re-inject a file, so a scope-less row can never come back and must not be
+ * guarded (the earlier shape gave each its own group, which made every legacy
+ * row a permanent hard-reject — issue #71 review S3).
+ */
+export declare function newestInstructionSeqsOf(session: Session): Set<number>;
+/**
+ * Surface seqs NO caller may compress: the CURRENT (newest) injected
+ * agent-instructions row of every scope, restricted to rows still visible on
+ * the surface (one definition of "current" — `newestInstructionSeqsOf`).
+ * `buildCompressibleSeqRanges` never OFFERS them, and both compress entry
+ * points (`handleCompress` in src/tools.ts, `/acp compress` in
+ * src/commands.ts) probe the RESOLVED span against this set and HARD-REJECT a
+ * covering range before the kernel applies it, so nothing durable lands and no
+ * phantom block can exist. This supersedes the earlier F7 draft (warn only):
+ * folding a current copy reclaims nothing — the host re-injects it — so there
+ * is no legitimate outcome to warn about. Deliberately NARROW (issue #71
+ * review F4): only CURRENT agent-instructions rows — the audited loop driver.
+ * Engine-authored metadata rows (nudge echo, compress-pair stub) stay
+ * foldable like main, and STALE copies of the same file stay compressible —
+ * removing them while the newest copy stays visible is the real cleanup.
+ */
+export declare function guardedSurfaceSeqsOf(session: Session): Set<number>;
+/**
  * Compute compressible spans directly from the surface — independent of the
  * kernel's ref map, which can drift after surface replacements in long
  * sessions and hide large tool results from the nudge range table. Skips the
- * recent protected tail, the last user message, and compaction checkpoints;
- * edges are then balanced through resolveSurfaceRange. Ranges are ordered
+ * recent protected tail (last REAL user turn — injected rows never win it,
+ * see isRealUserTurn), the newest AGENTS.md row of every scope, compaction
+ * checkpoints, and ALL host instruction/policy rows (they are barriers that
+ * split segments — compressing a current instruction row makes the host
+ * re-inject it, the loop this PR fixes). Engine-authored metadata rows (nudge
+ * echo, compress-pair stub) fold into the adjacent real segment like main.
+ * Edges are then balanced through resolveSurfaceRange. Ranges are ordered
  * oldest-first (stable across turns — matches the kernel's `oldest first`).
  * UPSTREAM: this self-computation is a labeled workaround for kernel
  * ref-map drift after surface replacements (AGENTS.md rule 11) — drop it and
