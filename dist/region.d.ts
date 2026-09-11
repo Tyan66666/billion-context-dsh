@@ -35,6 +35,8 @@ export interface AcpBlockLedgerEntry {
     /** The kernel block's raw direct/effective message ids at creation (recorded since the tier feature; absent for legacy). */
     readonly directMessageIds?: readonly string[];
     readonly effectiveMessageIds?: readonly string[];
+    /** B3: acceptance readings that were already green before compression (absent when the compress call carried none). */
+    readonly verifiedReadings?: readonly string[];
     /** Unix epoch ms of the compaction/summary event. */
     readonly createdAt: number;
 }
@@ -118,6 +120,8 @@ export interface CompactionTransactionInput {
     /** The kernel block's direct/effective message ids (raw CoreMessage ids) — recorded for faithful rehydration. */
     readonly directMessageIds?: readonly string[];
     readonly effectiveMessageIds?: readonly string[];
+    /** B3：压缩前已绿的验收读数（结构化，压缩后仍可读）。 */
+    readonly verifiedReadings?: readonly string[];
 }
 type CompactionSummaryData = SessionEventMap['compaction/summary'];
 /**
@@ -129,6 +133,19 @@ type CompactionSummaryData = SessionEventMap['compaction/summary'];
  * readers fall back to the legacy shape. Never `any`.
  */
 export declare function readCompactionSummary(event: SessionEvent): CompactionSummaryData & AcpBlockLedgerPayload;
+/**
+ * B3: read the structured verified readings a compress call recorded for this
+ * block (acceptance checks that were already green before the range was
+ * shadowed — e.g. "t0-fastpath 8/8"). Post-fix writers carry them inside the
+ * admitted `rawOutput` member (AcpBlockLedgerPayload); legacy writers put them
+ * top-level. Absent in either shape → empty array; never throws.
+ */
+export declare function verifiedReadingsOf(event: SessionEvent): string[];
+/**
+ * B1：给摘要块数组的第一个文本块加标源前缀（幂等——已带前缀不重复加）。
+ * 只动文本块，工具/图片块原样保留。
+ */
+export declare function prefixSummaryBlocks(blocks: readonly ContentBlock[]): ContentBlock[];
 /**
  * Run one durable compression transaction. Throws on invalid state; on success
  * the four events are in the log and the surface has one summary node.

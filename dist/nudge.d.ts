@@ -11,6 +11,7 @@ import type { Agent } from '@deepseek-ai/dsh-agent';
 import { AcpStateStore } from './state.ts';
 import { type KernelConfigInput } from './config.ts';
 import { type ResolvedPrompts } from './prompts.ts';
+export declare function stripNudgeGuidance(text: string): string;
 /** Kernel inputs the nudge path shares with the compress tool. */
 export interface NudgeEnvironment extends KernelConfigInput {
     readonly kernel: CompressionCore;

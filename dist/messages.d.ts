@@ -50,6 +50,17 @@ export declare function buildToolCallIndex(events: readonly SessionEvent[]): Rea
  *                        untagged (`toolName: ''`), never "text".
  * Non-surface events project to nothing.
  */
+/**
+ * B1 summary source framing. A compaction summary is MODEL-WRITTEN text, not
+ * user words — injected as a user/message with the same standing as real input,
+ * which let obligation sentences inside summaries read as user directives and
+ * the model's own guesses read as user commitments. The frame says both things
+ * up front. It is applied at creation (src/region.ts writes the framed blocks
+ * to BOTH durable writes) and again at projection (below) as an idempotent
+ * safety net for legacy blocks written before the feature.
+ */
+export declare const SUMMARY_FRAME_PREFIX = "[Model-written summary \u2014 not user words; re-verify any obligations before relying on them]";
+export declare function withSummaryFramePrefix(text: string): string;
 export declare function projectEvent(event: SessionEvent, toolNames?: ReadonlyMap<string, string>): CoreMessage[];
 /** Project a session's message events into CoreMessage[] in log order. */
 export declare function eventsToCoreMessages(events: readonly SessionEvent[], toolNames?: ReadonlyMap<string, string>): CoreMessage[];
