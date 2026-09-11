@@ -6,7 +6,7 @@
 
 import type { CommandDefinition } from '@deepseek-ai/dsh-commands'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import { currentInstructionRowsInSpan, protectedRowRejectionNote, resolveEffectiveWindow, type ToolEnvironment } from './tools.ts'
+import { guardedRowsInSpan, protectedRowRejectionNote, resolveEffectiveWindow, type ToolEnvironment } from './tools.ts'
 import { resolveTokenCount } from './nudge.ts'
 import { kernelConfigFor } from './config.ts'
 import {
@@ -105,15 +105,19 @@ function compressText(env: ToolEnvironment, agent: Agent, args: string[]): strin
   // unconditionally, so the tokens come straight back and nothing is
   // reclaimed. Explicit intent does not override that arithmetic; older
   // copies of the same file stay compressible.
-  const instructionHits = currentInstructionRowsInSpan(guardedSurfaceSeqsOf(session), start, end)
-  if (instructionHits.length > 0) {
-    return protectedRowRejectionNote(start, end, instructionHits)
-  }
-  // The RESOLVED edges define the claim span, never the raw inputs:
-  // resolveSurfaceRange may adjust them to a balanced cut, and a raw edge
-  // absent from the surface makes shadowedSeqsOf slice a garbage span that
-  // assertProvenance rejects when the transaction lands (AGENTS.md rule 12).
+  // Probe the span that will ACTUALLY be shadowed — the positional slice the
+  // transaction prices and `assertProvenance` verifies — never a numeric
+  // `start <= seq <= end` interval: the surface is locally non-monotonic after
+  // earlier replacements, so a legitimate range can have a current instruction
+  // row numerically inside its edges while the sliced span excludes it (issue
+  // #71 review B1). Resolved edges, not the raw inputs: resolveSurfaceRange may
+  // move them to a balanced cut, and a raw edge absent from the surface makes
+  // shadowedSeqsOf slice a garbage span.
   const shadowed = shadowedSeqsOf(session, start, end)
+  const instructionHits = guardedRowsInSpan(guardedSurfaceSeqsOf(session), shadowed)
+  if (instructionHits.length > 0) {
+    return protectedRowRejectionNote(start, end, instructionHits, shadowed)
+  }
   // Price the reclaimed tokens in the HOST's token vocabulary (rule 12):
   // prefer the live meter's per-node prices, fall back to the exact mirror.
   const shadowedTokens = shadowedTokensViaMeter(session, shadowed, agent.ctx)

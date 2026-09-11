@@ -871,8 +871,11 @@ export function deferCompressPairHide(
  * `.\u0000AGENTS.md`, worktree `worktrees/<name>\u0000AGENTS.md`), which is
  * stable across config tweaks unlike `baselineIdentity`. Tail-scan the log,
  * group by scope, keep the last seq of each group. O(events), mirrors
- * indexWatermarkOf. Rows without `changes[]` (legacy shapes) get their own
- * group so they can never be treated as superseded.
+ * indexWatermarkOf. Rows without `changes[]` (legacy shapes) are SKIPPED
+ * entirely: identity is what the host's presence gate needs in order to
+ * re-inject a file, so a scope-less row can never come back and must not be
+ * guarded (the earlier shape gave each its own group, which made every legacy
+ * row a permanent hard-reject — issue #71 review S3).
  */
 export function newestInstructionSeqsOf(session: Session): Set<number> {
   const newest = new Map<string, number>()
@@ -889,7 +892,10 @@ export function newestInstructionSeqsOf(session: Session): Set<number> {
       .map((change) => (typeof change?.scope === 'string' ? change.scope : ''))
       .filter((scope) => scope.length > 0)
     if (scopes.length === 0) {
-      newest.set(`row:${seq}`, seq)
+      // No identity: the host's presence gate (deepseek-harness
+      // packages/context/agent-instructions) needs a scope to know WHICH file
+      // went missing, so this row can never be re-injected. Guarding it would
+      // hard-reject hand-built ranges over it for nothing (S3).
       continue
     }
     for (const scope of scopes) newest.set(scope, seq)
@@ -898,16 +904,20 @@ export function newestInstructionSeqsOf(session: Session): Set<number> {
 }
 
 /**
- * Surface seqs a compression should think twice about absorbing — the
- * ADVISORY twin of `buildCompressibleSeqRanges`'s protection. The range table
- * never OFFERS these rows, but nothing stops a hand-built compress range from
- * covering them, so `handleCompress` checks the landed span against this set
- * and appends an advisory line when it does (F7 decision: warn, don't
- * reject — the compression is safe and self-healing, a swallowed current
- * instruction copy bounces back exactly once). Deliberately NARROW (issue #71
+ * Surface seqs NO caller may compress: the CURRENT (newest) injected
+ * agent-instructions row of every scope, restricted to rows still visible on
+ * the surface (one definition of "current" — `newestInstructionSeqsOf`).
+ * `buildCompressibleSeqRanges` never OFFERS them, and both compress entry
+ * points (`handleCompress` in src/tools.ts, `/acp compress` in
+ * src/commands.ts) probe the RESOLVED span against this set and HARD-REJECT a
+ * covering range before the kernel applies it, so nothing durable lands and no
+ * phantom block can exist. This supersedes the earlier F7 draft (warn only):
+ * folding a current copy reclaims nothing — the host re-injects it — so there
+ * is no legitimate outcome to warn about. Deliberately NARROW (issue #71
  * review F4): only CURRENT agent-instructions rows — the audited loop driver.
  * Engine-authored metadata rows (nudge echo, compress-pair stub) stay
- * foldable like main, and skill-catalog/policy rows are not warned on.
+ * foldable like main, and STALE copies of the same file stay compressible —
+ * removing them while the newest copy stays visible is the real cleanup.
  */
 export function guardedSurfaceSeqsOf(session: Session): Set<number> {
   const guarded = new Set<number>()

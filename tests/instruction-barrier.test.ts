@@ -32,8 +32,8 @@ import { Session } from '@deepseek-ai/dsh-session'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { classifySurfaceEvent, isRealUserTurn } from '../src/messages.ts'
 import { acpCommand } from '../src/commands.ts'
-import { buildCompressibleSeqRanges, newestInstructionSeqsOf, guardedSurfaceSeqsOf } from '../src/region.ts'
-import { makeTools, currentInstructionRowsInSpan, protectedRowRejectionNote, type ToolEnvironment } from '../src/tools.ts'
+import { buildCompressibleSeqRanges, guardedSurfaceSeqsOf, newestInstructionSeqsOf, runCompactionTransaction, shadowedSeqsOf } from '../src/region.ts'
+import { guardedRowsInSpan, makeTools, protectedRowRejectionNote, type ToolEnvironment } from '../src/tools.ts'
 import { AcpStateStore } from '../src/state.ts'
 import { sessionEventsOf } from '../src/session-events.ts'
 import { appendTurn, appendUser, appendAssistant, appendToolCall, appendToolResult, buildTextSession, longText } from './helpers.ts'
@@ -143,6 +143,64 @@ test('PR1: the range table splits at instruction rows — no offered range conta
   assert.ok(covers(4), 'the post-barrier segment is still offered')
 })
 
+test('PR1: the barrier (not the newest-row pin) excludes NON-newest instruction rows', () => {
+  const session = Session.create('barrier-nonnewest')
+  appendTurn(session, 1)
+  appendUser(session, longText('q0', 0))            // seq 1
+  appendAssistant(session, longText('a0', 1), 1, 1) // seq 2
+  // A copy that a later row supersedes: the newest-row pin does NOT cover it,
+  // so only the instruction BARRIER keeps it out of the range table. Without a
+  // row like this the barrier has no killer — the pin alone already splits the
+  // surface, so a broken barrier would go unnoticed.
+  const staleSeq = appendInstruction(session, '.\u0000AGENTS.md', 'v1')
+  appendUser(session, longText('q1', 2))
+  appendAssistant(session, longText('a1', 3), 1, 3)
+  // A policy row that is not an AGENTS.md row at all: never pinned either
+  // (`newestInstructionSeqsOf` only tracks agent-instructions rows).
+  const catalogSeq = appendPluginRow(session, { kind: 'skill-catalog' })
+  appendUser(session, longText('q2', 4))
+  appendAssistant(session, longText('a2', 5), 1, 5)
+  const newestSeq = appendInstruction(session, '.\u0000AGENTS.md', 'v2')
+
+  const pinned = newestInstructionSeqsOf(session)
+  assert.ok(pinned.has(newestSeq), 'the newest copy is pinned')
+  assert.ok(!pinned.has(staleSeq), 'the stale copy is NOT pinned — the barrier alone must exclude it')
+  assert.ok(!pinned.has(catalogSeq), 'a skill catalog is NOT pinned — the barrier alone must exclude it')
+
+  const ranges = buildCompressibleSeqRanges(session, { preserveRecent: 0 })
+  const covers = (seq: number): boolean => ranges.some((range) => range.start <= seq && seq <= range.end)
+  assert.ok(!covers(staleSeq), `no offered range may contain the stale instruction row (seq ${staleSeq})`)
+  assert.ok(!covers(catalogSeq), `no offered range may contain the skill-catalog row (seq ${catalogSeq})`)
+  assert.ok(!covers(newestSeq), 'nor the newest copy (pinned as well as barred)')
+  assert.ok(ranges.length >= 2, `segments split at the instruction rows (got ${ranges.length})`)
+  assert.ok(covers(1) && covers(2), 'the first real segment is still offered')
+})
+
+test('PR1: engine-authored metadata rows stay foldable — a nudge echo never splits a segment', () => {
+  const session = Session.create('metadata-fold')
+  appendTurn(session, 1)
+  appendUser(session, longText('q0', 0))            // seq 1
+  appendAssistant(session, longText('a0', 1), 1, 1) // seq 2
+  // The engine's own nudge echo (src/nudge.ts writes plugin 'acp-nudge'). Its
+  // content is derived from already-visible messages, so main folds it into the
+  // adjacent real segment — if the classifier ever filed it as a barrier, the
+  // range table would fragment for no gain. This test pins that parity.
+  const echoSeq = appendPluginRow(session, { kind: 'plugin', plugin: 'acp-nudge' })
+  appendUser(session, longText('q1', 2))
+  appendAssistant(session, longText('a1', 3), 1, 3)
+
+  assert.equal(
+    classifySurfaceEvent(sessionEventsOf(session)[echoSeq]!),
+    'metadata',
+    'a nudge echo is engine-authored metadata, never a barrier',
+  )
+  const ranges = buildCompressibleSeqRanges(session, { preserveRecent: 0 })
+  assert.ok(
+    ranges.some((range) => range.start <= echoSeq && echoSeq <= range.end),
+    `a range must fold ACROSS the nudge echo (seq ${echoSeq}) — metadata rows are not barriers`,
+  )
+})
+
 test('PR1: tail-scan regression — the REAL last user message is protected, not the injected row', () => {
   const session = Session.create('tail-scan')
   appendTurn(session, 1)
@@ -179,7 +237,7 @@ test('PR1: newestInstructionSeqsOf groups per scope — one newest per file, wor
   assert.ok(!newest.has(wtV1), 'superseded per worktree scope too (scope key is file-level, not session-level)')
   assert.ok(newest.has(rootV2), 'root AGENTS.md newest row guarded')
   assert.ok(newest.has(wtV2), 'worktree AGENTS.md newest row guarded independently')
-  assert.ok(newest.has(legacy), 'a row without changes[] has no file identity — conservatively never superseded')
+  assert.ok(!newest.has(legacy), 'a row without changes[] has no file identity — the host cannot re-inject it, so guarding it would only block compression (issue #71 review S3)')
 })
 
 test('PR1: guardedSurfaceSeqsOf keeps only CURRENT agent-instructions rows', () => {
@@ -198,18 +256,21 @@ test('PR1: guardedSurfaceSeqsOf keeps only CURRENT agent-instructions rows', () 
 
 test('PR1: current-instruction-row gate — pure helpers pin the rejection', () => {
   const guarded = new Set([5, 6])
-  assert.deepEqual(currentInstructionRowsInSpan(guarded, 1, 3), [], 'no overlap — no rejection')
-  assert.deepEqual(currentInstructionRowsInSpan(new Set(), 5, 9), [], 'empty guarded set — no rejection')
-  assert.deepEqual(currentInstructionRowsInSpan(guarded, 1, 5), [5], 'boundary-inclusive hit')
-  assert.deepEqual(currentInstructionRowsInSpan(new Set([7, 5]), 1, 9), [5, 7], 'hits come back sorted')
+  assert.deepEqual(guardedRowsInSpan(guarded, [1, 2, 3]), [], 'no overlap — no rejection')
+  assert.deepEqual(guardedRowsInSpan(new Set(), [5, 6, 7, 8, 9]), [], 'empty guarded set — no rejection')
+  assert.deepEqual(guardedRowsInSpan(guarded, [1, 2, 3, 4, 5]), [5], 'a guarded seq the span carries is a hit')
+  assert.deepEqual(guardedRowsInSpan(new Set([7, 5]), [9, 7, 5]), [5, 7], 'hits come back sorted')
+  // Positional, not numeric (issue #71 review B1): a seq the span does not carry is
+  // no hit even when it sits numerically between the span's edges.
+  assert.deepEqual(guardedRowsInSpan(new Set([5]), [1, 9]), [], 'seq 5 sits between 1 and 9 but the span does not carry it')
 
-  const one = protectedRowRejectionNote(1, 6, [5])
+  const one = protectedRowRejectionNote(1, 6, [5], [1, 2, 3, 4, 5, 6])
   assert.match(one, /seqs 1\.\.6 rejected/)
   assert.match(one, /1 CURRENT injected instruction row\(s\) \(seq 5\)/)
   assert.match(one, /re-injects the newest AGENTS\.md copy/)
   assert.match(one, /stale copies/, 'the model is pointed at the stale-copy escape')
 
-  const many = protectedRowRejectionNote(1, 9, [5, 6, 7, 8, 9])
+  const many = protectedRowRejectionNote(1, 9, [5, 6, 7, 8, 9], [1, 2, 3, 4, 5, 6, 7, 8, 9])
   assert.match(many, /5 CURRENT injected instruction row\(s\) \(seq 5, 6, 7, 8 \+1 more\)/)
 })
 
@@ -335,4 +396,100 @@ test('PR1: /acp compress rejects a current instruction row exactly like the tool
   const staleOnly = await run(`compress 1 5 ${summary}`)
   assert.equal(staleOnly.kind, 'success')
   assert.match(staleOnly.text, /Compressed seqs 1\.\.5/, 'a stale-copy span compresses normally')
+})
+
+test('PR1: the guard probes the POSITIONAL span, not the numeric interval (issue #71 review B1)', () => {
+  const session = Session.create('nonmonotonic-guard')
+  appendTurn(session, 1)
+  appendUser(session, longText('q0', 0))            // seq 1
+  appendAssistant(session, longText('a0', 1), 1, 1) // seq 2
+  appendUser(session, longText('q1', 2))            // seq 3
+  appendAssistant(session, longText('a1', 3), 1, 3) // seq 4
+  const cp1 = runCompactionTransaction(session, {
+    start: 1, end: 2, shadowedSeqs: [1, 2],
+    summary: [{ type: 'text', text: 'First folded span summary.' }],
+    shadowedTokenCount: 10, provider: 'test-provider', model: 'test-model',
+  })
+  // The host appends the CURRENT instruction copy after that checkpoint ...
+  const currentRow = appendInstruction(session, '.\u0000AGENTS.md', 'v2')
+  // ... and a LATER compression of a span that sits before the row splices its
+  // checkpoint in ahead of the row. The surface is now locally NON-monotonic:
+  // [cp1, cp2, row] with cp2 numerically GREATER than the row.
+  const cp2 = runCompactionTransaction(session, {
+    start: 3, end: 4, shadowedSeqs: [3, 4],
+    summary: [{ type: 'text', text: 'Second folded span summary.' }],
+    shadowedTokenCount: 10, provider: 'test-provider', model: 'test-model',
+  })
+  const cp1Seq = cp1.seqs[2]!
+  const cp2Seq = cp2.seqs[2]!
+  assert.deepEqual(session.surface.nodes, [cp1Seq, cp2Seq, currentRow], 'fixture: the surface is non-monotonic')
+  assert.ok(cp1Seq < currentRow && currentRow < cp2Seq, 'the current row sits NUMERICALLY inside cp1..cp2')
+
+  const shadowed = shadowedSeqsOf(session, cp1Seq, cp2Seq)
+  assert.deepEqual(shadowed, [cp1Seq, cp2Seq], 'the positional span excludes the row that sits after it')
+  const guarded = guardedSurfaceSeqsOf(session)
+  assert.ok(guarded.has(currentRow), 'the row is the current copy of its scope')
+  assert.deepEqual(guardedRowsInSpan(guarded, shadowed), [], 'no guarded row lies inside the positional span — the distill must be allowed')
+  assert.deepEqual(
+    [...guarded].filter((seq) => seq >= cp1Seq && seq <= cp2Seq),
+    [currentRow],
+    'the numeric-interval probe this replaced flagged the row: exactly the false positive that rejected the call the nudge hands the model',
+  )
+})
+
+test('PR1: host CONTENT plugin rows fold like main — neither policy nor the user speaking', () => {
+  const session = Session.create('real-plugin-rows')
+  appendTurn(session, 1)
+  appendUser(session, longText('q0', 0))
+  appendAssistant(session, longText('a0', 1), 1, 1)
+  const contentRows = [
+    '@deepseek-ai/dsh-system-prompt', // dynamic-context snapshot (dsh-agent-loop)
+    'user-approval',                  // approval-policy notice (dsh-user-approval)
+    'tools-ptc',                      // deferred tool context (dsh-tools)
+  ].map((plugin) => ({ plugin, seq: appendPluginRow(session, { kind: 'plugin', plugin }) }))
+  appendUser(session, longText('q1', 2))
+  appendAssistant(session, longText('a1', 3), 1, 3)
+
+  for (const { plugin, seq } of contentRows) {
+    assert.equal(classifySurfaceEvent(sessionEventsOf(session)[seq]!), 'real', `${plugin} folds like real content`)
+    assert.equal(isRealUserTurn(sessionEventsOf(session)[seq]!), false, `${plugin} must never win the protected tail`)
+  }
+  const ranges = buildCompressibleSeqRanges(session, { preserveRecent: 0 })
+  const covers = (seq: number): boolean => ranges.some((range) => range.start <= seq && seq <= range.end)
+  assert.ok(contentRows.every(({ seq }) => covers(seq)), 'folding them is not silently disabled — main compressed these')
+
+  // The conservative default is untouched: a plugin nobody audited is a barrier.
+  const unknown = appendPluginRow(session, { kind: 'plugin', plugin: 'future-unknown' })
+  assert.equal(classifySurfaceEvent(sessionEventsOf(session)[unknown]!), 'instruction')
+  const after = buildCompressibleSeqRanges(session, { preserveRecent: 0 })
+  assert.ok(!after.some((range) => range.start <= unknown && unknown <= range.end), 'an unknown plugin still acts as a barrier')
+})
+
+test('PR1: an identity-less instruction row is never guarded (issue #71 review S3)', () => {
+  const session = Session.create('legacy-instruction-row')
+  appendTurn(session, 1)
+  appendUser(session, longText('q0', 0))
+  appendAssistant(session, longText('a0', 1), 1, 1)
+  // Legacy shape (no `changes[]`): the host's presence gate needs a scope to
+  // know WHICH file went missing, so this row can never be re-injected. Guarding
+  // it (the earlier shape treated every scope-less row as "newest") made each one
+  // a permanent hard-reject.
+  const legacySeq = appendInstructionNoChanges(session)
+  appendUser(session, longText('q1', 2))
+  appendAssistant(session, longText('a1', 3), 1, 3)
+
+  const guarded = guardedSurfaceSeqsOf(session)
+  assert.ok(!guarded.has(legacySeq), 'a scope-less row is not guarded')
+  assert.ok(!newestInstructionSeqsOf(session).has(legacySeq), 'nor pinned as the newest copy of a scope')
+  assert.deepEqual(guardedRowsInSpan(guarded, [legacySeq]), [], 'a hand-built range over it is not hard-rejected')
+  assert.equal(classifySurfaceEvent(sessionEventsOf(session)[legacySeq]!), 'instruction', 'the range table still leaves it out (conservative barrier)')
+})
+
+test('PR1: the rejection names the compressible slices so the model can re-cut instead of retrying', () => {
+  const note = protectedRowRejectionNote(10, 40, [20], [10, 11, 12, 20, 30, 31])
+  assert.match(note, /seq 20/, 'the offending row is named')
+  assert.match(note, /seq 10\.\.12 and 30\.\.31/, 'the legal slices on both sides are named')
+  assert.match(note, /separate content entries/, 'the model gets an actionable re-cut, not just "shrink the range"')
+  const fullyCovered = protectedRowRejectionNote(10, 12, [10, 12], [10, 11, 12])
+  assert.match(fullyCovered, /no part of this span is compressible/, 'a fully covered span says so instead of implying a cut exists')
 })

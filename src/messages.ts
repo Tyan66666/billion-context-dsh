@@ -256,6 +256,25 @@ export const METADATA_PLUGINS: ReadonlySet<string> = new Set([
   'billion-context-dsh', // compress-pair replacement stub (src/region.ts)
 ])
 
+/**
+ * Host plugins whose rows are real CONTENT, not policy: folding them reclaims
+ * tokens and provokes nothing, so they fold exactly like an assistant turn.
+ *  - '@deepseek-ai/dsh-system-prompt' (dsh-agent-loop): dynamic-context
+ *    snapshot rows. The host appends a new row only when the snapshot TEXT
+ *    changes (`if (this.retained?.text === snapshot) return`), so removing an
+ *    old row never re-appends it — long sessions just accumulate them.
+ *  - 'user-approval' (dsh-user-approval): one-shot approval-policy notice.
+ *  - 'tools-ptc' (dsh-tools): deferred tool context, can carry image blocks.
+ * A plugin NOT listed here still falls to 'instruction' below, so a future
+ * presence-driven injection channel stays protected by default (issue #71
+ * review B2).
+ */
+const REAL_CONTENT_PLUGINS: ReadonlySet<string> = new Set([
+  '@deepseek-ai/dsh-system-prompt',
+  'user-approval',
+  'tools-ptc',
+])
+
 /** Known host policy kinds that must never be folded (safe-listing beyond `plugin`). */
 const HOST_INSTRUCTION_KINDS: ReadonlySet<string> = new Set([
   'agent-instructions', // AGENTS.md injection (hook shape: {kind:'agent-instructions', form:'instructions'})
@@ -287,7 +306,9 @@ export function classifySurfaceEvent(event: SessionEvent): SurfaceEventClass {
   if (kind === 'user') return 'real' // real user turn (host stamps {kind:'user'})
   if (kind === 'plugin') {
     if (source.plugin !== undefined && METADATA_PLUGINS.has(source.plugin)) return 'metadata'
-    // Unknown plugin names are policy rows until proven otherwise.
+    if (source.plugin !== undefined && REAL_CONTENT_PLUGINS.has(source.plugin)) return 'real'
+    // Unknown plugin names are policy rows until proven otherwise: a future
+    // presence-driven injection must never silently become compressible.
     return 'instruction'
   }
   if (kind !== undefined && HOST_INSTRUCTION_KINDS.has(kind)) return 'instruction'
@@ -310,6 +331,10 @@ export function classifySurfaceEvent(event: SessionEvent): SurfaceEventClass {
 export function isRealUserTurn(event: SessionEvent): boolean {
   if (event.type !== 'user/message') return false
   if (classifySurfaceEvent(event) !== 'real') return false
-  const kind = (event.data as { source?: { kind?: string } }).source?.kind
-  return kind !== 'subagent-report' && kind !== 'subagent-settled'
+  const source = (event.data as { source?: { kind?: string; plugin?: string } }).source
+  // Host content rows that are NOT the user speaking (dynamic-context snapshot,
+  // approval notice, deferred tool context): foldable, but they must never win
+  // the protection window — that is exactly the bug class issue #71 fixes.
+  if (source?.plugin !== undefined && REAL_CONTENT_PLUGINS.has(source.plugin)) return false
+  return source?.kind !== 'subagent-report' && source?.kind !== 'subagent-settled'
 }
