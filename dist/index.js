@@ -4,7 +4,7 @@ import {
   ManualCompactionError
 } from "@deepseek-ai/dsh-compaction";
 
-// ../../node_modules/acp-kernel/dist/index.js
+// node_modules/acp-kernel/dist/index.js
 import { createRequire } from "module";
 var REF_WIDTH = 5;
 var MIN_INDEX = 1;
@@ -2635,42 +2635,9 @@ function makePreview(text, query, len) {
   return prefix + text.slice(start, end).trim() + suffix;
 }
 
-// src/lru.ts
-var DEFAULT_SESSION_CACHE_LIMIT = 512;
-var LruMap = class extends Map {
-  maxEntries;
-  constructor(maxEntries) {
-    super();
-    this.maxEntries = Math.max(1, Math.floor(maxEntries));
-  }
-  get(key) {
-    if (!super.has(key)) return void 0;
-    const value = super.get(key);
-    super.delete(key);
-    super.set(key, value);
-    return value;
-  }
-  set(key, value) {
-    super.delete(key);
-    super.set(key, value);
-    while (this.size > this.maxEntries) {
-      const oldest = this.keys().next().value;
-      if (oldest === void 0) break;
-      super.delete(oldest);
-    }
-    return this;
-  }
-};
-
 // src/region.ts
 import { randomUUID } from "crypto";
-import {
-  CompactionId,
-  compactCheckpointSource,
-  toolPairingBalancedAfter,
-  toolPairingBalancedBefore
-} from "@deepseek-ai/dsh-compaction";
-import { createAssistantMessage, createUserMessage } from "@deepseek-ai/dsh-llm";
+import { CompactionId, compactCheckpointSource } from "@deepseek-ai/dsh-compaction";
 
 // src/session-events.ts
 function sessionEventsOf(session) {
@@ -2683,6 +2650,78 @@ function eventAtOf(session, seq) {
   if (typeof eventAt === "function") return eventAt.call(session, seq);
   return session.events[seq];
 }
+
+// src/tool-pairing.ts
+var balanceCacheBySession = /* @__PURE__ */ new WeakMap();
+function eventDelta(event) {
+  if (event.type === "tool/result") return -1;
+  if (event.type === "assistant/message") {
+    const content = event.data.message?.content;
+    if (!Array.isArray(content)) return 0;
+    let calls = 0;
+    for (const block of content) {
+      if (block !== null && typeof block === "object" && block.type === "tool-call") calls += 1;
+    }
+    return calls;
+  }
+  return 0;
+}
+function eventForSeq(session, seq) {
+  const event = eventAtOf(session, seq);
+  if (event === void 0 || event.seq !== seq) {
+    throw new Error(`tool-pairing balance: surface seq ${seq} has no matching session event (corrupt surface)`);
+  }
+  return event;
+}
+function extendCache(session, cache2, seqs) {
+  const processed = cache2.cutBalanced.length - 1;
+  const tail = seqs.slice(processed);
+  const pendingCuts = [];
+  let inProgressToolCalls = cache2.inProgressToolCalls;
+  for (const seq of tail) {
+    inProgressToolCalls += eventDelta(eventForSeq(session, seq));
+    if (inProgressToolCalls < 0) {
+      throw new Error(`tool-pairing balance: tool/result at surface seq ${seq} has no matching tool-call (corrupt surface)`);
+    }
+    pendingCuts.push(inProgressToolCalls === 0);
+  }
+  tail.forEach((seq, offset) => cache2.indexBySeq.set(seq, processed + offset));
+  cache2.cutBalanced = cache2.cutBalanced.concat(pendingCuts);
+  cache2.inProgressToolCalls = inProgressToolCalls;
+  return cache2;
+}
+function balanceCache(session) {
+  const seqs = session.surface.nodes;
+  const generation = session.surface.replaceGeneration;
+  const cached = balanceCacheBySession.get(session);
+  if (cached === void 0 || cached.generation !== generation || cached.cutBalanced.length - 1 > seqs.length) {
+    const rebuilt = extendCache(session, {
+      generation,
+      cutBalanced: [true],
+      indexBySeq: /* @__PURE__ */ new Map(),
+      inProgressToolCalls: 0
+    }, seqs);
+    balanceCacheBySession.set(session, rebuilt);
+    return rebuilt;
+  }
+  if (cached.cutBalanced.length - 1 < seqs.length) return extendCache(session, cached, seqs);
+  return cached;
+}
+function cutBalance(cache2, seq, offset) {
+  const index = cache2.indexBySeq.get(seq);
+  const balanced = index === void 0 ? void 0 : cache2.cutBalanced[index + offset];
+  if (balanced === void 0) throw new Error(`tool-pairing balance: surface seq ${seq} not found`);
+  return balanced;
+}
+function toolPairingBalancedBefore(session, seq) {
+  return cutBalance(balanceCache(session), seq, 0);
+}
+function toolPairingBalancedAfter(session, seq) {
+  return cutBalance(balanceCache(session), seq, 1);
+}
+
+// src/region.ts
+import { createAssistantMessage, createUserMessage } from "@deepseek-ai/dsh-llm";
 
 // src/messages.ts
 function extractText(content) {
@@ -2874,7 +2913,7 @@ function shadowedTokensViaMeter(session, seqs, ctx) {
   try {
     const meter = ctx?.get?.("tokenMeter");
     if (meter?.measure !== void 0) {
-      const bySeq = new Map(meter.measure(session).nodes.map((node) => [node.seq, node.tokens]));
+      const bySeq = new Map(meter.measure(session).nodes.map((node) => [node.seq, node.heuristicTokens ?? node.tokens]));
       let total = 0;
       let missing = false;
       for (const seq of seqs) {
@@ -3536,29 +3575,8 @@ function nextBlockIdAfter(events) {
   }
   return max + 1;
 }
-function nextRunIdAfter(blocks) {
-  let max = 0;
-  for (const block of blocks) {
-    const num = Number(block.runId.slice(1));
-    if (Number.isInteger(num)) max = Math.max(max, num);
-  }
-  return max + 1;
-}
 var AcpStateStore = class {
-  /**
-   * Live kernel states, capped by an LRU policy (issue #113): once the cap is
-   * reached the coldest session's state is dropped, and its next access
-   * rehydrates through stateFor's log-rebuild path below. Rehydration is
-   * deterministic — bN ids are recorded in the durable event or synthesised
-   * in ledger order, and run ids continue after the rehydrated max — so block
-   * identity survives eviction exactly as it survives a restart. Kernel
-   * fields that reset on eviction (tokenSnapshot, nudge cadence, stats
-   * counters) all self-heal on the session's next turn.
-   */
-  states;
-  constructor(limit = DEFAULT_SESSION_CACHE_LIMIT) {
-    this.states = new LruMap(limit);
-  }
+  states = /* @__PURE__ */ new Map();
   /** Kernel state for one session, initialised on first access. */
   stateFor(session) {
     const id = session.id;
@@ -3569,7 +3587,6 @@ var AcpStateStore = class {
     if (events.some((event) => event.type === "compaction/summary")) {
       state.blocks = rebuildKernelBlocks(events);
       state.nextBlockId = nextBlockIdAfter(events);
-      state.nextRunId = nextRunIdAfter(state.blocks);
     }
     this.states.set(id, state);
     return state;
@@ -3776,7 +3793,8 @@ function rangeTable(session, prompts = DEFAULT_RESOLVED) {
 function measuredTokenCount(agent, coreMessages) {
   return resolveTokenCount(agent, coreMessages);
 }
-function buildNudge(agent, env, lastNudgeTurn) {
+var EMERGENCY_NUDGE_MAX_PER_TURN = 3;
+function buildNudge(agent, env, lastNudgeTurn, emergencyNudges, onEmergencyCapHit) {
   const session = agent.session;
   const state = env.store.stateFor(session);
   const coreMessages = allLogMessages(session);
@@ -3789,9 +3807,21 @@ function buildNudge(agent, env, lastNudgeTurn) {
   if (nudge === void 0 || !nudge.shouldInject) return null;
   const emergency = nudge.breakdown?.emergencyOverride === 1;
   const turnNumber = findOpenTurn(sessionEventsOf(session)) ?? 0;
-  const alreadyShown = !emergency && lastNudgeTurn.get(session.id) === turnNumber;
-  if (alreadyShown) return null;
-  lastNudgeTurn.set(session.id, turnNumber);
+  if (!emergency) {
+    if (lastNudgeTurn.get(session.id) === turnNumber) return null;
+    lastNudgeTurn.set(session.id, turnNumber);
+  } else {
+    const record = emergencyNudges.get(session.id);
+    if (record !== void 0 && record.turn === turnNumber) {
+      if (record.count >= EMERGENCY_NUDGE_MAX_PER_TURN) {
+        onEmergencyCapHit?.();
+        return null;
+      }
+      record.count += 1;
+    } else {
+      emergencyNudges.set(session.id, { turn: turnNumber, count: 1 });
+    }
+  }
   const text = buildNudgeText(nudge, emergency, session, env.prompts);
   const message = createUserMessage2({
     content: [{ type: "text", text }],
@@ -4591,7 +4621,9 @@ var AcpCompactionEngine = class extends CompactionEngine {
    * revive lost-config bugs with every unit test green.
    */
   env;
-  lastNudgeTurn = new LruMap(DEFAULT_SESSION_CACHE_LIMIT);
+  lastNudgeTurn = /* @__PURE__ */ new Map();
+  /** Per-session emergency-nudge injection budget for the current user turn (issue #108). */
+  emergencyNudges = /* @__PURE__ */ new Map();
   /** Successful compress call ids awaiting their tool/result so the pair can be hidden. */
   compressCallIdsToHide = /* @__PURE__ */ new Set();
   /** Per provider/model route the resolved window (probe failures cached too). */
@@ -4668,7 +4700,17 @@ var AcpCompactionEngine = class extends CompactionEngine {
       const decision = await next();
       if (decision.kind === "reject") return decision;
       const window = await this.windowFor(payload.agent);
-      const outcome = buildNudge(payload.agent, { ...env, modelContextLimit: window.limit }, this.lastNudgeTurn);
+      const outcome = buildNudge(
+        payload.agent,
+        { ...env, modelContextLimit: window.limit },
+        this.lastNudgeTurn,
+        this.emergencyNudges,
+        () => {
+          ctx.logger.warn(
+            `billion-context-dsh: emergency nudge suppressed \u2014 per-turn budget of ${EMERGENCY_NUDGE_MAX_PER_TURN} spent (session ${payload.agent.session.id}); pressure is still above the emergency threshold`
+          );
+        }
+      );
       if (outcome === null) return decision;
       return { kind: "enter", messages: [...decision.messages, outcome.message] };
     });
@@ -4811,6 +4853,7 @@ export {
   DEFAULT_CONTEXT_WINDOW,
   DEFAULT_PROMPTS,
   DEFAULT_RESOLVED,
+  EMERGENCY_NUDGE_MAX_PER_TURN,
   acpCommand,
   assertNoActiveCompaction,
   blockRefForSummarySeq,

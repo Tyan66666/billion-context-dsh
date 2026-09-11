@@ -3,7 +3,7 @@
 [中文](./README.md) | [English](./README.en.md)
 
 > **⚠️ 测试版声明——请勿用于生产环境**
-> 本项目（**v0.2.20**）仍处于开发中的测试版。[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 本身也处于**公开测试版**阶段。**请勿将两者用于工程化 / 生产环境**——预期会有破坏性变更与粗糙之处。
+> 本项目（**v0.2.21**）仍处于开发中的测试版。[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 本身也处于**公开测试版**阶段。**请勿将两者用于工程化 / 生产环境**——预期会有破坏性变更与粗糙之处。
 
 <p align="center">
 <strong>衷心感谢以下项目——请给它们一个 ⭐：</strong>
@@ -97,7 +97,7 @@ npm install billion-context-dsh
 **git 源安装（`github:` 规格，插件商店展示的形态）。** 预构建产物 `dist/` 已提交到仓库，从 git 源安装同样开箱即用——**无需任何构建步骤**，pnpm 11 默认拦截构建脚本（`allowBuilds`）的机制对这个包不构成障碍：
 
 ```bash
-dsh plugin --profile web add github:Tyan66666/billion-context-dsh#v0.2.20
+dsh plugin --profile web add github:Tyan66666/billion-context-dsh#v0.2.21
 ```
 
 建议带 `#<tag>` 安装，拿到与对应 npm 版本完全一致的产物；不带 ref 则装默认分支的最新构建。只有 clone 仓库自行从源码构建（`npm run build`）才需要放行构建。背景与方案取舍见 [docs/git-source-install-design.md](docs/git-source-install-design.md)（issue #92）。
@@ -176,7 +176,7 @@ DSH 的每个模型请求都派生自其 append-only 会话日志（*surface*）
 | `acp_status` | CONTEXT BREAKDOWN（tool/text/summaries 占可见总量）+ 压缩块账本 + nudge 决策行 + `Checkpoint seqs` 行（active 块的 `bN → seq` 映射——压缩某个 checkpoint seq 即蒸馏该块，issue #60）；不含上下文窗口；支持 scope/view/tool/sort/limit 钻取 |
 | 块状态 | 内存内核状态 + **日志重建账本**（无旁车文件） |
 | 分层蒸馏（T2/T3） | 再次压缩某块的摘要节点 = 蒸馏该块（tier 2），蒸馏 tier-2 块得 tier 3；tier 与内核块 id 持久化进日志，重启后内核状态从日志再水合、可继续蒸馏 |
-| 压缩记账（影子价格） | `shadowedTokenCount`（宿主占用率据此扣减）**用宿主 token-meter 的词汇计价**（`ctx.tokenMeter.measure` 优先，`src/host-tokens.ts` 精确镜像兜底）——绝不混用插件内部的 CJK 感知估算（那是展示货币，混用会把宿主账本扣成负数、卡死中文会话，issue #54） |
+| 压缩记账（影子价格） | `shadowedTokenCount`（宿主占用率据此扣减）**用宿主 token-meter 的固定启发价计价**（`ctx.tokenMeter.measure` 优先、按 `heuristicTokens ?? tokens` 读固定启发价基准，`src/host-tokens.ts` 精确镜像兜底）——绝不混用插件内部的 CJK 感知估算（那是展示货币，混用会把宿主账本扣成负数、卡死中文会话，issue #54），也不按路由重定价的 `node.tokens` 计价（0.1.2+ 图片路由计价下那是请求压力价，读它会让含图片区间的 claim 虚报视觉价、同样扣穿账本，issue #103） |
 
 承载性的压缩指引（工具、哲学、摘要规则、tier 蒸馏/浓缩规则）注册为一次性系统提示段；每条 nudge 携带精简版（效率提示 + 哲学 + 上下文分解 + 压缩规则 + 范围表 + 批量提示）。刻意**不做自动摘要**：自动策略只 nudge 模型（`compactIfNeeded` 返回 null）。
 
@@ -217,7 +217,7 @@ DSH 的每个模型请求都派生自其 append-only 会话日志（*surface*）
 | `autoModelContextLimit` | `true` | 从模型 API 自动探测真实窗口（`agent.ctx.llm.resolveModelInfo`）；探测失败回退默认值，`/acp` 命令展示窗口来源（模型工具 `acp_status` 不含窗口信息）。省略时窗口先读宿主投影（`windowFor` → `projectedContextWindow`，`src/window.ts`）再走探测；投影与探测在 `autoModelContextLimit: false` 时均跳过。探测失败会在宿主日志与 `/acp` 面板提示（`restart to re-probe`）——失败结果同样被缓存，修复网关后需重启或显式设置 `modelContextLimit` 才会重新探测。探测成功后还会**扣减 adapter 的每请求输出上限**（`defaultMaxTokens`，窗口末端每请求保证的输出预留）：所有下游压力决策（nudge 档位、truncate、growth）以「可持续输入预算」（窗口 − 输出预留）为分母——96K 窗口 + 16K 上限实际最多承载 80K 输入，原裸窗口分母会把用量低估 cap/window（此处 ≈17%；小上下文窗口模型比例更高）；上限未披露、显式配置或探测失败时保持裸窗口行为，`/acp status` 展示扣减明细（raw − reservation） |
 | `nudgeMinContextLimitPct` | 内核默认 `0.45` | Nudge 窗口下界（用量占比）——仅作配置校验，增长路径的触发没有百分比下限——与 billion-context-pi 相同的默认值 |
 | `nudgeMaxContextLimitPct` | engine 默认 `0.70`（内核/pi 默认 `0.75`） | 过限线：超过此值则无论增长与否都触发 nudge——刻意低于宿主 compaction-basic 的 80% 自动压缩线，保证强制 nudge 先触发；显式配置优先（`coreOverrides.nudge` 同名键优先级更高，见下） |
-| `nudgeEmergencyThresholdPct` | engine 默认 `0.85`（内核/pi 默认 `0.95`） | 紧急 nudge（绕过每轮去重）——从 `0.95` 下调：95% 时模型已无操作空间且会被 80% 自动压缩线遮蔽；显式配置优先（`coreOverrides.nudge` 同名键优先级更高，见下） |
+| `nudgeEmergencyThresholdPct` | engine 默认 `0.85`（内核/pi 默认 `0.95`） | 紧急 nudge（绕过每轮去重，但每个 user turn 最多注入 3 次——issue #108）——从 `0.95` 下调：95% 时模型已无操作空间且会被 80% 自动压缩线遮蔽；显式配置优先（`coreOverrides.nudge` 同名键优先级更高，见下） |
 | `coreOverrides` | — | 任何其他 acp-kernel `Config` 覆盖（billion-context-pi 的 `coreOverrides` 逃生口）。合并顺序：内核默认 → 顶层 pct 配置 → `coreOverrides.nudge` 最后落地——同名键以它为准 |
 | `autoTools` | `true` | 在 `ctx.tools` 注册四个模型工具 |
 | `autoCommand` | `true` | 在 `ctx.commands` 注册 `/acp` 命令 |
@@ -231,7 +231,10 @@ npm install
 npm run typecheck   # 严格 TS
 npm test            # node --import tsx --test tests/*.test.ts
 npm run build       # tsup 打包（内联 acp-kernel）+ .d.ts
+npm run test:e2e   # 端到端宿主回归：真实 agent 循环 + 脚本化假 LLM（见下文）
 ```
+
+端到端回归（`scripts/e2e/`）在进程内组装真实 DSH 宿主（cordis + agent-loop + DeepSeek 适配器），指向脚本化假 LLM 服务，挂载本引擎作为压缩后端，然后断言持久化事件日志：compaction 起止配对、durable replace 节点、严格 tool-call/result 配对、nudge 注入节奏。背景与取舍见 [docs/e2e-harness-design.md](docs/e2e-harness-design.md)（issue #120）。
 
 `dist/index.js` 自包含，仅外链 `@deepseek-ai/*` 接缝包（由宿主部署提供）。
 

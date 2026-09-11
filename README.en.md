@@ -3,7 +3,7 @@
 [English](./README.en.md) | [中文](./README.md)
 
 > **⚠️ Beta notice — not for production use**
-> This project (**v0.2.20**) is a work-in-progress beta. The [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) itself is also in **public beta**. **Do not use either in engineering / production environments** — expect breaking changes and rough edges.
+> This project (**v0.2.21**) is a work-in-progress beta. The [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) itself is also in **public beta**. **Do not use either in engineering / production environments** — expect breaking changes and rough edges.
 
 <p align="center">
 <strong>Built with gratitude on top of these projects</strong> — please give them a ⭐:
@@ -98,7 +98,7 @@ This only installs the package into your project/global store; it does **not** t
 **Install from the git source (`github:` spec — the form the plugin store shows).** The prebuilt `dist/` artifacts are committed to this repository, so a git-source install also works out of the box — **no build step needed**, and pnpm 11's default build-script blocking (`allowBuilds`) never applies to this package:
 
 ```bash
-dsh plugin --profile web add github:Tyan66666/billion-context-dsh#v0.2.20
+dsh plugin --profile web add github:Tyan66666/billion-context-dsh#v0.2.21
 ```
 
 Prefer a `#<tag>` ref to get artifacts identical to that npm release; without a ref you get the latest default-branch build. Only building the repo yourself (`npm run build`) requires approving build scripts. Background and trade-offs: [docs/git-source-install-design.md](docs/git-source-install-design.md) (issue #92).
@@ -179,7 +179,7 @@ DSH derives every model request from its append-only session log (the *surface*)
 | `acp_status` | CONTEXT BREAKDOWN (tool/text/summaries shares of the visible total) + compressed-block ledger + nudge decision line + a `Checkpoint seqs` row mapping each ACTIVE block's kernel ref (`bN`) to its checkpoint summary seq — compressing a checkpoint seq distills that block (issue #60); no context-window rows; scope/view/tool/sort/limit drilldown supported |
 | block state | in-memory kernel state + **log-rebuilt ledger** (no sidecar files) |
 | tiered distillation (T2/T3) | re-compressing a block's summary node distills that block (tier 2); distilling a tier-2 block yields tier 3. Tier + kernel block ids are persisted to the log, so kernel state rehydrates from the log after a restart and stays distillable |
-| compression accounting (shadow price) | `shadowedTokenCount` (what the host occupancy display deducts) is priced in the **host token-meter's vocabulary** (`ctx.tokenMeter.measure` preferred; exact mirror in `src/host-tokens.ts` as fallback) — never the plugin's internal CJK-aware estimate (that is display currency; mixing it into the host ledger can drive `messageTokens` negative and brick a CJK-heavy session, issue #54) |
+| compression accounting (shadow price) | `shadowedTokenCount` (what the host occupancy display deducts) is priced with the **host token-meter's fixed-heuristic price** (`ctx.tokenMeter.measure` preferred, reading the `heuristicTokens ?? tokens` fixed-heuristic basis; exact mirror in `src/host-tokens.ts` as fallback) — never the plugin's internal CJK-aware estimate (that is display currency; mixing it into the host ledger can drive `messageTokens` negative and brick a CJK-heavy session, issue #54), and never the route-repriced `node.tokens` either (under 0.1.2+ image route pricing that is request-pressure currency; summing it overstates an image range's claim and folds the same ledger negative, issue #103) |
 
 The load-bearing compression guidance (tools, philosophy, summary rules, tier rules) is registered as a one-time system-prompt section; each nudge carries a condensed version (efficiency note + philosophy + context breakdown + HOW_TO_COMPRESS_RULES + range table + batch tip). There is deliberately **no automatic summarization**: automatic policy only nudges the model (`compactIfNeeded` returns null).
 
@@ -220,7 +220,7 @@ This project reuses `acp-kernel`'s compression core and `billion-context-pi`'s d
 | `autoModelContextLimit` | `true` | Resolve the real context window automatically: the host projection first (`windowFor` → `projectedContextWindow`, `src/window.ts`), then the model API probe (`agent.ctx.llm.resolveModelInfo`); both are skipped when `autoModelContextLimit: false`. On probe failure it falls back to the default, and the `/acp` command shows the window source (the `acp_status` model tool carries no window info). A failed probe is surfaced in the host log and the `/acp` panel (`restart to re-probe`) — the failure is cached like a success, so fixing the gateway requires a restart or an explicit `modelContextLimit` before the probe retries. On a successful probe the adapter's per-request output cap (`defaultMaxTokens` — the output reservation the provider guarantees at the end of the window) is SUBTRACTED, so every downstream pressure decision (nudge tiers, truncate, growth) measures usage against the SUSTAINABLE input budget (window − reservation): a 96K window with a 16K cap carries at most 80K of input, and the raw denominator understated usage by cap/window (≈17% there — and the ratio is far higher on short-window models, where the same cap is a quarter or more of the window). When the cap is undisclosed, the limit is explicit, or the probe fails, the raw-window behavior is kept; `/acp status` shows the subtraction (raw − reservation) |
 | `nudgeMinContextLimitPct` | kernel default `0.45` | Nudge window lower bound (usage fraction) — validation only; the growth-driven trigger has no percentage floor — same default as billion-context-pi |
 | `nudgeMaxContextLimitPct` | engine default `0.70` (kernel/pi default `0.75`) | Over-limit line: above this the nudge fires regardless of growth — deliberately below the host compaction-basic 80% auto-compaction line so the forced nudge fires first; an explicit value wins (a same-name key in `coreOverrides.nudge` outranks it — see below) |
-| `nudgeEmergencyThresholdPct` | engine default `0.85` (kernel/pi default `0.95`) | Emergency nudge (bypasses the per-turn dedup) — lowered from `0.95`: at 95% the model has no room to act and the 80% auto-compaction line shadows it; an explicit value wins (a same-name key in `coreOverrides.nudge` outranks it — see below) |
+| `nudgeEmergencyThresholdPct` | engine default `0.85` (kernel/pi default `0.95`) | Emergency nudge (bypasses the per-turn dedup, but is capped at 3 injections per user turn — issue #108) — lowered from `0.95`: at 95% the model has no room to act and the 80% auto-compaction line shadows it; an explicit value wins (a same-name key in `coreOverrides.nudge` outranks it — see below) |
 | `coreOverrides` | — | Any other acp-kernel `Config` override (billion-context-pi's `coreOverrides` escape hatch). Merge order: kernel defaults → top-level pct knobs → `coreOverrides.nudge` lands last — same-name keys take its value |
 | `autoTools` | `true` | Register the four model tools on `ctx.tools` |
 | `autoCommand` | `true` | Register the `/acp` command on `ctx.commands` |
@@ -234,7 +234,10 @@ npm install
 npm run typecheck   # strict TS
 npm test            # node --import tsx --test tests/*.test.ts
 npm run build       # tsup bundle (inlines acp-kernel) + .d.ts
+npm run test:e2e   # end-to-end host regression: real agent loop + scripted fake LLM (see below)
 ```
+
+The end-to-end regression suite (`scripts/e2e/`) assembles the real DSH host in-process (cordis + agent-loop + the DeepSeek adapter), points it at a scripted fake LLM server, mounts this engine as the compaction backend, and asserts the persisted event log: compaction start/end pairing, the durable replace node, strict tool-call/result pairing, and the nudge injection rhythm. Background and trade-offs: [docs/e2e-harness-design.md](docs/e2e-harness-design.md) (issue #120).
 
 `dist/index.js` is self-contained except for the `@deepseek-ai/*` seam packages, which the hosting deployment provides.
 

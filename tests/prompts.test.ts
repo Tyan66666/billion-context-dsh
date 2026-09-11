@@ -350,7 +350,7 @@ test('M4/prompts 12: buildNudge forwards env.prompts into the injected message (
     modelContextLimit: 16000,
     prompts: resolvePrompts({ nudge: { normal: 'CUSTOM normal {pct}' } }),
   }
-  const outcome = buildNudge(fakeAgent(buildTextSession(12)), env, new Map<string, number>())
+  const outcome = buildNudge(fakeAgent(buildTextSession(12)), env, new Map<string, number>(), new Map())
   assert.ok(outcome !== null, 'over-limit nudge fires')
   assert.equal(outcome!.emergency, false)
   const text = outcome!.message.content.map((block) => (block as { text?: string }).text ?? '').join('')

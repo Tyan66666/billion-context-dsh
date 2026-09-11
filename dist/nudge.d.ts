@@ -46,13 +46,30 @@ export declare function resolveTokenCount(agent: Agent, coreMessages: CoreMessag
  */
 export declare function rangeTable(session: import('@deepseek-ai/dsh-session').Session, prompts?: ResolvedPrompts): string;
 /**
- * Decide and build one nudge message for the agent's next pre-step. Returns
- * null when the kernel recommends no nudge or one was already injected for the
- * current turn (emergency nudges always bypass the dedup). Also advances the
- * in-memory kernel state (ref assignment) so the compress tool can resolve
- * seq → mNNNNN refs.
+ * Max emergency nudge injections within a single user turn. Bounds the
+ * positive-feedback loop where an unrelieved ≥emergency-threshold pressure
+ * re-injects a durable emergency nudge on every pre-step forever (issue #108).
+ * Mirrors billion-context-pi commit 414acd1 (cap emergency nudge injections per
+ * user turn). Normal-pressure nudges remain limited to one per turn regardless.
  */
-export declare function buildNudge(agent: Agent, env: NudgeEnvironment, lastNudgeTurn: Map<string, number>): NudgeOutcome | null;
+export declare const EMERGENCY_NUDGE_MAX_PER_TURN = 3;
+/**
+ * Decide and build one nudge message for the agent's next pre-step. Returns
+ * null when the kernel recommends no nudge or the per-turn budget is spent:
+ * normal-pressure nudges fire at most once per user turn, and emergency nudges
+ * are capped at {@link EMERGENCY_NUDGE_MAX_PER_TURN} per user turn so an
+ * unrelieved ≥threshold pressure cannot re-inject a durable nudge on every
+ * pre-step forever (issue #108). Also advances the in-memory kernel state (ref
+ * assignment) so the compress tool can resolve seq → mNNNNN refs.
+ *
+ * `onEmergencyCapHit` (optional) fires when the kernel still wants an
+ * emergency nudge but the per-turn budget is spent — the host uses it to log
+ * why the model stops receiving nudges (issue #108 review).
+ */
+export declare function buildNudge(agent: Agent, env: NudgeEnvironment, lastNudgeTurn: Map<string, number>, emergencyNudges: Map<string, {
+    turn: number;
+    count: number;
+}>, onEmergencyCapHit?: () => void): NudgeOutcome | null;
 /**
  * Render the nudge message text. DEFAULT (no `config.prompts.nudge` override)
  * calls the kernel's own `renderNudgeText` — EFFICIENCY_NOTE/EMERGENCY_HEADER,
