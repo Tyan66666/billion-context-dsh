@@ -217,3 +217,18 @@ test('M4: /acp status shows no probe-failure hint when the probe succeeds', asyn
   assert.match(text, /context window: 1000000 \(auto-detected from test-provider\/test-model\)/, 'successful probe shows the auto window')
   assert.ok(!text.includes('auto-detection failed'), 'no probe-failure hint when the probe succeeds')
 })
+
+test('M4: /acp compress stamps the summary with the LIVE route, not stale agent.options', async () => {
+  // Same stale-route read as the window cap: /acp compress priced the
+  // summary's provenance off agent.options, which points at the route the
+  // session just left after a mid-session model switch.
+  const env = makeEnv(128000)
+  const session = buildSession(12)
+  session.append('request/context', { provider: 'live-provider', model: 'live-model' })
+  await runAcp(env, fakeAgent(session), 'compress 1 5 Authentication system: JWT access tokens with 15 minute expiry, refresh tokens in Redis with 30 day TTL.')
+
+  const summaryEvent = session.snapshotEvents().find((event) => event.type === 'compaction/summary')
+  assert.ok(summaryEvent, 'compaction/summary landed')
+  assert.equal((summaryEvent.data as { provider?: string }).provider, 'live-provider', 'the summary carries the LIVE provider')
+  assert.equal((summaryEvent.data as { model?: string }).model, 'live-model', 'the summary carries the LIVE model')
+})

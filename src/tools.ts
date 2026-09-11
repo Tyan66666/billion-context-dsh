@@ -17,7 +17,7 @@ import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
 import type { AcpStateStore } from './state.ts'
 import { kernelConfigFor, type KernelConfigInput } from './config.ts'
 import { resolveTokenCount } from './nudge.ts'
-import type { AcpWindow } from './window.ts'
+import { routeFor, type AcpWindow } from './window.ts'
 import {
   AlreadyCompressedRangeError,
   blockIdOfKernelRef,
@@ -481,14 +481,18 @@ async function handleCompress(env: ToolEnvironment, args: CompressArgs, exec: To
     const shadowedTokens = shadowedTokensViaMeter(session, shadowed, agent.ctx)
     const tier = block.tier === 2 || block.tier === 3 ? block.tier : 1
     const parentBlockIds = compactionIdsOfKernelBlocks(session, block.directBlockIds)
+    // Provenance follows the LIVE route, not `agent.options`: after a mid-session
+    // model switch the latter is a stale snapshot (the PREVIOUS route), so the
+    // summary node would be stamped with a route the summary did not come from.
+    const { provider, model } = routeFor(agent)
     const { compactionId } = runCompactionTransaction(session, {
       start,
       end,
       shadowedSeqs: shadowed,
       summary: [{ type: 'text', text: range.summary }],
       shadowedTokenCount: shadowedTokens,
-      provider: agent.options.provider ?? '',
-      model: agent.options.model ?? '',
+      provider,
+      model,
       tier,
       kernelBlockId: block.blockId,
       ...(range.topic === undefined ? {} : { topic: range.topic }),

@@ -44,7 +44,7 @@ import { acpCommand } from './commands.ts'
 import { buildNudge, EMERGENCY_NUDGE_MAX_PER_TURN } from './nudge.ts'
 import { ACP_SYSTEM_PROMPT_ORDER } from './system-prompt.ts'
 import { renderSystemPrompt, resolvePrompts, type AcpPrompts, type ResolvedPrompts } from './prompts.ts'
-import { DEFAULT_CONTEXT_WINDOW, liveRoute, probeModelWindow, projectedContextWindow, type AcpWindow } from './window.ts'
+import { DEFAULT_CONTEXT_WINDOW, probeModelWindow, projectedContextWindow, routeFor, type AcpWindow } from './window.ts'
 import { deferCompressPairHide, stripOrphanedSurfaceToolMessages } from './region.ts'
 
 export { AcpStateStore } from './state.ts'
@@ -382,14 +382,10 @@ export class AcpCompactionEngine extends CompactionEngine {
     if (this.config.modelContextLimit !== undefined) {
       return { limit: this.config.modelContextLimit, source: 'explicit' }
     }
-    // The live route from the session's last request/context event. After a
-    // mid-session model switch agent.options is a stale snapshot (the PREVIOUS
-    // route), so the per-route output cap must be looked up against the LIVE
-    // route or it lags one switch behind; fall back to agent.options only
-    // before the session recorded any route.
-    const live = liveRoute(agent)
-    const provider = live?.provider ?? agent.options.provider ?? ''
-    const model = live?.model ?? agent.options.model ?? ''
+    // The per-route output cap must be looked up against the session's LIVE
+    // route or it lags one switch behind (a stale agent.options snapshot names
+    // the PREVIOUS route) — routeFor owns that fallback chain for every caller.
+    const { provider, model } = routeFor(agent)
     const key = `${provider}\0${model}`
     // Projection source first: it reflects the live route (agent.options is a
     // stale snapshot after a model switch), and it is not cached here because

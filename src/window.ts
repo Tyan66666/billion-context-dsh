@@ -28,9 +28,11 @@ export interface AcpWindow {
   readonly source: 'explicit' | 'auto' | 'projection' | 'default'
   /**
    * Route the window was resolved for. 'auto' reports the probed route;
-   * 'projection' returns also set it, mirroring agent.options — which can be
-   * stale after a mid-session model switch (inert today: windowSourceLabel
-   * never reads these fields for the projection source).
+   * 'projection' returns also set it, from the session's LIVE route (its last
+   * `request/context` event) — NOT `agent.options`, which is a stale snapshot
+   * after a mid-session model switch; `agent.options` is the fallback only
+   * before the session has recorded any route. (Inert today: windowSourceLabel
+   * never reads these fields for the projection source.)
    */
   readonly provider?: string
   readonly model?: string
@@ -110,14 +112,46 @@ export function projectedContextWindow(agent: Agent): number | null {
  * against this live route instead — otherwise the cap lags one switch behind
  * (a 32K cap from a just-left model subtracted from the new model's window).
  * Returns null before the session has recorded any route, so callers fall
- * back to `agent.options`.
+ * back to `agent.options`. Never throws, like `probeModelWindow`: the caller
+ * runs inside `agent/pre-step`, which has no surrounding try.
  */
 export function liveRoute(agent: Agent): { provider: string; model: string } | null {
-  const rc = agent.session.requestContext()
-  if (rc && rc.provider !== '' && rc.model !== '') {
-    return { provider: rc.provider, model: rc.model }
+  let rc: { provider?: unknown; model?: unknown } | null | undefined
+  try {
+    rc = agent.session.requestContext()
+  } catch {
+    return null
   }
-  return null
+  // `null` as well as `undefined`: the pinned host's fold is typed
+  // `RequestContext | undefined`, but this function's contract is that it never
+  // throws for the caller (it runs inside `agent/pre-step`, which has no
+  // surrounding try), so an empty shape of either kind must degrade instead of
+  // throwing on the destructure below.
+  if (rc === undefined || rc === null) return null
+  const { provider, model } = rc
+  // All-or-nothing: a half-valid route (a live model next to a fallback
+  // provider) would key the per-route cap cache on a mixed route, so both
+  // halves must be non-empty strings or the caller falls back whole.
+  if (typeof provider !== 'string' || provider === '') return null
+  if (typeof model !== 'string' || model === '') return null
+  return { provider, model }
+}
+
+/**
+ * The route the per-route output cap and the compression provenance must be
+ * resolved against, in ONE place: the session's live `request/context` route,
+ * falling back to `agent.options` only before the session has recorded any
+ * route. `windowFor` (src/index.ts), the `compress` tool (src/tools.ts) and
+ * `/acp compress` (src/commands.ts) all need this exact pair; three hand-copied
+ * copies is precisely how a stale-route bug gets fixed in one call site and
+ * left behind in the others.
+ */
+export function routeFor(agent: Agent): { provider: string; model: string } {
+  const live = liveRoute(agent)
+  return {
+    provider: live?.provider ?? agent.options.provider ?? '',
+    model: live?.model ?? agent.options.model ?? '',
+  }
 }
 
 /** The model window plus the adapter's per-request output cap, in one probe. */

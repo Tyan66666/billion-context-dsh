@@ -4,7 +4,7 @@ import { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { Session } from '@deepseek-ai/dsh-session'
 import AcpCompactionEngine from '../src/index.ts'
-import { DEFAULT_CONTEXT_WINDOW, detectContextWindow, probeModelWindow, projectedContextWindow } from '../src/window.ts'
+import { DEFAULT_CONTEXT_WINDOW, detectContextWindow, liveRoute, probeModelWindow, projectedContextWindow } from '../src/window.ts'
 
 interface FakeLlm {
   resolveModelInfo: (provider: string, model: string) => Promise<{ context?: { contextWindow?: number }; defaultMaxTokens?: number }>
@@ -365,9 +365,13 @@ test('window: 切模型后 output cap 跟随实时路由（而非 stale 的 agen
     },
   })
   const engine = new AcpCompactionEngine(new Context())
+  // A REAL Session carrying a real `request/context` event (rule 5): the
+  // fixture mirrors the host's own append shape instead of stubbing the reader.
+  const session = Session.create('test-session')
+  session.append('request/context', { provider: 'new-p', model: 'new-m', contextWindow: 1000000 })
   const agent = {
     id: 'test-session',
-    session: { requestContext: () => ({ provider: 'new-p', model: 'new-m', contextWindow: 1000000 }) },
+    session,
     options: { provider: 'old-p', model: 'old-m' },
     ctx,
   } as unknown as Agent
@@ -392,9 +396,12 @@ test('window: session 未记录路由时 liveRoute 回退 agent.options', async 
     },
   })
   const engine = new AcpCompactionEngine(new Context())
+  // A REAL Session with NO `request/context` event: requestContext() returns
+  // undefined on its own, so the fallback path under test is the genuine one.
+  const session = Session.create('test-session')
   const agent = {
     id: 'test-session',
-    session: { requestContext: () => undefined },
+    session,
     options: { provider: 'test-provider', model: 'test-model' },
     ctx,
   } as unknown as Agent
@@ -402,4 +409,16 @@ test('window: session 未记录路由时 liveRoute 回退 agent.options', async 
   assert.equal(window.source, 'projection')
   assert.equal(window.outputReserved, 16384, 'session 无已记录路由时回退 agent.options')
   assert.equal(window.limit, 96000 - 16384)
+})
+
+test('window: liveRoute 只在两半都有效时返回路由，且从不抛错', () => {
+  const withSession = (session: unknown): Agent => ({ id: 'test-session', session } as unknown as Agent)
+  // Host misbehavior a real Session cannot produce — hence the stubs here.
+  assert.equal(liveRoute(withSession({ requestContext: () => ({ model: 'm' }) })), null, '缺 provider 的半有效路由不得混用实时 model')
+  assert.equal(liveRoute(withSession({ requestContext: () => ({ provider: '', model: 'm' }) })), null, '空 provider 同样拒绝')
+  assert.equal(liveRoute(withSession({ requestContext: () => ({ provider: 'p', model: '' }) })), null, '空 model 同样拒绝')
+  assert.equal(liveRoute(withSession({ requestContext: () => undefined })), null, '未记录任何路由')
+  assert.equal(liveRoute(withSession({ requestContext: () => null })), null, 'null 路由同样降级（必须在解构之前挡住）')
+  assert.equal(liveRoute(withSession({ requestContext: () => { throw new Error('host exploded') } })), null, '宿主抛错时降级，而非炸掉 agent/pre-step')
+  assert.equal(liveRoute(withSession({ requestContext: () => ({ provider: 'p', model: 'm' }) }))?.provider, 'p', '两半都有效时正常返回')
 })
