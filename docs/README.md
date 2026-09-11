@@ -26,12 +26,12 @@ Model-driven context management (Active Context Pruning / ACP) for the DeepSeek 
 ```
 src/
 ├── index.ts        # AcpCompactionEngine (CompactionEngine backend) + wiring
-├── messages.ts     # M1: session events ↔ acp-kernel CoreMessage projection + summary source framing (frame-once-at-creation, idempotent net for legacy blocks) — rule 17
+├── messages.ts     # M1: session events ↔ acp-kernel CoreMessage projection + summary source framing (frame-once-at-creation, idempotent net for legacy blocks) — rule 18
 ├── state.ts        # M2: per-session kernel state
-├── region.ts       # M5: durable region transaction + log-rebuilt ledger + surface range solving + creation-time summary framing + verifiedReadings ledger/read face — rule 17
-├── block-ledger.ts # tier/lineage + verifiedReadings encoded inside the rawOutput member, never top-level (issue #141; rule 17)
-├── tools.ts        # M3: compress / decompress / search_context / acp_status (status rendered via kernel buildStatusReport) + verifiedReadings echo in compress results — rule 17
-├── nudge.ts        # M4: advisory nudge (surface-computed range table) + slim-nudge guidance stripping — rule 17
+├── region.ts       # M5: durable region transaction + log-rebuilt ledger + surface range solving + creation-time summary framing + verifiedReadings ledger/read face — rule 18
+├── block-ledger.ts # tier/lineage + verifiedReadings encoded inside the rawOutput member, never top-level (issue #141; rule 18)
+├── tools.ts        # M3: compress / decompress / search_context / acp_status (status rendered via kernel buildStatusReport) + verifiedReadings echo in compress results — rule 18
+├── nudge.ts        # M4: advisory nudge (surface-computed range table) + slim-nudge guidance stripping — rule 18
 ├── system-prompt.ts# M4: one-time ACP guidance section
 ├── presets.ts      # named nudge-threshold tiers (config.preset): five levels resolved into the nudge*Pct knobs; explicit value > preset > default
 ├── config.ts       # kernel config assembly (thresholds + coreOverrides)
