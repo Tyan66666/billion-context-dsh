@@ -5,7 +5,7 @@
  * targets ranges by surface seq rather than by <acp> tags).
  * @module billion-context-dsh/nudge
  */
-import { type CompressionCore, type CoreMessage, type NudgeDecision } from 'acp-kernel';
+import { type CompressionCore, type CompressionState, type ContextBreakdown, type CoreMessage, type NudgeDecision } from 'acp-kernel';
 import { type UserMessage } from '@deepseek-ai/dsh-llm';
 import type { Agent } from '@deepseek-ai/dsh-agent';
 import { AcpStateStore } from './state.ts';
@@ -46,13 +46,56 @@ export declare function resolveTokenCount(agent: Agent, coreMessages: CoreMessag
  */
 export declare function rangeTable(session: import('@deepseek-ai/dsh-session').Session, prompts?: ResolvedPrompts): string;
 /**
- * Decide and build one nudge message for the agent's next pre-step. Returns
- * null when the kernel recommends no nudge or one was already injected for the
- * current turn (emergency nudges always bypass the dedup). Also advances the
- * in-memory kernel state (ref assignment) so the compress tool can resolve
- * seq → mNNNNN refs.
+ * Compute a SURFACE-ONLY context breakdown for display, aligned with
+ * `acp_status` (kernel `buildStatusReport`/`renderOverview`).
+ *
+ * The kernel's own `computeContextBreakdown` (which the nudge text renders)
+ * walks the message array it is fed — and `buildNudge` feeds it the FULL log
+ * (`allLogMessages`, needed so T2/T3 distillation can anchor every block). So
+ * a session with compressed blocks reports HISTORICAL totals there: every
+ * original tool/text message already absorbed into a block is counted again,
+ * e.g. `85.2K tool` for ~8.5K of live tool context. `acp_status` instead feeds
+ * `buildStatusReport` the VISIBLE surface + active-block summaries, so its
+ * breakdown reads the true current context. This function reproduces that
+ * visible-surface reality for the nudge line so the two tools agree.
+ *
+ * Classification replicates kernel `computeContextBreakdown` (tool-call/
+ * tool-result → tool, `system` role → system, `` code `` fence in text →
+ * code, else text) EXCEPT summaries: kernel detects summaries by a
+ * `[Compressed conversation section]` text prefix, which never matches a DSH
+ * checkpoint node (our summary is the plain summary + `compactCheckpointSource`
+ * source marker). We instead count active-block summaries directly from kernel
+ * state (same source `buildStatusReport` uses), and the caller must exclude
+ * checkpoint summary nodes from `messages` (they are not in any block's
+ * `effectiveMessageIds` and would double-count — mirror of `/acp` status's
+ * `isCheckpointEvent` exclusion).
  */
-export declare function buildNudge(agent: Agent, env: NudgeEnvironment, lastNudgeTurn: Map<string, number>): NudgeOutcome | null;
+export declare function computeSurfaceBreakdown(state: CompressionState, messages: readonly CoreMessage[], total: number, growth: number): ContextBreakdown;
+/**
+ * Max emergency nudge injections within a single user turn. Bounds the
+ * positive-feedback loop where an unrelieved ≥emergency-threshold pressure
+ * re-injects a durable emergency nudge on every pre-step forever (issue #108).
+ * Mirrors billion-context-pi commit 414acd1 (cap emergency nudge injections per
+ * user turn). Normal-pressure nudges remain limited to one per turn regardless.
+ */
+export declare const EMERGENCY_NUDGE_MAX_PER_TURN = 3;
+/**
+ * Decide and build one nudge message for the agent's next pre-step. Returns
+ * null when the kernel recommends no nudge or the per-turn budget is spent:
+ * normal-pressure nudges fire at most once per user turn, and emergency nudges
+ * are capped at {@link EMERGENCY_NUDGE_MAX_PER_TURN} per user turn so an
+ * unrelieved ≥threshold pressure cannot re-inject a durable nudge on every
+ * pre-step forever (issue #108). Also advances the in-memory kernel state (ref
+ * assignment) so the compress tool can resolve seq → mNNNNN refs.
+ *
+ * `onEmergencyCapHit` (optional) fires when the kernel still wants an
+ * emergency nudge but the per-turn budget is spent — the host uses it to log
+ * why the model stops receiving nudges (issue #108 review).
+ */
+export declare function buildNudge(agent: Agent, env: NudgeEnvironment, lastNudgeTurn: Map<string, number>, emergencyNudges: Map<string, {
+    turn: number;
+    count: number;
+}>, onEmergencyCapHit?: () => void): NudgeOutcome | null;
 /**
  * Render the nudge message text. DEFAULT (no `config.prompts.nudge` override)
  * calls the kernel's own `renderNudgeText` — EFFICIENCY_NOTE/EMERGENCY_HEADER,

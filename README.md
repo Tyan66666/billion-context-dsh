@@ -73,18 +73,19 @@ dsh plugin --profile web add billion-context-dsh
 
 > **与 DSH 版本的兼容性。** 包把四个运行期 seam 包（`dsh-compaction` /
 > `dsh-session` / `dsh-llm` / `dsh-tools`）都声明为 peer 依赖，共享同一个
-> 范围 `^0.1.0-rc.6 || ^0.1.1-rc.1 || ^0.1.2-alpha.4`，同时覆盖 `0.1.0-rc.x`、
-> `0.1.1-rc.x` 两条 rc 线与 `0.1.2-alpha.x` 线（从 `0.1.0-rc.6` 到 `0.1.1-rc.2`，
-> seam 的 `src/` 源码零改动，公开 API 完全一致；`0.1.2-alpha` 移除了
-> `Session.events` getter，改为 `snapshotEvents()` / `eventAt()`，本引擎对两种
-> 形态做了特性探测，单一构建两端通用）。范围写成多个并集子句是**有意为之**：
-> npm （node-semver）的预发布匹配规则要求 range 里存在与候选版本**相同
-> `[major, minor, patch]` 元组**的比较器，单一 `^0.1.0-rc.6` 永远匹配不了
-> `0.1.1-rc.x`（issue #68），也匹配不了 `0.1.2-alpha.x`——因此旧发布的包在
-> DSH 0.1.1-rc.x / 0.1.2-alpha.x 上装不上，升级到含本次修复的新版本即可。
-> 把这四个 seam 包一并声明为 peer（而不只是 `dsh-compaction`），是为了让
+> 范围 `>=0.1.5-alpha.1 <0.1.6-0`——恰好是整条 `0.1.5` 线（所有预发布加最终
+> `0.1.5`）。从 `0.1.5` 线起，会话 replace 操作的协议字段由 `{ op, start, end }`
+> 改名为 `{ op, startSeq, endSeq }`，且校验严格（只接受这三个字段）；本引擎只
+> 输出新形态，因此在更旧的 DSH（< 0.1.5）上每次 `compress` 都会被宿主在运行时
+> 拒绝（issue #136）——旧版本不再受支持，请先升级 DSH 再安装本发行版。范围
+> 写成显式区间而非 caret 是**有意为之**：caret 会悄悄放进未经验证的 0.1.6+
+> 线。把这四个 seam 包一并声明为 peer（而不只是 `dsh-compaction`），是为了让
 > 安装在 pnpm 的集成/封存布局下仍能把它们解析到**宿主自己的副本**，而不是
 > 某个与宿主不一致的陈旧嵌套副本。
+>
+> 行为注记（0.1.5 起）：宿主不再允许"不可见"替换节点，引擎清理孤立工具消息时
+> 会在其位置留下一条短可见占位消息；宿主的系统提示节点（surface node 0）被排除
+> 在可压缩范围表之外。
 
 **方式二：纯 `npm install`（只装包，需要手写组合行）。**
 
@@ -217,7 +218,7 @@ DSH 的每个模型请求都派生自其 append-only 会话日志（*surface*）
 | `autoModelContextLimit` | `true` | 从模型 API 自动探测真实窗口（`agent.ctx.llm.resolveModelInfo`）；探测失败回退默认值，`/acp` 命令展示窗口来源（模型工具 `acp_status` 不含窗口信息）。省略时窗口先读宿主投影（`windowFor` → `projectedContextWindow`，`src/window.ts`）再走探测；投影与探测在 `autoModelContextLimit: false` 时均跳过。探测失败会在宿主日志与 `/acp` 面板提示（`restart to re-probe`）——失败结果同样被缓存，修复网关后需重启或显式设置 `modelContextLimit` 才会重新探测。探测成功后还会**扣减 adapter 的每请求输出上限**（`defaultMaxTokens`，窗口末端每请求保证的输出预留）：所有下游压力决策（nudge 档位、truncate、growth）以「可持续输入预算」（窗口 − 输出预留）为分母——96K 窗口 + 16K 上限实际最多承载 80K 输入，原裸窗口分母会把用量低估 cap/window（此处 ≈17%；小上下文窗口模型比例更高）；上限未披露、显式配置或探测失败时保持裸窗口行为，`/acp status` 展示扣减明细（raw − reservation） |
 | `nudgeMinContextLimitPct` | 内核默认 `0.45` | Nudge 窗口下界（用量占比）——仅作配置校验，增长路径的触发没有百分比下限——与 billion-context-pi 相同的默认值 |
 | `nudgeMaxContextLimitPct` | engine 默认 `0.70`（内核/pi 默认 `0.75`） | 过限线：超过此值则无论增长与否都触发 nudge——刻意低于宿主 compaction-basic 的 80% 自动压缩线，保证强制 nudge 先触发；显式配置优先（`coreOverrides.nudge` 同名键优先级更高，见下） |
-| `nudgeEmergencyThresholdPct` | engine 默认 `0.85`（内核/pi 默认 `0.95`） | 紧急 nudge（绕过每轮去重）——从 `0.95` 下调：95% 时模型已无操作空间且会被 80% 自动压缩线遮蔽；显式配置优先（`coreOverrides.nudge` 同名键优先级更高，见下） |
+| `nudgeEmergencyThresholdPct` | engine 默认 `0.85`（内核/pi 默认 `0.95`） | 紧急 nudge（绕过每轮去重，但每个 user turn 最多注入 3 次——issue #108）——从 `0.95` 下调：95% 时模型已无操作空间且会被 80% 自动压缩线遮蔽；显式配置优先（`coreOverrides.nudge` 同名键优先级更高，见下） |
 | `coreOverrides` | — | 任何其他 acp-kernel `Config` 覆盖（billion-context-pi 的 `coreOverrides` 逃生口）。合并顺序：内核默认 → 顶层 pct 配置 → `coreOverrides.nudge` 最后落地——同名键以它为准 |
 | `autoTools` | `true` | 在 `ctx.tools` 注册四个模型工具 |
 | `autoCommand` | `true` | 在 `ctx.commands` 注册 `/acp` 命令 |
@@ -231,7 +232,10 @@ npm install
 npm run typecheck   # 严格 TS
 npm test            # node --import tsx --test tests/*.test.ts
 npm run build       # tsup 打包（内联 acp-kernel）+ .d.ts
+npm run test:e2e   # 端到端宿主回归：真实 agent 循环 + 脚本化假 LLM（见下文）
 ```
+
+端到端回归（`scripts/e2e/`）在进程内组装真实 DSH 宿主（cordis + agent-loop + DeepSeek 适配器），指向脚本化假 LLM 服务，挂载本引擎作为压缩后端，然后断言持久化事件日志：compaction 起止配对、durable replace 节点、严格 tool-call/result 配对、nudge 注入节奏。背景与取舍见 [docs/e2e-harness-design.md](docs/e2e-harness-design.md)（issue #120）。
 
 `dist/index.js` 自包含，仅外链 `@deepseek-ai/*` 接缝包（由宿主部署提供）。
 

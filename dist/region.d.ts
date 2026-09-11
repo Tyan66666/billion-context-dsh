@@ -164,6 +164,18 @@ export interface SeqCompressibleRange {
     readonly toolPct: number;
 }
 /**
+ * Durable model-free prune: append `compaction/prune` as the shadow price,
+ * then replace the given surface seqs with a user message. dsh-session 0.1.5+
+ * allows only user/message (and system/message) replacements to cite source
+ * events — assistant/message FORBIDS `sourceEventSeqs` because it embeds its
+ * own provider stream — so there is no invisible replacement node anymore:
+ * every hidden span becomes a user message. Callers with meaningful text pass
+ * it (compress call/result hiding keeps the tool outcome visible to the
+ * model); callers without get the fixed prune note. The originals remain in
+ * the append-only log.
+ */
+export declare const PRUNE_NOTE = "(removed by context management)";
+/**
  * Hide one successful `compress` tool's call/result pair after its tool/result
  * has been logged. The durable compaction summary is inserted BEFORE the
  * current tool result (the compress tool runs mid-turn), so leaving the pair on
