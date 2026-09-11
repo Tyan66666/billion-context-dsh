@@ -9,7 +9,7 @@
 在 Node 22 下用项目自带 `node_modules/acp-kernel` 直接运行完整生命周期（`/tmp/acp-engine-probe*.mjs` 系列探针）：
 
 | 阶段 | 结果 |
-|---|---|
+| --- | --- |
 | `defaultConfig(limit)` 生成合法配置 | ✅ |
 | `processTurn` 分配 ref 标签（`<acp tokens="15" type="text">m00001</acp>`） | ✅ |
 | 紧急 nudge 决策（usage ≥80% 注入） | ✅ |
@@ -107,7 +107,7 @@ PROBE OK
 ### 关键设计决策（每项都有验证依据）
 
 | # | 决策 | 验证依据 |
-|---|---|---|
+| --- | --- | --- |
 | D1 | **ref 机制**：放弃内存打 `<acp>` 标签，改用"seq 即 ref"，nudge/注入消息携带 seq→内容映射表 | V4：无内存改写钩子；V2 架构事实 4 |
 | D2 | **压缩落地**：模型 `compress` 工具 → durable `surfaceOp: {op:'replace'}` 遮蔽范围，摘要 = 模型写的 summary（正是 ACP 省 token 的卖点，无需二次 LLM 摘要调用） | V2、V5 |
 | D3 | **decompress**：读取日志原始事件，replace 回原文 | V5 |
@@ -120,7 +120,7 @@ PROBE OK
 ### 里程碑（每步可独立验证）
 
 | 里程碑 | 内容 | 验证方式 |
-|---|---|---|
+| --- | --- | --- |
 | M0 | 包骨架 + seam 挂载 | **已完成（V7 探针即原型）** |
 | M1 | 消息适配层：Session 事件 ↔ acp-kernel CoreMessage（user/assistant/tool-call/tool-result 投影，参考 `src/messages.ts` 的 `entriesToCoreMessages`/`projectMessage`） | 单测 + 日志回放 |
 | M2 | 块状态持久化（日志事件 schema + load/merge） | 单测（重启恢复） |
@@ -143,7 +143,7 @@ PROBE OK
 在真实部署（DSH web profile + `acp` preset，Rectangle 项目的一个长会话）中验证时，压缩闭环暴露了 6 个问题，全部在 v0.1.1 修复（[Release v0.1.1](https://github.com/Tyan66666/billion-context-dsh/releases/tag/v0.1.1)）：
 
 | # | 现象 | 根因 | 修复 |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | 1 | `acp_status` 显示 `tokens compressed: 0`（多个大块） | 写事务时 `shadowedTokenCount` 写死 0 | 压缩时按实际遮蔽消息估算并写入账本 |
 | 2 | nudge 显示 `230%` 荒谬占用 | 用了 token-meter 的 `totalTokens`（请求+响应压力，含响应预估） | 改用 `surfaceTokens`（纯输入侧），显示 cap 100% |
 | 3 | 估算对中文失准 | 用了 `estimateTokensFast`（纯 4 字符/token） | 改用 acp-kernel 的 `defaultCountTokens`（CJK 1 字符/token + 其他 4 字符/token，与 billion-context-pi 一致）——**后续演进（issue #54 / AGENTS.md 规则 12）**：`defaultCountTokens` 仅限内部估算与展示（nudge 百分比、账本、压缩结果文案）；写入宿主事件的 `shadowedTokenCount` 必须用宿主扁平 4 字符/token 词汇（`ctx.tokenMeter.measure` 优先，`src/host-tokens.ts` 镜像兜底）——中文密集会话曾因用 `defaultCountTokens` 计价 claim 被宿主账本扣穿而永久卡死（见 docs/shadow-price-host-vocabulary-design.md） |
@@ -180,3 +180,5 @@ compress({ startSeq: 64757, endSeq: 265056, ... })
 > **`UPSTREAM:` dsh-compaction 工具配对平衡缓存读取已删除的 `session.events`（AGENTS.md rule 11 / issue #124）— 已按移除门解除**——原状：0.1.2 宿主上 `toolPairingBalancedBefore/After` 读已删除的 `session.events` getter（`eventForSeq` 做 `events[seq]`）→ 一切压缩必炸 `TypeError: Cannot read properties of undefined (reading '<seq>')`（含宿主自带 `dsh-compaction-basic`）；引擎曾以本地镜像 `src/tool-pairing.ts` 绕行（算法逐行复刻宿主 `tool-pairing` 模块，事件读取改走跨版本 `eventAtOf`）。**移除（issue #136）**：peer 下限现为 `>=0.1.5-alpha.1 <0.1.6-0`，且对已发布 tarball 的逐版本核对显示 npm 线上 dsh-compaction ≥0.1.2-rc.1 的这两个 helper 已经由 `eventAt()`/`snapshotEvents()` 读取事件、其依赖的 `surface.replaceGeneration` 亦存在于 dsh-session 0.1.5 —— 宿主 helper 在真实 0.1.5 会话上直接可用（`tests/tool-pairing-host.test.ts`：全节点布尔断言 + `resolveSurfaceRange` E2E + 反转后的 source guard）。本地镜像已删除，`src/region.ts` 恢复 import 宿主 helper。上游状态：**已解决**（完整事故与取证档案保留于 issue #124）。
 
 > **dsh-session 0.1.5 协议漂移与 peer 下限（issue #136，非绕行——协议决策记录）**——replace surfaceOp 字段在 0.1.5 线改名 `{ op, start, end }` → `{ op, startSeq, endSeq }`，且校验严格为**恰好三键**（≤0.1.3-alpha.2 收旧名、≥0.1.5-alpha.1 收新名，逐版本从已发布 tarball 核实；四键形态两边都拒）→ 双方言共发不可能，引擎单一方言输出 + peer 下限 `>=0.1.5-alpha.1 <0.1.6-0`（显式区间，caret 会悄悄放进未验证的 0.1.6+ 线）。同线两个连带破坏一并处理：① assistant/message 内嵌 provider stream、**禁止携带 `sourceEventSeqs`**（运行时抛错）→ 隐形剪枝节点不复存在，`hideSurfaceSeqs` 改写可见 `PRUNE_NOTE` user 消息，范围表末位 user 保护扫描经 `isPruneTombstone` 跳过占位节点；② 宿主系统提示成为 surface node 0（`system/message`）且受保护（非 system 替换覆盖它即抛 "node 0 holds the system prompt"）→ `isSystemNode` 将其排除出可压缩表与 stale-range 恢复。回归钉：`tests/surfaceop-dialect.test.ts`（真实 0.1.5 会话 E2E：事务成功 + 恰好三键 shape 断言 + 孤儿剥离新方言 + node-0 保护）、`tests/peer-range.test.ts`（整线接受 / 其余版本线全部拒绝）。
+
+> **nudge 上下文 breakdown 口径：全日志 vs 活跃 surface（AGENTS.md rule 2）**——`buildNudge` 为支持 T2/T3 蒸馏锚点，必须把**整个日志**（`allLogMessages`，含已被压缩进 block 的历史消息）喂给 `kernel.processTurn`；kernel 的 `computeContextBreakdown` 对这份消息数组分类加总，于是 nudge 展示带上**历史累积**口径——实测 nudge 报 `85.2K tool`，而 acp_status 报真实活跃 `8.5K tool`，相差约 10 倍。`acp_status` 用 `buildStatusReport` 喂**活跃 surface**（排除 `source.plugin==='compact'` 的 checkpoint 摘要节点——`/acp` status 的 `isCheckpointEvent`），所以它反映当前真实上下文。修复：`src/nudge.ts` 导出 `computeSurfaceBreakdown(state, messages, total, growth)`——分类复刻 kernel（tool-call/tool-result→tool、role system→system、含```→code、否则→text），但 **summaries 直接取 active blocks 的 `block.summary`**（kernel 源码靠消息文本 `[Compressed conversation section]` 前缀识别摘要，而 DSH checkpoint 节点从不带此前缀，故须读 block 而非消息文本）；`buildNudge` 用活跃 surface（排除 checkpoint 节点）调用它覆盖 `nudge.contextBreakdown`。两条渲染路径（kernel `renderNudgeText` + 模板 `renderNudgeFromTemplates`）都读 `nudge.contextBreakdown`，覆盖一次即统一。该字段纯展示、不参与 `shouldInject` 决策，覆盖安全。回归测试 tests/nudge.test.ts（活跃 surface tool < 全日志 tool + block summaries>0；无块形状校验）。测试易踩坑：`compress` 工具的 `resolveSurfaceRange` pass-2 会把相邻 tool 对一并扩展吃掉（`adjusted from 2..3 to balanced edges` 扩到 1..4），若测试要保留 surface tool，须用 `runCompactionTransaction` 直接精确压范围而非走 compress 工具。

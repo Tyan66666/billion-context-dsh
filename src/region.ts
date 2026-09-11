@@ -474,18 +474,34 @@ export function runCompactionTransaction(
   return { compactionId, seqs }
 }
 
-/** The seq of a compaction's checkpoint summary node in the log (visible or shadowed). */
-function summarySeqOfCompaction(events: readonly SessionEvent[], compactionId: string): number | null {
+/**
+ * One pass over the log: compactionId → seq of its checkpoint summary node
+ * (first checkpoint wins, matching the old per-block linear scan). Replaces
+ * the B full-log scans per rebuild that made the ledger O(B·N) (issue #133:
+ * (B+1) rebuilds per search × B scans × N events ≈ 5.8B iterations at
+ * B=190, N=160K).
+ */
+function summarySeqIndex(events: readonly SessionEvent[]): Map<string, number> {
+  const index = new Map<string, number>()
   for (const event of events) {
     if (event.type !== 'user/message') continue
     const source = (event.data as { source?: { plugin?: string; compactionId?: string } }).source
-    if (source?.plugin === 'compact' && source.compactionId === compactionId) return event.seq
+    const compactionId = source?.plugin === 'compact' ? source.compactionId : undefined
+    if (compactionId !== undefined && !index.has(compactionId)) index.set(compactionId, event.seq)
   }
-  return null
+  return index
 }
+
+// Memoized on the append-only snapshot array (stable until the next append,
+// see sessionEventsOf): identity+length never goes stale; avoids the (B+1)
+// full rebuilds per search (#109/#133).
+const blockLedgerCache = new WeakMap<readonly SessionEvent[], { len: number; ledger: AcpBlockLedgerEntry[] }>()
 
 /** Rebuild the block ledger from the durable log (no kernel state needed). */
 export function rebuildBlockLedger(events: readonly SessionEvent[]): AcpBlockLedgerEntry[] {
+  const cached = blockLedgerCache.get(events)
+  if (cached !== undefined && cached.len === events.length) return cached.ledger
+  const summarySeqs = summarySeqIndex(events)
   const ledger: AcpBlockLedgerEntry[] = []
   for (const event of events) {
     if (event.type !== 'compaction/summary') continue
@@ -520,7 +536,7 @@ export function rebuildBlockLedger(events: readonly SessionEvent[]): AcpBlockLed
     const topic: string | undefined = embedded.topic ?? (typeof data.topic === 'string' ? data.topic : undefined)
     const kernelBlockId: string | undefined = embedded.kernelBlockId
       ?? (typeof data.kernelBlockId === 'string' ? data.kernelBlockId : undefined)
-    const summarySeq = summarySeqOfCompaction(events, data.compactionId)
+    const summarySeq = summarySeqs.get(data.compactionId) ?? null
     ledger.push({
       blockId: data.compactionId,
       summary: extractText(data.summary),
@@ -538,6 +554,7 @@ export function rebuildBlockLedger(events: readonly SessionEvent[]): AcpBlockLed
       createdAt: event.time,
     })
   }
+  blockLedgerCache.set(events, { len: events.length, ledger })
   return ledger
 }
 

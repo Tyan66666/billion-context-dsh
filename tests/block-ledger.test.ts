@@ -14,13 +14,16 @@
  * garbage; (2) a real engine-written `compaction/summary` carries none of those six
  * fields at the top level AND passes the real frozen reader, while re-adding any one
  * of them makes the reader throw the exact error that bricked pre-fix logs.
+ * (3) a log a PRE-fix engine left behind — the six fields at the top level and no
+ * `rawOutput` at all — still rebuilds its tier/lineage (old data must degrade, not
+ * disappear), and the embedded payload wins whenever both shapes are present.
  */
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { Session } from '@deepseek-ai/dsh-session'
+import { Session, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { assertReleasedEventPayload } from '@deepseek-ai/dsh-session-format-v0-to-v1'
-import { runCompactionTransaction, rebuildBlockLedger } from '../src/region.ts'
+import { runCompactionTransaction, rebuildBlockLedger, readCompactionSummary } from '../src/region.ts'
 import {
   ACP_BLOCK_LEDGER_MARKER,
   encodeAcpBlockLedger,
@@ -28,6 +31,9 @@ import {
   type AcpBlockLedgerPayload,
 } from '../src/block-ledger.ts'
 import { appendToolCall, appendToolResult, appendTurn, appendUser, longText } from './helpers.ts'
+
+/** What the read path sees on a `compaction/summary`: host members plus the six ledger fields. */
+type SummaryData = ReturnType<typeof readCompactionSummary>
 
 /** The six fields that must NOT appear as top-level `compaction/summary` members. */
 const LEDGER_FIELDS = [
@@ -175,4 +181,75 @@ test('issue #141: a real compaction/summary carries no top-level ledger fields a
   assert.deepEqual([...entry.parentBlockIds], ['c-parent'])
   assert.deepEqual([...entry.directMessageIds!], ['dm1'])
   assert.deepEqual([...entry.effectiveMessageIds!], ['em1', 'em2'])
+})
+
+// --- the upgrade path: pre-fix logs (top-level fields, no rawOutput) --------
+
+test('issue #141: a pre-fix log with top-level ledger fields still rebuilds tier and lineage', () => {
+  const session = Session.create('block-ledger-141-legacy')
+  appendTurn(session, 1)
+  appendUser(session, longText('q1', 1))
+  appendToolCall(session, 'checking the docs', 'call_1')
+  appendToolResult(session, 'done', 'call_1')
+  appendUser(session, longText('q2', 2))
+
+  const { seqs } = runCompactionTransaction(session, {
+    start: 2,
+    end: 3,
+    shadowedSeqs: [2, 3],
+    summary: [{ type: 'text', text: 'Tool round summary with enough detail.' }],
+    shadowedTokenCount: 500,
+    provider: 'p',
+    model: 'm',
+    tier: 2,
+    kernelBlockId: 'b1',
+    topic: 'tool round',
+    parentBlockIds: ['c-embedded'],
+    directMessageIds: ['dm-embedded'],
+    effectiveMessageIds: ['em-embedded'],
+  })
+
+  const events = session.snapshotEvents()
+  const summaryEvent = events[seqs[1]!]!
+  assert.ok(summaryEvent.type === 'compaction/summary', 'the transaction wrote a compaction/summary')
+  const written = readCompactionSummary(summaryEvent)
+  assert.ok(Array.isArray(written.rawOutput), 'the live write carries the embedded payload')
+
+  // Rebuild the whole log the way a pre-fix engine left it: the same host
+  // members, the six fields back at the top level, no rawOutput at all.
+  const { rawOutput: embeddedPayload, ...hostMembers } = written
+  assert.notEqual(embeddedPayload, undefined)
+  const legacyData: SummaryData = {
+    ...hostMembers,
+    tier: 3,
+    kernelBlockId: 'b9',
+    topic: 'legacy style',
+    parentBlockIds: ['c-legacy'],
+    directMessageIds: ['dm-legacy'],
+    effectiveMessageIds: ['em-legacy'],
+  }
+  const legacyEvent: SessionEvent = { ...summaryEvent, data: legacyData }
+  const legacyLog = events.map((event) => (event.seq === summaryEvent.seq ? legacyEvent : event))
+
+  const [legacyEntry] = rebuildBlockLedger(legacyLog)
+  assert.ok(legacyEntry, 'a pre-fix log still yields its block')
+  assert.equal(legacyEntry.tier, 3, 'tier comes from the legacy top-level member')
+  assert.equal(legacyEntry.kernelBlockId, 'b9')
+  assert.equal(legacyEntry.topic, 'legacy style')
+  assert.deepEqual([...legacyEntry.parentBlockIds], ['c-legacy'])
+  assert.deepEqual([...legacyEntry.directMessageIds!], ['dm-legacy'])
+  assert.deepEqual([...legacyEntry.effectiveMessageIds!], ['em-legacy'])
+  assert.equal(legacyEntry.summarySeq, seqs[2], 'the checkpoint node is still resolved')
+
+  // Both shapes at once: the embedded payload is the live one, so it wins over a
+  // top-level leftover instead of being silently overridden by it.
+  const bothData: SummaryData = { ...written, tier: 3, kernelBlockId: 'b9', topic: 'legacy style' }
+  const bothEvent: SessionEvent = { ...summaryEvent, data: bothData }
+  const bothLog = events.map((event) => (event.seq === summaryEvent.seq ? bothEvent : event))
+
+  const [bothEntry] = rebuildBlockLedger(bothLog)
+  assert.ok(bothEntry)
+  assert.equal(bothEntry.tier, 2, 'the embedded payload overrides the top-level leftover')
+  assert.equal(bothEntry.kernelBlockId, 'b1')
+  assert.equal(bothEntry.topic, 'tool round')
 })

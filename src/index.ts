@@ -35,7 +35,7 @@ import {
   type CompactionTrigger,
   type ManualCompactAgentContext,
 } from '@deepseek-ai/dsh-compaction'
-import { createCore, type CompressionCore } from 'acp-kernel'
+import { createCore, setDocCacheCap, type CompressionCore } from 'acp-kernel'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { DEFAULT_SESSION_CACHE_LIMIT, LruMap } from './lru.ts'
 import { AcpStateStore } from './state.ts'
@@ -44,7 +44,7 @@ import { acpCommand } from './commands.ts'
 import { buildNudge, EMERGENCY_NUDGE_MAX_PER_TURN } from './nudge.ts'
 import { ACP_SYSTEM_PROMPT_ORDER } from './system-prompt.ts'
 import { renderSystemPrompt, resolvePrompts, type AcpPrompts, type ResolvedPrompts } from './prompts.ts'
-import { DEFAULT_CONTEXT_WINDOW, probeModelWindow, projectedContextWindow, type AcpWindow } from './window.ts'
+import { DEFAULT_CONTEXT_WINDOW, probeModelWindow, projectedContextWindow, routeFor, type AcpWindow } from './window.ts'
 import { deferCompressPairHide, stripOrphanedSurfaceToolMessages } from './region.ts'
 
 export { AcpStateStore } from './state.ts'
@@ -215,6 +215,19 @@ export class AcpCompactionEngine extends CompactionEngine {
     this.prompts = resolvePrompts(config.prompts)
     const ports = this.config.countTokens !== undefined ? { countTokens: this.config.countTokens } : {}
     this.kernel = createCore(ports)
+    // The kernel's docFeatures cache (per-doc search features) defaults to an
+    // 8MB SOURCE-CHAR cap — sized for multi-session server processes. A DSH
+    // profile is single-user and its search corpus (ALL shadowed originals)
+    // routinely exceeds 8MB, so the default re-tokenizes the corpus on every
+    // search_context call (issue #133: ~18s/call on a 40MB corpus, cold and
+    // warm identical). The cap cannot be tuned DOWN instead — it evicts FIFO
+    // and bills source chars only, so a cap below the corpus caches nothing
+    // (measured: half the corpus → 1.1× on a repeat scan). 128MB covers the
+    // largest reported session (17.6M shadowed tokens ≈ 70MB text). Retained
+    // feature heap is 2.1×–51× the billed chars (content-dependent, measured)
+    // — accepted, since the host already holds a log of that scale; the
+    // arithmetic and the upstream root cause are in AGENTS.md rule 14.
+    setDocCacheCap(128 * 1024 * 1024)
     this.store = new AcpStateStore()
 
     const env: ToolEnvironment = {
@@ -382,8 +395,10 @@ export class AcpCompactionEngine extends CompactionEngine {
     if (this.config.modelContextLimit !== undefined) {
       return { limit: this.config.modelContextLimit, source: 'explicit' }
     }
-    const provider = agent.options.provider ?? ''
-    const model = agent.options.model ?? ''
+    // The per-route output cap must be looked up against the session's LIVE
+    // route or it lags one switch behind (a stale agent.options snapshot names
+    // the PREVIOUS route) — routeFor owns that fallback chain for every caller.
+    const { provider, model } = routeFor(agent)
     const key = `${provider}\0${model}`
     // Projection source first: it reflects the live route (agent.options is a
     // stale snapshot after a model switch), and it is not cached here because
@@ -393,10 +408,10 @@ export class AcpCompactionEngine extends CompactionEngine {
     if (this.config.autoModelContextLimit) {
       const projected = projectedContextWindow(agent)
       if (projected !== null) {
-        // The window comes from the live projection; the output cap still
-        // comes from the (cached) model probe — the projection schema carries
-        // no cap. After a mid-session switch agent.options names the
-        // PREVIOUS route, so the cap is the best available, not the live one.
+        // The window comes from the live projection; the output cap comes from
+        // the (cached) model probe for the LIVE route — the projection schema
+        // carries no cap, so the cap follows the live provider/model resolved
+        // above (agent.options only as the pre-first-request fallback).
         const cap = await this.outputCapFor(agent, provider, model)
         return this.applyReservation({ limit: projected, source: 'projection', provider, model }, cap)
       }

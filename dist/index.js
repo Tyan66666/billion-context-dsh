@@ -2458,6 +2458,14 @@ function docFeatures(text) {
   }
   return f;
 }
+function setDocCacheCap(chars) {
+  capChars = Math.max(1, chars);
+  while (cachedChars > capChars && cache.size > 0) {
+    const k = cache.keys().next().value;
+    cachedChars -= k.length;
+    cache.delete(k);
+  }
+}
 var substringAlgorithm = {
   name: "substring",
   description: "Exact substring counting (original baseline). Predictable, no normalization.",
@@ -3088,15 +3096,21 @@ function runCompactionTransaction(session, input) {
   }
   return { compactionId, seqs };
 }
-function summarySeqOfCompaction(events, compactionId) {
+function summarySeqIndex(events) {
+  const index = /* @__PURE__ */ new Map();
   for (const event of events) {
     if (event.type !== "user/message") continue;
     const source = event.data.source;
-    if (source?.plugin === "compact" && source.compactionId === compactionId) return event.seq;
+    const compactionId = source?.plugin === "compact" ? source.compactionId : void 0;
+    if (compactionId !== void 0 && !index.has(compactionId)) index.set(compactionId, event.seq);
   }
-  return null;
+  return index;
 }
+var blockLedgerCache = /* @__PURE__ */ new WeakMap();
 function rebuildBlockLedger(events) {
+  const cached = blockLedgerCache.get(events);
+  if (cached !== void 0 && cached.len === events.length) return cached.ledger;
+  const summarySeqs = summarySeqIndex(events);
   const ledger = [];
   for (const event of events) {
     if (event.type !== "compaction/summary") continue;
@@ -3113,7 +3127,7 @@ function rebuildBlockLedger(events) {
     const parentBlockIds = Array.isArray(data.parentBlockIds) ? [...data.parentBlockIds] : [];
     const directMessageIds = Array.isArray(data.directMessageIds) ? [...data.directMessageIds] : void 0;
     const effectiveMessageIds = Array.isArray(data.effectiveMessageIds) ? [...data.effectiveMessageIds] : void 0;
-    const summarySeq = summarySeqOfCompaction(events, data.compactionId);
+    const summarySeq = summarySeqs.get(data.compactionId) ?? null;
     ledger.push({
       blockId: data.compactionId,
       summary: extractText(data.summary),
@@ -3131,6 +3145,7 @@ function rebuildBlockLedger(events) {
       createdAt: event.time
     });
   }
+  blockLedgerCache.set(events, { len: events.length, ledger });
   return ledger;
 }
 function isToolEvent(event) {
@@ -3766,18 +3781,51 @@ function rangeTable(session, prompts = DEFAULT_RESOLVED) {
 function measuredTokenCount(agent, coreMessages) {
   return resolveTokenCount(agent, coreMessages);
 }
+function isCheckpointEvent(event) {
+  if (event.type !== "user/message") return false;
+  const source = event.data.source;
+  return source?.plugin === "compact";
+}
+function computeSurfaceBreakdown(state, messages, total, growth) {
+  let system = 0;
+  let tool = 0;
+  let code = 0;
+  let text = 0;
+  for (const message of messages) {
+    const tokens = defaultCountTokens(message.text ?? "");
+    if (message.contentType === "tool-call" || message.contentType === "tool-result") {
+      tool += tokens;
+    } else if (message.role === "system") {
+      system += tokens;
+    } else if ((message.text ?? "").includes("```")) {
+      code += tokens;
+    } else {
+      text += tokens;
+    }
+  }
+  let summaries = 0;
+  for (const block of state.blocks) {
+    if (block.active) summaries += defaultCountTokens(block.summary);
+  }
+  return { system, tool, summaries, code, text, total, growth };
+}
 var EMERGENCY_NUDGE_MAX_PER_TURN = 3;
 function buildNudge(agent, env, lastNudgeTurn, emergencyNudges, onEmergencyCapHit) {
   const session = agent.session;
   const state = env.store.stateFor(session);
   const coreMessages = allLogMessages(session);
-  const surfaceMessages = eventsToCoreMessages(surfaceEventsOf(session));
+  const surfaceEvents = surfaceEventsOf(session);
+  const surfaceMessages = eventsToCoreMessages(surfaceEvents);
   const tokenCount = measuredTokenCount(agent, surfaceMessages);
   const config = kernelConfigFor(env);
   const turn = env.kernel.processTurn({ messages: coreMessages, state, config, tokenCount });
   env.store.set(session, turn.state);
   const nudge = turn.nudge;
   if (nudge === void 0 || !nudge.shouldInject) return null;
+  const statusMessages = eventsToCoreMessages(
+    surfaceEvents.filter((event) => isCheckpointEvent(event) === false)
+  );
+  nudge.contextBreakdown = computeSurfaceBreakdown(turn.state, statusMessages, tokenCount, nudge.contextBreakdown?.growth ?? 0);
   const emergency = nudge.breakdown?.emergencyOverride === 1;
   const turnNumber = findOpenTurn(sessionEventsOf(session)) ?? 0;
   if (!emergency) {
@@ -3906,6 +3954,64 @@ function renderNudgeFromTemplates(nudge, emergency, session, prompts) {
   }
   if (prompts.nudge.tip !== "") parts.push("", prompts.nudge.tip);
   return parts.join("\n");
+}
+
+// src/window.ts
+var DEFAULT_CONTEXT_WINDOW = 128e3;
+function windowSourceLabel(window) {
+  if (window.source === "explicit") return "configured";
+  if (window.source === "projection") {
+    return `session projection current route (auto-refreshes on model switch)`;
+  }
+  if (window.source === "auto") {
+    return `auto-detected from ${window.provider ?? "?"}/${window.model ?? "?"}`;
+  }
+  if (window.probeFailed === true) return "default (auto-detection failed \u2014 restart to re-probe)";
+  return "default (auto-detection unavailable)";
+}
+function projectedContextWindow(agent) {
+  const projections = agent.ctx?.get?.("sessionProjections");
+  const window = projections?.snapshot?.(agent.session)?.values?.contextPressure?.contextWindow;
+  if (typeof window === "number" && Number.isInteger(window) && window > 0) return window;
+  return null;
+}
+function liveRoute(agent) {
+  let rc;
+  try {
+    rc = agent.session.requestContext();
+  } catch {
+    return null;
+  }
+  if (rc === void 0 || rc === null) return null;
+  const { provider, model } = rc;
+  if (typeof provider !== "string" || provider === "") return null;
+  if (typeof model !== "string" || model === "") return null;
+  return { provider, model };
+}
+function routeFor(agent) {
+  const live = liveRoute(agent);
+  return {
+    provider: live?.provider ?? agent.options.provider ?? "",
+    model: live?.model ?? agent.options.model ?? ""
+  };
+}
+async function probeModelWindow(agent, provider, model) {
+  const llm = agent.ctx?.get?.("llm");
+  if (llm?.resolveModelInfo === void 0) return { contextWindow: null, outputReservation: null };
+  try {
+    const info = await llm.resolveModelInfo(provider, model);
+    const window = info?.context?.contextWindow;
+    const cap = info?.defaultMaxTokens;
+    return {
+      contextWindow: typeof window === "number" && Number.isInteger(window) && window > 0 ? window : null,
+      outputReservation: typeof cap === "number" && Number.isInteger(cap) && cap > 0 ? cap : null
+    };
+  } catch {
+    return { contextWindow: null, outputReservation: null };
+  }
+}
+async function detectContextWindow(agent, provider, model) {
+  return (await probeModelWindow(agent, provider, model)).contextWindow;
 }
 
 // src/tools.ts
@@ -4171,14 +4277,15 @@ async function handleCompress(env, args, exec) {
     const shadowedTokens = shadowedTokensViaMeter(session, shadowed, agent.ctx);
     const tier = block.tier === 2 || block.tier === 3 ? block.tier : 1;
     const parentBlockIds = compactionIdsOfKernelBlocks(session, block.directBlockIds);
+    const { provider, model } = routeFor(agent);
     const { compactionId } = runCompactionTransaction(session, {
       start,
       end,
       shadowedSeqs: shadowed,
       summary: [{ type: "text", text: range.summary }],
       shadowedTokenCount: shadowedTokens,
-      provider: agent.options.provider ?? "",
-      model: agent.options.model ?? "",
+      provider,
+      model,
       tier,
       kernelBlockId: block.blockId,
       ...range.topic === void 0 ? {} : { topic: range.topic },
@@ -4255,8 +4362,12 @@ function roleOfEvent(event) {
       return null;
   }
 }
+var searchDocsCache = /* @__PURE__ */ new WeakMap();
 function buildSearchDocs(session) {
-  const ledger = rebuildBlockLedger(sessionEventsOf(session));
+  const events = sessionEventsOf(session);
+  const cached = searchDocsCache.get(events);
+  if (cached !== void 0) return cached;
+  const ledger = rebuildBlockLedger(events);
   const docs = [];
   const claimed = /* @__PURE__ */ new Set();
   for (const block of ledger) {
@@ -4289,6 +4400,7 @@ function buildSearchDocs(session) {
       });
     }
   }
+  searchDocsCache.set(events, docs);
   return docs;
 }
 function handleSearch(_env, rawArgs, exec) {
@@ -4334,7 +4446,7 @@ var statusParameters = {
     description: "Cap on rows or blocks shown (default 30)."
   }
 };
-function isCheckpointEvent(event) {
+function isCheckpointEvent2(event) {
   if (event.type !== "user/message") return false;
   const source = event.data.source;
   return source?.plugin === "compact";
@@ -4353,7 +4465,7 @@ async function handleStatus(env, rawArgs, exec) {
   const config = kernelConfigFor({ ...env, modelContextLimit: window.limit });
   const turn = env.kernel.processTurn({ messages: coreMessages, state, config, tokenCount });
   const statusMessages = eventsToCoreMessages(
-    surface.filter((event) => !isCheckpointEvent(event)),
+    surface.filter((event) => !isCheckpointEvent2(event)),
     toolNames
   );
   const report = buildStatusReport(turn.state, statusMessages, defaultCountTokens, args);
@@ -4416,44 +4528,6 @@ function makeTools(env) {
   ];
 }
 
-// src/window.ts
-var DEFAULT_CONTEXT_WINDOW = 128e3;
-function windowSourceLabel(window) {
-  if (window.source === "explicit") return "configured";
-  if (window.source === "projection") {
-    return `session projection current route (auto-refreshes on model switch)`;
-  }
-  if (window.source === "auto") {
-    return `auto-detected from ${window.provider ?? "?"}/${window.model ?? "?"}`;
-  }
-  if (window.probeFailed === true) return "default (auto-detection failed \u2014 restart to re-probe)";
-  return "default (auto-detection unavailable)";
-}
-function projectedContextWindow(agent) {
-  const projections = agent.ctx?.get?.("sessionProjections");
-  const window = projections?.snapshot?.(agent.session)?.values?.contextPressure?.contextWindow;
-  if (typeof window === "number" && Number.isInteger(window) && window > 0) return window;
-  return null;
-}
-async function probeModelWindow(agent, provider, model) {
-  const llm = agent.ctx?.get?.("llm");
-  if (llm?.resolveModelInfo === void 0) return { contextWindow: null, outputReservation: null };
-  try {
-    const info = await llm.resolveModelInfo(provider, model);
-    const window = info?.context?.contextWindow;
-    const cap = info?.defaultMaxTokens;
-    return {
-      contextWindow: typeof window === "number" && Number.isInteger(window) && window > 0 ? window : null,
-      outputReservation: typeof cap === "number" && Number.isInteger(cap) && cap > 0 ? cap : null
-    };
-  } catch {
-    return { contextWindow: null, outputReservation: null };
-  }
-}
-async function detectContextWindow(agent, provider, model) {
-  return (await probeModelWindow(agent, provider, model)).contextWindow;
-}
-
 // src/commands.ts
 async function statusText(env, agent) {
   const session = agent.session;
@@ -4511,14 +4585,15 @@ function compressText(env, agent, args) {
   }
   const shadowed = shadowedSeqsOf(session, start, end);
   const shadowedTokens = shadowedTokensViaMeter(session, shadowed, agent.ctx);
+  const { provider, model } = routeFor(agent);
   const { compactionId } = runCompactionTransaction(session, {
     start,
     end,
     shadowedSeqs: shadowed,
     summary: [{ type: "text", text: summary }],
     shadowedTokenCount: shadowedTokens,
-    provider: agent.options.provider ?? "",
-    model: agent.options.model ?? ""
+    provider,
+    model
   });
   return `Compressed seqs ${start}..${end} (${shadowed.length} messages) as block ${compactionId.slice(0, 8)}`;
 }
@@ -4609,6 +4684,7 @@ var AcpCompactionEngine = class extends CompactionEngine {
     this.prompts = resolvePrompts(config.prompts);
     const ports = this.config.countTokens !== void 0 ? { countTokens: this.config.countTokens } : {};
     this.kernel = createCore(ports);
+    setDocCacheCap(128 * 1024 * 1024);
     this.store = new AcpStateStore();
     const env = {
       kernel: this.kernel,
@@ -4735,8 +4811,7 @@ var AcpCompactionEngine = class extends CompactionEngine {
     if (this.config.modelContextLimit !== void 0) {
       return { limit: this.config.modelContextLimit, source: "explicit" };
     }
-    const provider = agent.options.provider ?? "";
-    const model = agent.options.model ?? "";
+    const { provider, model } = routeFor(agent);
     const key = `${provider}\0${model}`;
     if (this.config.autoModelContextLimit) {
       const projected = projectedContextWindow(agent);
