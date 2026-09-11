@@ -200,18 +200,20 @@ test('M4: /acp decompress pages with [offset] [limit] args and rejects bad numbe
     }],
   } as never, { callId: 'call-acp', name: 'compress', arguments: {}, signal: new AbortController().signal, agent } as never)
 
+  // Big messages: the char budget caps the page at one message even though limit
+  // asks for two, so the window reports a single message and continues at offset 1.
   const page = await runAcp(env, agent, 'decompress b1 0 2')
-  assert.match(page, /\[messages 1\.\.2 of 5\]/, 'page footer reports the window')
-  assert.match(page, /Continue with: \/acp decompress [0-9a-f]{8} 2/, 'continue hint carries the next offset')
+  assert.match(page, /\[messages 1\.\.1 of 5\]/, 'page header reports the window')
+  assert.match(page, /Continue with: \/acp decompress [0-9a-f]{8} 1/, 'continue hint carries the next offset')
 
-  const rest = await runAcp(env, agent, 'decompress b1 2')
-  assert.match(rest, /\[messages 3\.\.5 of 5\]/, 'continuation covers the tail')
+  const rest = await runAcp(env, agent, 'decompress b1 4')
+  assert.match(rest, /\[messages 5\.\.5 of 5\]/, 'continuation reaches the final message')
   assert.ok(!rest.includes('Continue with'), 'no further page on the last one')
 
   const badOffset = await runAcp(env, agent, 'decompress b1 abc')
   assert.match(badOffset, /offset must be a non-negative integer/)
   const badLimit = await runAcp(env, agent, 'decompress b1 0 0')
-  assert.match(badLimit, /limit must be a positive integer/)
+  assert.match(badLimit, /limit must be an integer between 1 and 100/)
 })
 
 test('M4: /acp status flags a failed window probe with a restart hint (issue #63)', async () => {

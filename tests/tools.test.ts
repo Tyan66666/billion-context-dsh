@@ -7,9 +7,9 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import { Session } from '@deepseek-ai/dsh-session'
 import { AcpStateStore } from '../src/state.ts'
 import { makeTools, type ToolEnvironment } from '../src/tools.ts'
-import { blockRegistry, rebuildBlockLedger } from '../src/region.ts'
+import { blockRegistry, rebuildBlockLedger, sliceDecompressPage, DEFAULT_DECOMPRESS_PAGE, DEFAULT_DECOMPRESS_PAGE_CHARS } from '../src/region.ts'
 import { rangeTable } from '../src/nudge.ts'
-import { appendTurn, appendToolResult, appendToolCall, appendMultiToolCall, appendUser, appendAssistant, buildTextSession, longText } from './helpers.ts'
+import { appendTurn, appendToolResult, appendToolCall, appendMultiToolCall, appendUser, appendAssistant, buildTextSession, buildShortTextSession, longText } from './helpers.ts'
 
 function makeEnv(limit = 128000): ToolEnvironment {
   return {
@@ -53,6 +53,29 @@ function toolOf(env: ToolEnvironment, name: string) {
   const tool = makeTools(env).find((definition) => definition.name === name)
   assert.ok(tool, `tool ${name} registered`)
   return tool
+}
+
+/**
+ * Walk a paged decompress to completion and concatenate every page's text.
+ * Large-message fixtures now page to one message per call under the char budget,
+ * so tests that verify a block's FULL content must follow the continue hint
+ * instead of assuming a single call returns everything.
+ */
+async function decompressAll(env: ToolEnvironment, session: Session, blockId: string): Promise<string> {
+  const decompress = toolOf(env, 'decompress')
+  const chunks: string[] = []
+  let offset = 0
+  for (;;) {
+    const args: { blockId: string; offset?: number } = { blockId }
+    if (offset !== 0) args.offset = offset
+    const result = await decompress.execute(args, fakeExec(session))
+    const text = (result as { text: string }).text
+    chunks.push(text)
+    const next = /offset: (\d+) \}/.exec(text)
+    if (next === null) break
+    offset = Number(next[1])
+  }
+  return chunks.join('\n\n')
 }
 
 test('M3: compress lands a durable block, shrinks the surface, and uses the effective context window', async () => {
@@ -187,16 +210,14 @@ test('M3: decompress recovers the shadowed originals read-only', async () => {
   assert.equal(ledger.length, 1)
   const blockId = ledger[0]!.blockId
 
-  const decompress = toolOf(env, 'decompress')
-  const result = await decompress.execute({ blockId }, fakeExec(session))
-  const text = (result as { text: string }).text
+  const text = await decompressAll(env, session, blockId)
   assert.match(text, /\[msg 0\]/)
   assert.match(text, /\[msg 4\]/)
   // The surface is untouched by decompress.
   assert.equal(session.deriveMessages().length, 8)
 })
 
-test('M3: decompress pages a large block by default and walks it with offset', async () => {
+test('M3: decompress pages a large block by size and walks it with offset', async () => {
   const env = makeEnv()
   const session = buildTextSession(121)
   const compress = toolOf(env, 'compress')
@@ -213,17 +234,22 @@ test('M3: decompress pages a large block by default and walks it with offset', a
   const blockId = ledger[0]!.blockId
   const decompress = toolOf(env, 'decompress')
 
+  // issue #112(b): one page must come back intact, not silently trimmed — so a
+  // single page's emitted text stays under the host tool-result pruner
+  // threshold (8192). The ~4KB-per-message fixture can't fit two messages in a
+  // page, so the char budget bounds it far below the 100-message ceiling.
   const firstText = ((await decompress.execute({ blockId }, fakeExec(session))) as { text: string }).text
-  assert.match(firstText, /\[messages 1\.\.100 of 120\]/)
-  assert.match(firstText, /continue with decompress\(\{ blockId: ".*", offset: 100 \}\)/)
+  const header = /\[messages 1\.\.(\d+) of 120\]/.exec(firstText)
+  assert.ok(header, `page header present: ${firstText.slice(0, 160)}`)
+  const pageSize = Number(header[1])
+  assert.ok(pageSize >= 1 && pageSize < DEFAULT_DECOMPRESS_PAGE, `char budget keeps the page below the message ceiling (got ${pageSize})`)
+  assert.ok(firstText.length < 8192, `one page stays under the host pruner threshold (got ${firstText.length} chars)`)
   assert.match(firstText, /\[seq 1\] /)
-  assert.doesNotMatch(firstText, /\[seq 101\] /)
+  assert.match(firstText, /More available/)
 
-  const secondText = ((await decompress.execute({ blockId, offset: 100 }, fakeExec(session))) as { text: string }).text
-  assert.match(secondText, /\[messages 101\.\.120 of 120\]/)
-  assert.doesNotMatch(secondText, /More available/)
-  assert.match(secondText, /\[seq 101\] /)
-  assert.match(secondText, /\[seq 120\] /)
+  const all = await decompressAll(env, session, blockId)
+  assert.match(all, /\[seq 1\] /)
+  assert.match(all, /\[seq 120\] /)
 
   const beyondText = ((await decompress.execute({ blockId, offset: 500 }, fakeExec(session))) as { text: string }).text
   assert.match(beyondText, /offset 500 is past the end/)
@@ -231,25 +257,34 @@ test('M3: decompress pages a large block by default and walks it with offset', a
 
 test('M3: decompress honors an explicit limit and clamps a negative offset', async () => {
   const env = makeEnv()
-  const session = buildTextSession(12)
+  // Short messages so two fit well under one page's char budget (an explicit
+  // limit is honored verbatim rather than cut by size — issue #112). The session
+  // must be long for two independent kernel gates on the compressed range:
+  //   - min-compress: the range needs >= 5000 chars (80 msgs x ~87 clears it);
+  //   - preserveRecentTokens (default 5000): the kernel protects messages walking
+  //     backward from the end until 5000 tokens accumulate. At ~22 tokens/msg that
+  //     is ~227 msgs, so a short session is ENTIRELY protected and nothing lands —
+  //     build 400 msgs so only the tail (~last 227) is protected and the early
+  //     1..80 range stays fully compressible.
+  const session = buildShortTextSession(400)
   const compress = toolOf(env, 'compress')
   await compress.execute({
     content: [{
       startSeq: 1,
-      endSeq: 5,
-      summary: 'Authentication summary with enough technical detail to satisfy the kernel threshold: JWT, refresh tokens in Redis, login flow with rate limiting, bcrypt cost 12, session revocation on password change.',
+      endSeq: 80,
+      summary: 'Eighty short authentication lines covering JWT access tokens, Redis refresh tokens, login flow, rate limiting, bcrypt cost 12, and session revocation on password change.',
     }],
   } as never, fakeExec(session))
   const blockId = rebuildBlockLedger(session.snapshotEvents())[0]!.blockId
   const decompress = toolOf(env, 'decompress')
 
   const limited = ((await decompress.execute({ blockId, limit: 2 }, fakeExec(session))) as { text: string }).text
-  assert.match(limited, /\[messages 1\.\.2 of 5\]/)
+  assert.match(limited, /\[messages 1\.\.2 of 80\]/)
   assert.match(limited, /offset: 2 \}/)
   assert.doesNotMatch(limited, /\[seq 3\] /)
 
   const clamped = ((await decompress.execute({ blockId, offset: -7 }, fakeExec(session))) as { text: string }).text
-  assert.match(clamped, /\[messages 1\.\.\d+ of 5\]/)
+  assert.match(clamped, /\[messages 1\.\.\d+ of 80\]/)
   assert.doesNotMatch(clamped, /past the end/)
 })
 
@@ -269,9 +304,7 @@ test('M3: decompress accepts the kernel block ref bN that acp_status shows', asy
   const kernelBlockId = ledger[0]!.kernelBlockId
   assert.match(kernelBlockId!, /^b\d+$/, 'the durable block records its kernel ref')
 
-  const decompress = toolOf(env, 'decompress')
-  const result = await decompress.execute({ blockId: kernelBlockId! }, fakeExec(session))
-  const text = (result as { text: string }).text
+  const text = await decompressAll(env, session, kernelBlockId!)
   // The bN path resolves to the SAME durable block as the compaction id.
   assert.match(text, /Block [0-9a-f-]{36} — Authentication/, 'bN resolves to the compaction id')
   assert.match(text, /\[msg 0\]/)
@@ -1022,9 +1055,7 @@ test('M3: distilling a block summary node produces a tier-2 block', async () => 
   assert.ok(after[1]!.effectiveMessageIds!.includes('1'), 'the tier-2 block records its parents ORIGINAL coverage, not the checkpoint node')
 
   // decompress on the tier-2 block expands through the parent to the originals.
-  const decompress = toolOf(env, 'decompress')
-  const rec = await decompress.execute({ blockId: after[1]!.blockId }, fakeExec(session))
-  const recText = (rec as { text: string }).text
+  const recText = await decompressAll(env, session, after[1]!.blockId)
   assert.match(recText, /tier 2, distills 1 block/)
   assert.match(recText, /\[msg 0\]/)
   assert.match(recText, /\[msg 4\]/)
@@ -1057,9 +1088,7 @@ test('M3: distilling a tier-2 block produces tier 3', async () => {
   assert.equal(after[2]!.kernelBlockId, 'b3')
 
   // decompress recurses through BOTH levels back to the originals.
-  const decompress = toolOf(env, 'decompress')
-  const rec = await decompress.execute({ blockId: after[2]!.blockId }, fakeExec(session))
-  const recText = (rec as { text: string }).text
+  const recText = await decompressAll(env, session, after[2]!.blockId)
   assert.match(recText, /tier 3, distills 1 block/)
   assert.match(recText, /\[msg 0\]/)
   assert.match(recText, /\[msg 4\]/)
@@ -1208,9 +1237,7 @@ test('M3: a mixed boundary [message..blockSummary] distills and folds extra mess
 
   // The folded message (seq 2 = assistant, index 1) is recoverable alongside
   // the distilled originals (seqs 3..7 → [msg 2]..[msg 6]).
-  const decompress = toolOf(env, 'decompress')
-  const rec = await decompress.execute({ blockId: after[1]!.blockId }, fakeExec(session))
-  const recText = (rec as { text: string }).text
+  const recText = await decompressAll(env, session, after[1]!.blockId)
   assert.match(recText, /\[reply 1\]/, 'the folded assistant message is in the recursion')
   assert.match(recText, /\[msg 4\]/, 'a distilled original from the parent block is in the recursion')
 })
@@ -1301,4 +1328,74 @@ test('M3: issue #60 P3② — every compress result reports its tier, including 
     content: [{ startSeq: tier1Seq, endSeq: tier1Seq, summary: TIER_SUMMARY }],
   } as never, fakeExec(session))
   assert.match((dist as { text: string }).text, /, tier 2/, 'the distilled block reports tier 2 in the same format')
+})
+
+test('M3: sliceDecompressPage caps the limit, guards bad input, and stops at the char budget', () => {
+  const many = Array.from({ length: 200 }, (_, i) => i)
+
+  // Tiny messages (10 chars): the 100-message ceiling binds, not the char budget.
+  const capped = sliceDecompressPage(many, 0, DEFAULT_DECOMPRESS_PAGE, DEFAULT_DECOMPRESS_PAGE_CHARS, () => 10)
+  assert.equal(capped.seqs.length, DEFAULT_DECOMPRESS_PAGE, 'the default page is capped at the message ceiling')
+  assert.ok(!capped.exhausted)
+
+  const hugeLimit = sliceDecompressPage(many, 0, 100000, DEFAULT_DECOMPRESS_PAGE_CHARS, () => 10)
+  assert.equal(hugeLimit.seqs.length, DEFAULT_DECOMPRESS_PAGE, 'an oversized explicit limit is clamped to the ceiling')
+
+  // 1000-char messages: the char budget binds first — floor(7000/1000) fit.
+  const budgeted = sliceDecompressPage(many, 0, DEFAULT_DECOMPRESS_PAGE, DEFAULT_DECOMPRESS_PAGE_CHARS, () => 1000)
+  assert.equal(budgeted.seqs.length, Math.floor(DEFAULT_DECOMPRESS_PAGE_CHARS / 1000), `char budget bounds the page (got ${budgeted.seqs.length})`)
+
+  // Non-numeric offset/limit fall back to defaults instead of producing a NaN slice.
+  const badInput = sliceDecompressPage(many, Number.NaN, Number.NaN, DEFAULT_DECOMPRESS_PAGE_CHARS, () => 10)
+  assert.equal(badInput.offset, 0)
+  assert.equal(badInput.seqs.length, DEFAULT_DECOMPRESS_PAGE)
+
+  // An offset past the end yields an empty, exhausted page.
+  const pastEnd = sliceDecompressPage([1, 2, 3], 100, 10, DEFAULT_DECOMPRESS_PAGE_CHARS, () => 10)
+  assert.deepEqual(pastEnd.seqs, [])
+  assert.equal(pastEnd.total, 3)
+  assert.ok(pastEnd.exhausted)
+
+  // A single message larger than the whole budget still returns one message (forward progress).
+  const loneHuge = sliceDecompressPage([1, 2], 0, 10, 100, () => 5000)
+  assert.deepEqual(loneHuge.seqs, [1])
+  assert.ok(!loneHuge.exhausted, 'a second message exists beyond the over-budget first one')
+})
+
+test('M3: decompress keeps every tool-heavy page under the host pruner threshold (issue #112)', async () => {
+  const env = makeEnv()
+  const session = Session.create('tool-heavy')
+  appendTurn(session, 1)
+  appendUser(session, longText('request', 0))
+  for (let i = 0; i < 6; i += 1) {
+    appendToolCall(session, `run step ${i}`, `call_${i}`)
+    appendToolResult(session, longText(`tool-out`, i), `call_${i}`)
+  }
+  appendAssistant(session, longText('done', 0), 1, 8)
+  const compress = toolOf(env, 'compress')
+  await compress.execute({
+    content: [{ startSeq: 1, endSeq: 14, summary: 'Six large bash tool outputs and their steps: JWT access tokens, Redis refresh tokens, login flow, rate limiting, bcrypt cost 12, session revocation.' }],
+  } as never, fakeExec(session))
+  const blockId = rebuildBlockLedger(session.snapshotEvents())[0]!.blockId
+  const decompress = toolOf(env, 'decompress')
+
+  // Walk every page; each one must come back intact under the host pruner threshold.
+  let offset = 0
+  let pages = 0
+  const recovered: string[] = []
+  for (;;) {
+    const args: { blockId: string; offset?: number } = { blockId }
+    if (offset !== 0) args.offset = offset
+    const text = ((await decompress.execute(args, fakeExec(session))) as { text: string }).text
+    pages += 1
+    recovered.push(text)
+    assert.ok(pages <= 50, 'the walk must terminate')
+    assert.ok(text.length < 8192, `page ${pages} stays under the host pruner threshold (got ${text.length} chars)`)
+    const next = /offset: (\d+) \}/.exec(text)
+    if (next === null) break
+    offset = Number(next[1])
+  }
+  const all = recovered.join('\n\n')
+  assert.ok(pages >= 2, 'a multi-KB tool block spans more than one page')
+  assert.match(all, /\[tool-out \d+\]/, 'extractEventText recurses into the nested tool-result content on every page')
 })

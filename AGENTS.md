@@ -25,7 +25,7 @@ src/
 ├── index.ts        # AcpCompactionEngine (CompactionEngine backend) + wiring
 ├── messages.ts     # M1: session events ↔ acp-kernel CoreMessage projection
 ├── state.ts        # M2: per-session kernel state
-├── region.ts       # M5: durable region transaction + log-rebuilt ledger + surface range solving
+├── region.ts       # M5: durable region transaction + log-rebuilt ledger + surface range solving + decompress paging (char-budget vs host pruner, #112)
 ├── block-ledger.ts # M5 support: tier/lineage fields encoded inside the admitted compaction/summary rawOutput member, never top-level (issue #141)
 ├── tools.ts        # M3: compress / decompress / search_context / acp_status (status rendered via kernel buildStatusReport)
 ├── nudge.ts        # M4: kernel renderNudgeText (default) + seq-range-table adaptation; template path on prompts override; emergency nudges capped per user turn (issue #108)
