@@ -18,9 +18,12 @@ import { type KernelConfigInput } from './config.ts';
 import { type AcpWindow } from './window.ts';
 import { type ResolvedPrompts } from './prompts.ts';
 import type { SettingsCommandSurface } from './settings.ts';
+import type { PresetName } from './presets.ts';
 export interface ToolEnvironment extends KernelConfigInput {
     readonly kernel: CompressionCore;
     readonly store: AcpStateStore;
+    /** Display-only: the named preset that produced the nudge thresholds above, if any (`/acp status` names it). Never read by the kernel path. */
+    readonly preset?: PresetName;
     /** Resolve the effective context window for an agent (optional: status falls back to modelContextLimit). */
     readonly windowFor?: (agent: Agent) => Promise<AcpWindow>;
     /** Resolved prompt templates (optional: falls back to DEFAULT_RESOLVED). */

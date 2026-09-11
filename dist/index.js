@@ -5618,6 +5618,58 @@ function makeSettingsCommandSurface(getService, getSnapshot) {
   };
 }
 
+// src/presets.ts
+var PRESET_NAMES = [
+  "preserve",
+  "relaxed",
+  "balanced",
+  "efficient",
+  "aggressive"
+];
+var PRESETS = {
+  preserve: {
+    label: "keep context as long as possible \u2014 nudge only close to the limit",
+    nudgeMinContextLimitPct: 0.55,
+    nudgeMaxContextLimitPct: 0.78,
+    nudgeEmergencyThresholdPct: 0.93
+  },
+  relaxed: {
+    label: "light-touch compression \u2014 nudges a little earlier than preserve",
+    nudgeMinContextLimitPct: 0.5,
+    nudgeMaxContextLimitPct: 0.75,
+    nudgeEmergencyThresholdPct: 0.9
+  },
+  balanced: {
+    // == the current out-of-the-box engine defaults (kernel min 0.45, engine
+    // max 0.70, engine emergency 0.85): choosing this changes nothing vs today.
+    label: "default balance \u2014 the same thresholds the plugin ships with",
+    nudgeMinContextLimitPct: 0.45,
+    nudgeMaxContextLimitPct: 0.7,
+    nudgeEmergencyThresholdPct: 0.85
+  },
+  efficient: {
+    label: "trim more often \u2014 favors low token usage over keeping full history",
+    nudgeMinContextLimitPct: 0.4,
+    nudgeMaxContextLimitPct: 0.6,
+    nudgeEmergencyThresholdPct: 0.78
+  },
+  aggressive: {
+    label: "lean context \u2014 compresses early and frequently",
+    nudgeMinContextLimitPct: 0.3,
+    nudgeMaxContextLimitPct: 0.5,
+    nudgeEmergencyThresholdPct: 0.7
+  }
+};
+function isPresetName(value) {
+  return typeof value === "string" && PRESET_NAMES.includes(value);
+}
+function resolvePreset(name) {
+  if (!isPresetName(name)) {
+    throw new Error(`unknown preset "${name}" \u2014 valid presets: ${PRESET_NAMES.join(", ")}`);
+  }
+  return PRESETS[name];
+}
+
 // src/commands.ts
 async function statusText(env, agent) {
   const session = agent.session;
@@ -5636,6 +5688,13 @@ async function statusText(env, agent) {
     `  estimated context: ${estimated} / ${limit} (${Math.round(estimated / limit * 100)}%)`,
     windowLine
   ];
+  if (env.preset !== void 0) {
+    const ov = env.coreOverrides?.nudge;
+    const pct2 = (value) => `${Math.round((value ?? 0) * 100)}%`;
+    lines.push(
+      `  preset: ${env.preset} (${PRESETS[env.preset].label}) [min ${pct2(ov?.minContextLimitPct ?? env.nudgeMinContextLimitPct)} \xB7 max ${pct2(ov?.maxContextLimitPct ?? env.nudgeMaxContextLimitPct)} \xB7 emergency ${pct2(ov?.emergencyThresholdPct ?? env.nudgeEmergencyThresholdPct)}]`
+    );
+  }
   if (window.probeFailed === true) {
     lines.push(`  \u26A0 window auto-detection failed \u2014 using the ${limit} fallback (change modelContextLimit or autoModelContextLimit via /acp config \u2014 or restart \u2014 to re-probe)`);
   }
@@ -5876,7 +5935,32 @@ var DEFAULT_CONFIG = {
   nudgeEmergencyThresholdPct: 0.85
 };
 function resolveAcpConfig(config = {}) {
-  return { ...DEFAULT_CONFIG, ...config };
+  const resolved = resolvePresetThresholds({ ...DEFAULT_CONFIG, ...config }, config);
+  assertNudgeThresholdOrder(resolved);
+  return resolved;
+}
+function resolvePresetThresholds(base, config) {
+  if (base.preset === void 0) return base;
+  const preset = resolvePreset(base.preset);
+  return {
+    ...base,
+    nudgeMinContextLimitPct: config.nudgeMinContextLimitPct ?? preset.nudgeMinContextLimitPct,
+    nudgeMaxContextLimitPct: config.nudgeMaxContextLimitPct ?? preset.nudgeMaxContextLimitPct,
+    nudgeEmergencyThresholdPct: config.nudgeEmergencyThresholdPct ?? preset.nudgeEmergencyThresholdPct
+  };
+}
+function assertNudgeThresholdOrder(config) {
+  const { nudgeMinContextLimitPct: min, nudgeMaxContextLimitPct: max, nudgeEmergencyThresholdPct: emergency } = config;
+  const describe = `min ${min ?? "kernel default"} / max ${max ?? "kernel default"} / emergency ${emergency ?? "kernel default"}`;
+  if (min !== void 0 && max !== void 0 && min > max) {
+    throw new Error(`nudge thresholds are inverted (${describe}) \u2014 nudgeMinContextLimitPct must be <= nudgeMaxContextLimitPct`);
+  }
+  if (max !== void 0 && emergency !== void 0 && max > emergency) {
+    throw new Error(`nudge thresholds are inverted (${describe}) \u2014 nudgeMaxContextLimitPct must be <= nudgeEmergencyThresholdPct`);
+  }
+  if (min !== void 0 && emergency !== void 0 && min > emergency) {
+    throw new Error(`nudge thresholds are inverted (${describe}) \u2014 nudgeMinContextLimitPct must be <= nudgeEmergencyThresholdPct`);
+  }
 }
 var AcpCompactionEngine = class extends CompactionEngine {
   /** The framework-agnostic ACP compression core, reused verbatim. */
@@ -5972,6 +6056,10 @@ var AcpCompactionEngine = class extends CompactionEngine {
         return engine.readSettingsSource().nudgeEmergencyThresholdPct;
       },
       coreOverrides: this.config.coreOverrides,
+      // Display-only: which named preset produced the thresholds above (if any),
+      // so /acp status can name it. The resolved pct values above are what the
+      // kernel actually reads — this field never feeds kernelConfigFor.
+      preset: this.config.preset,
       windowFor: (agent) => this.windowFor(agent),
       prompts: this.prompts,
       compressCallIdsToHide: this.compressCallIdsToHide,
@@ -6200,6 +6288,8 @@ export {
   DEFAULT_PROMPTS,
   DEFAULT_RESOLVED,
   EMERGENCY_NUDGE_MAX_PER_TURN,
+  PRESETS,
+  PRESET_NAMES,
   SETTINGS_KEYS,
   SETTING_DEFAULTS,
   acpCommand,
@@ -6217,6 +6307,7 @@ export {
   filterSettingsEntry,
   findOpenTurn,
   hideCompressToolPair,
+  isPresetName,
   kernelConfigFor,
   makeSettingsCommandSurface,
   makeTools,
@@ -6228,6 +6319,7 @@ export {
   renderTemplate,
   resolveAcpConfig,
   resolveAcpSettings,
+  resolvePreset,
   resolvePrompts2 as resolvePrompts,
   resolveSurfaceRange,
   resolveTokenCount,

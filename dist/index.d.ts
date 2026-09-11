@@ -34,8 +34,10 @@ import { type ToolEnvironment } from './tools.ts';
 import { type AcpPrompts, type ResolvedPrompts } from './prompts.ts';
 import { type AcpWindow } from './window.ts';
 import { type SettingsCommandSurface } from './settings.ts';
+import { type PresetName } from './presets.ts';
 export { AcpStateStore } from './state.ts';
 export { kernelConfigFor, type KernelConfigInput } from './config.ts';
+export { PRESETS, PRESET_NAMES, isPresetName, resolvePreset, type NudgePreset, type PresetName, } from './presets.ts';
 export { ACP_SYSTEM_PROMPT, ACP_SYSTEM_PROMPT_ORDER } from './system-prompt.ts';
 export { DEFAULT_PROMPTS, DEFAULT_RESOLVED, renderSystemPrompt, renderTemplate, resolvePrompts, type AcpPrompts, type NudgePrompts, type PromptInput, type PromptOverride, type RangeTablePrompts, type ResolvedPrompts, type ToolPrompts, } from './prompts.ts';
 export { makeTools, type ToolEnvironment } from './tools.ts';
@@ -76,6 +78,19 @@ export interface AcpConfig {
      * 80% compaction-basic line shadows it in standard/code/cordis modes).
      */
     readonly nudgeEmergencyThresholdPct?: number;
+    /**
+     * Named bundle for the three nudge thresholds — how eagerly the model is
+     * asked to compress, in one word. One of 'preserve' | 'relaxed' | 'balanced'
+     * | 'efficient' | 'aggressive' (see src/presets.ts). It fills ONLY the nudge
+     * thresholds you did not set explicitly, so precedence is explicit value >
+     * preset > engine default and a partial override on top of a preset still
+     * wins. An unknown name fails engine construction (fail-fast). No effect on
+     * any other knob (`modelContextLimit`, `autoNudge`, prompts, coreOverrides).
+     * An unknown name fails construction, and so does a merged window that ends up
+     * inverted (min > max, max > emergency or min > emergency — the kernel itself
+     * only warns about that, see `assertNudgeThresholdOrder`).
+     */
+    readonly preset?: PresetName;
     /**
      * Any other acp-kernel Config override (billion-context-pi's `coreOverrides`
      * escape hatch). Merge order per section: kernel defaults → the engine pct
