@@ -126,8 +126,54 @@ export function shadowedHostTokens(session: Session, seqs: readonly number[]): n
 /** The slice of the live meter's measurement the engine may price from. */
 interface TokenMeterLike {
   measure(session: Session): {
-    nodes: ReadonlyArray<{ seq: number; tokens: number; heuristicTokens?: number }>
+    nodes: ReadonlyArray<{
+      seq: number
+      tokens: number
+      heuristicTokens?: number
+      /** Routed surcharge for image occurrences (adapter-declared visual price). */
+      imageStructuralTokens?: number
+      /** Routed surcharge for file occurrences. */
+      fileStructuralTokens?: number
+    }>
   }
+}
+
+/**
+ * Provider-anchored MEDIA price per surface seq, read from the host meter.
+ *
+ * An `image`/`file` block carries no characters, so every text-based estimator
+ * prices it at zero while the provider still bills it (the routed figure comes
+ * from the adapter's declared visual price, which is why it can only be READ
+ * from the meter — mirroring it is impossible by construction). Without this,
+ * a picture-heavy span looked free in the compressible-range table and the
+ * model ranked it last (issue #117).
+ *
+ * Where this price may be used: USAGE accounting only (range-table tokens,
+ * display). It must NEVER feed a `shadowedTokenCount` claim — the host's
+ * projection folds those with its own fixed heuristic and a routed price
+ * overstates the claim, folding the projection negative on image ranges
+ * (issue #103, the image-route channel of the #54 brick; rule 12).
+ *
+ * Returns an empty map when the meter is absent, when a measurement throws
+ * (step-less logs), or when the meter exposes no media fields (older line) —
+ * which degrades to the previous text-only behaviour.
+ */
+export function mediaPriceViaMeter(
+  session: Session,
+  ctx?: { get?(name: string): unknown } | null,
+): ReadonlyMap<number, number> {
+  const prices = new Map<number, number>()
+  try {
+    const meter = ctx?.get?.('tokenMeter') as TokenMeterLike | undefined
+    if (meter?.measure === undefined) return prices
+    for (const node of meter.measure(session).nodes) {
+      const media = (node.imageStructuralTokens ?? 0) + (node.fileStructuralTokens ?? 0)
+      if (media > 0) prices.set(node.seq, media)
+    }
+  } catch {
+    // Older meter shapes and step-less logs: no media surcharge available.
+  }
+  return prices
 }
 
 /**

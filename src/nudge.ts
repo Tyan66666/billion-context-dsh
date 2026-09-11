@@ -29,7 +29,10 @@ import {
   summarySeqOfKernelBlock,
   surfaceSummary,
   type KernelRangeView,
+  type MediaPriceOf,
+  type SeqCompressibleRange,
 } from './region.ts'
+import { mediaPriceViaMeter } from './host-tokens.ts'
 import { sessionEventsOf } from './session-events.ts'
 import { kernelConfigFor, type KernelConfigInput } from './config.ts'
 import { DEFAULT_RESOLVED, renderTemplate, type ResolvedPrompts } from './prompts.ts'
@@ -112,6 +115,35 @@ function kernelRangeViewOf(nudge: NudgeDecision, state: CompressionState): Kerne
 }
 
 /**
+ * Range-row suffix naming the image/file blocks a span carries, so the model
+ * does not read "~0 tokens" as "nothing to reclaim" for a picture-heavy span
+ * (issue #117). Counts, not prices: the price sits in the token column.
+ */
+function mediaSuffixOf(range: SeqCompressibleRange): string {
+  if (range.images === 0 && range.files === 0) return ''
+  const parts: string[] = []
+  if (range.images > 0) parts.push(`${range.images} image${range.images === 1 ? '' : 's'}`)
+  if (range.files > 0) parts.push(`${range.files} file${range.files === 1 ? '' : 's'}`)
+  return ` [+${parts.join(', ')}]`
+}
+
+/**
+ * Lazy per-seq media price. The FIRST lookup triggers one meter measurement, so
+ * the range walk only asks about seqs that really carry an attachment — a
+ * media-free session never pays for the measurement (issue #117, issue #110).
+ */
+function meterMediaPriceResolver(
+  agent: Agent,
+  session: import('@deepseek-ai/dsh-session').Session,
+): MediaPriceOf {
+  let prices: ReadonlyMap<number, number> | null = null
+  return (seq: number) => {
+    if (prices === null) prices = mediaPriceViaMeter(session, agent.ctx)
+    return prices.get(seq) ?? 0
+  }
+}
+
+/**
  * Render the compressible-range table as seq refs for the model.
  *
  * The spans are the kernel's own (`compressibleRanges`, translated to surface
@@ -124,8 +156,13 @@ export function rangeTable(
   session: import('@deepseek-ai/dsh-session').Session,
   kernelView: KernelRangeView,
   prompts: ResolvedPrompts = DEFAULT_RESOLVED,
+  mediaPriceOf?: MediaPriceOf,
 ): string {
-  const ranges = buildCompressibleSeqRanges(session, kernelView).slice(0, 6)
+  const ranges = buildCompressibleSeqRanges(
+    session,
+    kernelView,
+    mediaPriceOf === undefined ? {} : { mediaPriceOf },
+  ).slice(0, 6)
   // 零范围:整块省略(保留现状的提前返回与 nudge 尾部 '\n')。
   if (ranges.length === 0) return ''
   const lines = ranges.map((range) =>
@@ -136,6 +173,7 @@ export function rangeTable(
       tokens: range.tokens,
       toolPct: range.toolPct,
       textPct: 100 - range.toolPct,
+      media: mediaSuffixOf(range),
     }),
   )
   return [
@@ -256,6 +294,10 @@ export function buildNudge(
 
   const nudge = turn.nudge
   if (nudge === undefined || !nudge.shouldInject) return null
+  // Media-bearing spans are invisible to every text estimator, so their price
+  // comes from the host meter. Lazily: a media-free session never pays for a
+  // measurement (meterMediaPriceResolver only measures on first lookup).
+  const mediaPriceOf = meterMediaPriceResolver(agent, session)
   // The kernel computed `contextBreakdown` from the FULL log (allLogMessages),
   // so after any compression it reports HISTORICAL totals (a huge `tool` that
   // is really the compressed-away originals). Override it with the visible
@@ -294,7 +336,14 @@ export function buildNudge(
     }
   }
 
-  const text = buildNudgeText(nudge, emergency, session, kernelRangeViewOf(nudge, turn.state), env.prompts)
+  const text = buildNudgeText(
+    nudge,
+    emergency,
+    session,
+    kernelRangeViewOf(nudge, turn.state),
+    env.prompts,
+    mediaPriceOf,
+  )
   const message = createUserMessage({
     content: [{ type: 'text', text }],
     source: { kind: 'plugin', plugin: 'acp-nudge' },
@@ -321,15 +370,16 @@ export function buildNudgeText(
   session: import('@deepseek-ai/dsh-session').Session,
   kernelView: KernelRangeView,
   prompts: ResolvedPrompts = DEFAULT_RESOLVED,
+  mediaPriceOf?: MediaPriceOf,
 ): string {
   // A host override of any nudge slot → template rendering (config.prompts
   // keeps its v0.1.9 contract: custom copy wins). Only the pristine default
   // reference reaches the kernel path.
   if (prompts.nudge !== DEFAULT_RESOLVED.nudge) {
-    return renderNudgeFromTemplates(nudge, emergency, session, kernelView, prompts)
+    return renderNudgeFromTemplates(nudge, emergency, session, kernelView, prompts, mediaPriceOf)
   }
   const rendered = renderNudgeText(nudge)
-  return adaptKernelNudgeToSeq(rendered.text, nudge, session, kernelView, prompts)
+  return adaptKernelNudgeToSeq(rendered.text, nudge, session, kernelView, prompts, mediaPriceOf)
 }
 
 /**
@@ -352,6 +402,7 @@ function adaptKernelNudgeToSeq(
   session: import('@deepseek-ai/dsh-session').Session,
   kernelView: KernelRangeView,
   prompts: ResolvedPrompts,
+  mediaPriceOf?: MediaPriceOf,
 ): string {
   // B6：先摘掉哲学/规则段（它们住在系统提示与工具描述里），再做 seq 适配
   let out = stripNudgeGuidance(text)
@@ -367,7 +418,7 @@ function adaptKernelNudgeToSeq(
   // Replace the ref-ID range table (mNNNNN) with the surface-seq table.
   // A zero-range table leaves the kernel's own "[No specific ranges detected]"
   // notice intact — it is a better prompt than an empty table.
-  const seqTable = rangeTable(session, kernelView, prompts)
+  const seqTable = rangeTable(session, kernelView, prompts, mediaPriceOf)
   if (seqTable !== '') out = replaceRangesStr(out, seqTable)
   return out
 }
@@ -442,6 +493,7 @@ function renderNudgeFromTemplates(
   session: import('@deepseek-ai/dsh-session').Session,
   kernelView: KernelRangeView,
   prompts: ResolvedPrompts,
+  mediaPriceOf?: MediaPriceOf,
 ): string {
   // Cap the reported percentage at 100: a broken measurement (e.g. response
   // pressure folded in) must never surface as an absurd "230%" to the model.
@@ -496,7 +548,7 @@ function renderNudgeFromTemplates(
     parts.push('', tierRules)
   } else {
     // Range table for non-tier nudges (DSH-specific: seq-based, not ref-ID-based).
-    parts.push(rangeTable(session, kernelView, prompts))
+    parts.push(rangeTable(session, kernelView, prompts, mediaPriceOf))
   }
 
   // Batch-compress tip (from kernel's nudge-text.ts style).

@@ -23,6 +23,20 @@ import { eventAtOf, sessionEventsOf } from './session-events.ts'
  * the actual `text` blocks, so a top-level-only walk would drop every tool
  * result from the projection (and with it the seq's ref assignment, breaking
  * compress boundary resolution). Nested arrays are flattened depth-first.
+ *
+ * Non-text blocks that the provider still bills for render as a deterministic
+ * one-line placeholder instead of vanishing (issue #117). An `image`/`file`
+ * block used to contribute nothing, which silently made a picture-only user
+ * message — or a tool result carrying a screenshot — invisible to the engine:
+ * no ref (so no compress boundary), `hasPlainRef` false (so the range solver
+ * shrank past it and swallowed neighbours), invisible to the kernel's
+ * recent/last-user protection (so the last real user turn could be compressed
+ * away), priced at zero tokens, and absent from search/decompress output. The
+ * host itself projects non-text references to deterministic handle text for
+ * files ("request assembly projects every occurrence to deterministic handle
+ * text", dsh-llm/lib/types/types.d.ts), and this is the same idea one layer
+ * down. Only durable attachment metadata is used, so the placeholder is stable
+ * across turns (cache prefix, summary text, search hits).
  */
 export function extractText(content: unknown): string {
   if (typeof content === 'string') return content
@@ -30,14 +44,47 @@ export function extractText(content: unknown): string {
   const parts: string[] = []
   for (const block of content) {
     if (block === null || typeof block !== 'object') continue
-    const b = block as { type?: unknown; text?: unknown; content?: unknown }
+    const b = block as { type?: unknown; text?: unknown; content?: unknown; attachment?: unknown }
     if (b.type === 'text' && typeof b.text === 'string') {
       parts.push(b.text)
+    } else if (b.type === 'image' || b.type === 'file') {
+      const placeholder = attachmentPlaceholder(b.type, b.attachment)
+      if (placeholder !== null) parts.push(placeholder)
     } else if (Array.isArray(b.content)) {
       parts.push(extractText(b.content))
     }
   }
   return parts.join('\n')
+}
+
+/** Byte size as a short human string — deterministic, never locale-dependent. */
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes}B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)}KB`
+  return `${(bytes / (1024 * 1024)).toFixed(1)}MB`
+}
+
+/**
+ * One-line stand-in for an image/file block. Reads only durable attachment
+ * metadata (media type, pixel size, byte length, display name) — never bytes,
+ * paths or URLs — so the text is safe to feed back as a summary, to search,
+ * and to send to the provider.
+ */
+function attachmentPlaceholder(type: 'image' | 'file', attachment: unknown): string | null {
+  if (attachment === null || typeof attachment !== 'object') return null
+  const a = attachment as {
+    mediaType?: unknown
+    width?: unknown
+    height?: unknown
+    bytes?: unknown
+    name?: unknown
+  }
+  const name = typeof a.name === 'string' && a.name.length > 0 ? a.name : undefined
+  const size = typeof a.bytes === 'number' && Number.isFinite(a.bytes) ? ` ${formatBytes(a.bytes)}` : ''
+  if (type === 'file') return `[file ${name ?? 'attachment'}${size}]`
+  const mediaType = typeof a.mediaType === 'string' && a.mediaType.length > 0 ? a.mediaType : 'image'
+  const dimensions = typeof a.width === 'number' && typeof a.height === 'number' ? ` ${a.width}x${a.height}` : ''
+  return `[image ${mediaType}${name ? ` ${name}` : ''}${dimensions}${size}]`
 }
 
 interface ToolCallBlock {
@@ -230,6 +277,44 @@ export function extractEventText(event: SessionEvent): string {
       return extractText((event.data as { message?: { content?: unknown } }).message?.content)
     default:
       return ''
+  }
+}
+
+/** Count image/file blocks reachable from a content payload (same walk as extractText). */
+export function countAttachmentBlocks(content: unknown): { images: number; files: number } {
+  const counts = { images: 0, files: 0 }
+  countAttachments(content, counts)
+  return counts
+}
+
+function countAttachments(content: unknown, counts: { images: number; files: number }): void {
+  if (!Array.isArray(content)) return
+  for (const block of content) {
+    if (block === null || typeof block !== 'object') continue
+    const b = block as { type?: unknown; content?: unknown }
+    if (b.type === 'image') counts.images += 1
+    else if (b.type === 'file') counts.files += 1
+    else if (Array.isArray(b.content)) countAttachments(b.content, counts)
+  }
+}
+
+/**
+ * Attachments carried by one surface event, walked exactly like
+ * `extractEventText`. Used in two places: the compressible-range rows mark
+ * media-bearing spans, and the callers that already own a token meter price
+ * those spans with the provider-anchored media price instead of the text-only
+ * estimate (issue #117).
+ */
+export function attachmentsOfEvent(event: SessionEvent): { images: number; files: number } {
+  switch (event.type) {
+    case 'user/message':
+      return countAttachmentBlocks((event.data as { content?: unknown }).content)
+    case 'assistant/message':
+      return countAttachmentBlocks((event.data as { message?: { content?: unknown } }).message?.content)
+    case 'tool/result':
+      return countAttachmentBlocks((event.data as { message?: { content?: unknown } }).message?.content)
+    default:
+      return { images: 0, files: 0 }
   }
 }
 
