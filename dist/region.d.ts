@@ -12,6 +12,7 @@
  */
 import type { Session, SessionEvent, SessionEventMap } from '@deepseek-ai/dsh-session';
 import { type ContentBlock } from '@deepseek-ai/dsh-llm';
+import { type AcpBlockLedgerPayload } from './block-ledger.ts';
 /** One durable ACP block as rebuilt from the session log. */
 export interface AcpBlockLedgerEntry {
     /** The compaction transaction id (stable block identity). */
@@ -118,32 +119,16 @@ export interface CompactionTransactionInput {
     readonly directMessageIds?: readonly string[];
     readonly effectiveMessageIds?: readonly string[];
 }
-/**
- * ACP tier extension fields carried on `compaction/summary` events. The
- * upstream dsh-compaction event type does not know them, so reads and writes
- * go through this precise intersection (never `any`).
- */
-export interface AcpCompactionSummaryFields {
-    /** Compression tier (1/2/3) — 1 = message range, 2 = distills tier-1, 3 = distills tier-2. */
-    readonly tier?: 1 | 2 | 3;
-    /** Short block label (kernel `CompressionBlock.topic`) — the acp_status block title. */
-    readonly topic?: string;
-    /** The acp-kernel block id (`bN`) created for this transaction. */
-    readonly kernelBlockId?: string;
-    /** Durable compaction ids of the blocks distilled into this one. */
-    readonly parentBlockIds?: readonly string[];
-    /**
-     * The kernel block's direct message ids (raw CoreMessage ids) at creation —
-     * recorded so a restarted engine rehydrates the SAME coverage (a tier-2
-     * block's coverage is its parents' originals, not the checkpoint node).
-     */
-    readonly directMessageIds?: readonly string[];
-    /** The kernel block's effective message ids (raw CoreMessage ids) at creation. */
-    readonly effectiveMessageIds?: readonly string[];
-}
 type CompactionSummaryData = SessionEventMap['compaction/summary'];
-/** Read a `compaction/summary` event's data including the ACP tier extension fields. */
-export declare function readCompactionSummary(event: SessionEvent): CompactionSummaryData & AcpCompactionSummaryFields;
+/**
+ * Read a `compaction/summary` event's data. The six ACP tier/lineage fields are
+ * no longer top-level members (issue #141): post-fix writers carry them in the
+ * admitted optional `rawOutput` member (decode via {@link decodeAcpBlockLedger}),
+ * while logs written by pre-fix engines still carry them as top-level members —
+ * so the returned type also intersects with {@link AcpBlockLedgerPayload}, letting
+ * readers fall back to the legacy shape. Never `any`.
+ */
+export declare function readCompactionSummary(event: SessionEvent): CompactionSummaryData & AcpBlockLedgerPayload;
 /**
  * Run one durable compression transaction. Throws on invalid state; on success
  * the four events are in the log and the surface has one summary node.

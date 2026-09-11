@@ -2895,6 +2895,55 @@ function shadowedTokensViaMeter(session, seqs, ctx) {
   return shadowedHostTokens(session, seqs);
 }
 
+// src/block-ledger.ts
+var ACP_BLOCK_LEDGER_MARKER = "$dshAcpBlockLedger";
+var ACP_BLOCK_LEDGER_VERSION = 1;
+function isStringArray(value) {
+  return Array.isArray(value) && value.every((item) => typeof item === "string");
+}
+function encodeAcpBlockLedger(payload) {
+  const obj = { [ACP_BLOCK_LEDGER_MARKER]: ACP_BLOCK_LEDGER_VERSION };
+  if (payload.tier !== void 0) obj.tier = payload.tier;
+  if (payload.kernelBlockId !== void 0) obj.kernelBlockId = payload.kernelBlockId;
+  if (payload.topic !== void 0) obj.topic = payload.topic;
+  if (payload.parentBlockIds !== void 0 && payload.parentBlockIds.length > 0) {
+    obj.parentBlockIds = [...payload.parentBlockIds];
+  }
+  if (payload.directMessageIds !== void 0) obj.directMessageIds = [...payload.directMessageIds];
+  if (payload.effectiveMessageIds !== void 0) obj.effectiveMessageIds = [...payload.effectiveMessageIds];
+  return [{ type: "text", text: JSON.stringify(obj) }];
+}
+function decodeAcpBlockLedger(rawOutput) {
+  try {
+    if (!Array.isArray(rawOutput)) return {};
+    for (const block of rawOutput) {
+      if (block === null || typeof block !== "object") continue;
+      const candidate = block;
+      if (candidate.type !== "text" || typeof candidate.text !== "string") continue;
+      let parsed;
+      try {
+        parsed = JSON.parse(candidate.text);
+      } catch {
+        continue;
+      }
+      if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) continue;
+      const record = parsed;
+      if (record[ACP_BLOCK_LEDGER_MARKER] !== ACP_BLOCK_LEDGER_VERSION) continue;
+      const result = {};
+      if (record.tier === 1 || record.tier === 2 || record.tier === 3) result.tier = record.tier;
+      if (typeof record.kernelBlockId === "string") result.kernelBlockId = record.kernelBlockId;
+      if (typeof record.topic === "string") result.topic = record.topic;
+      if (isStringArray(record.parentBlockIds)) result.parentBlockIds = [...record.parentBlockIds];
+      if (isStringArray(record.directMessageIds)) result.directMessageIds = [...record.directMessageIds];
+      if (isStringArray(record.effectiveMessageIds)) result.effectiveMessageIds = [...record.effectiveMessageIds];
+      return result;
+    }
+    return {};
+  } catch {
+    return {};
+  }
+}
+
 // src/region.ts
 function findOpenTurn(events) {
   let open = null;
@@ -3062,6 +3111,14 @@ function runCompactionTransaction(session, input) {
   }
   try {
     seqs.push(session.append("compaction/start", { compactionId, turn }).seq);
+    const ledgerPayload = {
+      tier: input.tier ?? 1,
+      ...input.kernelBlockId === void 0 ? {} : { kernelBlockId: input.kernelBlockId },
+      ...input.topic === void 0 ? {} : { topic: input.topic },
+      ...input.parentBlockIds === void 0 || input.parentBlockIds.length === 0 ? {} : { parentBlockIds: [...input.parentBlockIds] },
+      ...input.directMessageIds === void 0 ? {} : { directMessageIds: [...input.directMessageIds] },
+      ...input.effectiveMessageIds === void 0 ? {} : { effectiveMessageIds: [...input.effectiveMessageIds] }
+    };
     seqs.push(session.append("compaction/summary", {
       compactionId,
       summary: input.summary,
@@ -3070,12 +3127,7 @@ function runCompactionTransaction(session, input) {
       shadowedTokenCount: input.shadowedTokenCount,
       provider: input.provider,
       model: input.model,
-      tier: input.tier ?? 1,
-      ...input.kernelBlockId === void 0 ? {} : { kernelBlockId: input.kernelBlockId },
-      ...input.topic === void 0 ? {} : { topic: input.topic },
-      ...input.parentBlockIds === void 0 || input.parentBlockIds.length === 0 ? {} : { parentBlockIds: [...input.parentBlockIds] },
-      ...input.directMessageIds === void 0 ? {} : { directMessageIds: [...input.directMessageIds] },
-      ...input.effectiveMessageIds === void 0 ? {} : { effectiveMessageIds: [...input.effectiveMessageIds] }
+      rawOutput: encodeAcpBlockLedger(ledgerPayload)
     }).seq);
     const message = createUserMessage({
       content: input.summary,
@@ -3123,22 +3175,25 @@ function rebuildBlockLedger(events) {
         if (original !== void 0) shadowedTokenCount += defaultCountTokens(extractEventText(original));
       }
     }
-    const tier = data.tier === 2 || data.tier === 3 ? data.tier : 1;
-    const parentBlockIds = Array.isArray(data.parentBlockIds) ? [...data.parentBlockIds] : [];
-    const directMessageIds = Array.isArray(data.directMessageIds) ? [...data.directMessageIds] : void 0;
-    const effectiveMessageIds = Array.isArray(data.effectiveMessageIds) ? [...data.effectiveMessageIds] : void 0;
+    const embedded = decodeAcpBlockLedger(data.rawOutput);
+    const tier = embedded.tier ?? (data.tier === 2 || data.tier === 3 ? data.tier : 1);
+    const parentBlockIds = embedded.parentBlockIds ? [...embedded.parentBlockIds] : Array.isArray(data.parentBlockIds) ? [...data.parentBlockIds] : [];
+    const directMessageIds = embedded.directMessageIds ? [...embedded.directMessageIds] : Array.isArray(data.directMessageIds) ? [...data.directMessageIds] : void 0;
+    const effectiveMessageIds = embedded.effectiveMessageIds ? [...embedded.effectiveMessageIds] : Array.isArray(data.effectiveMessageIds) ? [...data.effectiveMessageIds] : void 0;
+    const topic = embedded.topic ?? (typeof data.topic === "string" ? data.topic : void 0);
+    const kernelBlockId = embedded.kernelBlockId ?? (typeof data.kernelBlockId === "string" ? data.kernelBlockId : void 0);
     const summarySeq = summarySeqs.get(data.compactionId) ?? null;
     ledger.push({
       blockId: data.compactionId,
       summary: extractText(data.summary),
-      ...typeof data.topic === "string" ? { topic: data.topic } : {},
+      ...topic === void 0 ? {} : { topic },
       shadowedSeqs: [...data.shadowedSeqs],
       shadowedTokenCount,
       start: data.shadowedRange.start,
       end: data.shadowedRange.end,
       tier,
       parentBlockIds,
-      ...typeof data.kernelBlockId === "string" ? { kernelBlockId: data.kernelBlockId } : {},
+      ...kernelBlockId === void 0 ? {} : { kernelBlockId },
       ...summarySeq === null ? {} : { summarySeq },
       ...directMessageIds === void 0 ? {} : { directMessageIds },
       ...effectiveMessageIds === void 0 ? {} : { effectiveMessageIds },
