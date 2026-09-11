@@ -21,12 +21,13 @@ import {
 } from './region.ts'
 import { allLogMessages, eventsToCoreMessages, extractEventText, surfaceEventsOf } from './messages.ts'
 import { shadowedTokensViaMeter } from './host-tokens.ts'
+import { eventAtOf, sessionEventsOf } from './session-events.ts'
 import { defaultConfig } from 'acp-kernel'
-import { windowSourceLabel } from './window.ts'
+import { routeFor, windowSourceLabel } from './window.ts'
 
 async function statusText(env: ToolEnvironment, agent: Agent): Promise<string> {
   const session = agent.session
-  const ledger = rebuildBlockLedger(session.events)
+  const ledger = rebuildBlockLedger(sessionEventsOf(session))
   const totalTokens = ledger.reduce((sum, block) => sum + block.shadowedTokenCount, 0)
   // Full log for the kernel (so block anchors survive — same input as the
   // nudge path); the measured token count stays a SURFACE measurement.
@@ -35,12 +36,18 @@ async function statusText(env: ToolEnvironment, agent: Agent): Promise<string> {
   const estimated = resolveTokenCount(agent, surfaceMessages)
   const window = await resolveEffectiveWindow(env, agent)
   const limit = window.limit
+  // The window line reveals the output-reservation subtraction: the displayed
+  // limit is the SUSTAINABLE input budget the percentage above is measured
+  // against, and the raw window stays visible so an operator can see both.
+  const windowLine = window.rawLimit !== undefined && window.outputReserved !== undefined
+    ? `  context window: ${limit} (raw ${window.rawLimit} − ${window.outputReserved} output reservation; ${windowSourceLabel(window)})`
+    : `  context window: ${limit} (${windowSourceLabel(window)})`
   const lines = [
     `ACP status — session ${session.id}`,
     `  blocks: ${ledger.length}`,
     `  tokens compressed: ${totalTokens}`,
     `  estimated context: ${estimated} / ${limit} (${Math.round((estimated / limit) * 100)}%)`,
-    `  context window: ${limit} (${windowSourceLabel(window)})`,
+    windowLine,
   ]
   // A failed probe falls back to the 128K default AND is cached for the
   // process lifetime — the /acp panel must say so explicitly, or the operator
@@ -110,14 +117,18 @@ function compressText(env: ToolEnvironment, agent: Agent, args: string[]): strin
   // Price the reclaimed tokens in the HOST's token vocabulary (rule 12):
   // prefer the live meter's per-node prices, fall back to the exact mirror.
   const shadowedTokens = shadowedTokensViaMeter(session, shadowed, agent.ctx)
+  // Provenance follows the LIVE route, not `agent.options`: after a mid-session
+  // model switch the latter is a stale snapshot (the PREVIOUS route), so the
+  // summary node would be stamped with a route the summary did not come from.
+  const { provider, model } = routeFor(agent)
   const { compactionId } = runCompactionTransaction(session, {
     start,
     end,
     shadowedSeqs: shadowed,
     summary: [{ type: 'text', text: summary }],
     shadowedTokenCount: shadowedTokens,
-    provider: agent.options.provider ?? '',
-    model: agent.options.model ?? '',
+    provider,
+    model,
   })
   return `Compressed seqs ${start}..${end} (${shadowed.length} messages) as block ${compactionId.slice(0, 8)}`
 }
@@ -128,14 +139,14 @@ function decompressText(_env: ToolEnvironment, agent: Agent, args: string[]): st
   // Accept the kernel block ref (`bN`) the model tool acp_status shows, as
   // well as the compaction-id prefix (same dual-id resolution as the tool).
   const blockId = blockIdOfKernelRef(session, args[0]!)
-  const ledger = rebuildBlockLedger(session.events)
+  const ledger = rebuildBlockLedger(sessionEventsOf(session))
   const block = blockId === null
     ? ledger.find((entry) => entry.blockId.startsWith(args[0]!))
     : ledger.find((entry) => entry.blockId === blockId)
   if (block === undefined) return `block "${args[0]}" not found (see /acp status)`
   // Tier-2/3 blocks shadow parent checkpoint nodes: expand to the originals.
   const parts = expandShadowedSeqs(session, block.blockId)
-    .map((seq) => extractEventText(session.events[seq]!))
+    .map((seq) => extractEventText(eventAtOf(session, seq)!))
     .filter((text) => text.length > 0)
   return `Block ${block.blockId} — ${block.summary}\n\n${parts.join('\n\n') || '(no recoverable content)'}`
 }

@@ -12,6 +12,7 @@
  */
 import type { Session, SessionEvent, SessionEventMap } from '@deepseek-ai/dsh-session';
 import { type ContentBlock } from '@deepseek-ai/dsh-llm';
+import { type AcpBlockLedgerPayload } from './block-ledger.ts';
 /** One durable ACP block as rebuilt from the session log. */
 export interface AcpBlockLedgerEntry {
     /** The compaction transaction id (stable block identity). */
@@ -39,7 +40,19 @@ export interface AcpBlockLedgerEntry {
 }
 /** The open turn number, or null when the log ends between turns. */
 export declare function findOpenTurn(events: readonly SessionEvent[]): number | null;
-/** Reject a second concurrent compaction for the same session. */
+/**
+ * Reject a second concurrent compaction for the same session.
+ *
+ * Compaction is synchronous and a session is single-writer, so a
+ * `compaction/start` with NO matching `compaction/end` in the durable log can
+ * only be a stale leftover from a prior run that died mid-write (a hard kill,
+ * not a caught throw — every caught throw is paired with a compensating
+ * `compaction/end` in runCompactionTransaction). Such a leftover must NOT
+ * permanently block every later compress call: this treats it as stale,
+ * surfaces it once, and lets a new compaction proceed. The old "already
+ * active" throw only fired when a genuine concurrent compaction existed,
+ * which the synchronous single-writer premise makes impossible.
+ */
 export declare function assertNoActiveCompaction(events: readonly SessionEvent[]): void;
 /**
  * A requested range whose EVERY live message was already shadowed by one or
@@ -106,32 +119,16 @@ export interface CompactionTransactionInput {
     readonly directMessageIds?: readonly string[];
     readonly effectiveMessageIds?: readonly string[];
 }
-/**
- * ACP tier extension fields carried on `compaction/summary` events. The
- * upstream dsh-compaction event type does not know them, so reads and writes
- * go through this precise intersection (never `any`).
- */
-export interface AcpCompactionSummaryFields {
-    /** Compression tier (1/2/3) — 1 = message range, 2 = distills tier-1, 3 = distills tier-2. */
-    readonly tier?: 1 | 2 | 3;
-    /** Short block label (kernel `CompressionBlock.topic`) — the acp_status block title. */
-    readonly topic?: string;
-    /** The acp-kernel block id (`bN`) created for this transaction. */
-    readonly kernelBlockId?: string;
-    /** Durable compaction ids of the blocks distilled into this one. */
-    readonly parentBlockIds?: readonly string[];
-    /**
-     * The kernel block's direct message ids (raw CoreMessage ids) at creation —
-     * recorded so a restarted engine rehydrates the SAME coverage (a tier-2
-     * block's coverage is its parents' originals, not the checkpoint node).
-     */
-    readonly directMessageIds?: readonly string[];
-    /** The kernel block's effective message ids (raw CoreMessage ids) at creation. */
-    readonly effectiveMessageIds?: readonly string[];
-}
 type CompactionSummaryData = SessionEventMap['compaction/summary'];
-/** Read a `compaction/summary` event's data including the ACP tier extension fields. */
-export declare function readCompactionSummary(event: SessionEvent): CompactionSummaryData & AcpCompactionSummaryFields;
+/**
+ * Read a `compaction/summary` event's data. The six ACP tier/lineage fields are
+ * no longer top-level members (issue #141): post-fix writers carry them in the
+ * admitted optional `rawOutput` member (decode via {@link decodeAcpBlockLedger}),
+ * while logs written by pre-fix engines still carry them as top-level members —
+ * so the returned type also intersects with {@link AcpBlockLedgerPayload}, letting
+ * readers fall back to the legacy shape. Never `any`.
+ */
+export declare function readCompactionSummary(event: SessionEvent): CompactionSummaryData & AcpBlockLedgerPayload;
 /**
  * Run one durable compression transaction. Throws on invalid state; on success
  * the four events are in the log and the surface has one summary node.
@@ -151,6 +148,18 @@ export interface SeqCompressibleRange {
     /** Share of messages that are tool messages (tool-call or tool-result), 0-100 — kernel `toolPct` parity. */
     readonly toolPct: number;
 }
+/**
+ * Durable model-free prune: append `compaction/prune` as the shadow price,
+ * then replace the given surface seqs with a user message. dsh-session 0.1.5+
+ * allows only user/message (and system/message) replacements to cite source
+ * events — assistant/message FORBIDS `sourceEventSeqs` because it embeds its
+ * own provider stream — so there is no invisible replacement node anymore:
+ * every hidden span becomes a user message. Callers with meaningful text pass
+ * it (compress call/result hiding keeps the tool outcome visible to the
+ * model); callers without get the fixed prune note. The originals remain in
+ * the append-only log.
+ */
+export declare const PRUNE_NOTE = "(removed by context management)";
 /**
  * Hide one successful `compress` tool's call/result pair after its tool/result
  * has been logged. The durable compaction summary is inserted BEFORE the
@@ -196,45 +205,11 @@ export declare function openToolCallIds(session: Session): Set<string>;
  */
 export declare function deferCompressPairHide(session: Session, callId: string, resultSeq: number, onError?: (error: unknown) => void): void;
 /**
- * Newest AGENTS.md instruction row per scope (source file). The host
- * re-injects a file's instructions when its CURRENT copy is absent from the
- * surface (deepseek-harness packages/context/agent-instructions presence
- * gate, index.ts:137/:163 — presence+identity, not payload diff), so
- * compressing the newest row of a scope makes that file come straight back,
- * while compressing a STALE copy of the same file is silent. Live-audited
- * shape (session-f25e4fad): EVERY injection row — baseline and worktree —
- * carries `source.changes[].scope` = `"<dir>\u0000<file>"` (root
- * `.\u0000AGENTS.md`, worktree `worktrees/<name>\u0000AGENTS.md`), which is
- * stable across config tweaks unlike `baselineIdentity`. Tail-scan the log,
- * group by scope, keep the last seq of each group. O(events), mirrors
- * indexWatermarkOf. Rows without `changes[]` (legacy shapes) get their own
- * group so they can never be treated as superseded.
- */
-export declare function newestInstructionSeqsOf(session: Session): Set<number>;
-/**
- * Surface seqs a compression should think twice about absorbing — the
- * ADVISORY twin of `buildCompressibleSeqRanges`'s protection. The range table
- * never OFFERS these rows, but nothing stops a hand-built compress range from
- * covering them, so `handleCompress` checks the landed span against this set
- * and appends an advisory line when it does (F7 decision: warn, don't
- * reject — the compression is safe and self-healing, a swallowed current
- * instruction copy bounces back exactly once). Deliberately NARROW (issue #71
- * review F4): only CURRENT agent-instructions rows — the audited loop driver.
- * Engine-authored metadata rows (nudge echo, compress-pair stub) stay
- * foldable like main, and skill-catalog/policy rows are not warned on.
- */
-export declare function guardedSurfaceSeqsOf(session: Session): Set<number>;
-/**
  * Compute compressible spans directly from the surface — independent of the
  * kernel's ref map, which can drift after surface replacements in long
  * sessions and hide large tool results from the nudge range table. Skips the
- * recent protected tail (last REAL user turn — injected rows never win it,
- * see isRealUserTurn), the newest AGENTS.md row of every scope, compaction
- * checkpoints, and ALL host instruction/policy rows (they are barriers that
- * split segments — compressing a current instruction row makes the host
- * re-inject it, the loop this PR fixes). Engine-authored metadata rows (nudge
- * echo, compress-pair stub) fold into the adjacent real segment like main.
- * Edges are then balanced through resolveSurfaceRange. Ranges are ordered
+ * recent protected tail, the last user message, and compaction checkpoints;
+ * edges are then balanced through resolveSurfaceRange. Ranges are ordered
  * oldest-first (stable across turns — matches the kernel's `oldest first`).
  * UPSTREAM: this self-computation is a labeled workaround for kernel
  * ref-map drift after surface replacements (AGENTS.md rule 11) — drop it and

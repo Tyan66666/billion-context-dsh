@@ -39,7 +39,7 @@ export { ACP_SYSTEM_PROMPT, ACP_SYSTEM_PROMPT_ORDER } from './system-prompt.ts';
 export { DEFAULT_PROMPTS, DEFAULT_RESOLVED, renderSystemPrompt, renderTemplate, resolvePrompts, type AcpPrompts, type NudgePrompts, type PromptInput, type PromptOverride, type RangeTablePrompts, type ResolvedPrompts, type ToolPrompts, } from './prompts.ts';
 export { makeTools, type ToolEnvironment } from './tools.ts';
 export { acpCommand } from './commands.ts';
-export { buildNudge, resolveTokenCount, type NudgeEnvironment, type NudgeOutcome } from './nudge.ts';
+export { buildNudge, resolveTokenCount, EMERGENCY_NUDGE_MAX_PER_TURN, type NudgeEnvironment, type NudgeOutcome } from './nudge.ts';
 export { DEFAULT_CONTEXT_WINDOW, detectContextWindow, projectedContextWindow, windowSourceLabel, type AcpWindow, } from './window.ts';
 export { AlreadyCompressedRangeError, rebuildBlockLedger, resolveSurfaceRange, runCompactionTransaction, shadowedSeqsOf, findOpenTurn, assertNoActiveCompaction, blockRegistry, blockRefForSummarySeq, compactionIdsOfKernelBlocks, summarySeqOfKernelBlock, expandShadowedSeqs, hideCompressToolPair, stripOrphanedSurfaceToolMessages, type AcpBlockLedgerEntry, type CompactionTransactionInput, type ResolvedSurfaceRange, } from './region.ts';
 export { eventsToCoreMessages, projectEvent, surfaceEventsOf, extractEventText } from './messages.ts';
@@ -67,10 +67,11 @@ export interface AcpConfig {
      */
     readonly nudgeMaxContextLimitPct?: number;
     /**
-     * Emergency nudge threshold (bypasses the per-turn dedup). Engine default
-     * 0.85 (down from the kernel/billion-context-pi default 0.95: 95% leaves
-     * the model no room to act before the API rejects, and the host's 80%
-     * compaction-basic line shadows it in standard/code/cordis modes).
+     * Emergency nudge threshold (bypasses the per-turn dedup, but is capped at
+     * EMERGENCY_NUDGE_MAX_PER_TURN = 3 injections per user turn — issue #108).
+     * Engine default 0.85 (down from the kernel/billion-context-pi default 0.95:
+     * 95% leaves the model no room to act before the API rejects, and the host's
+     * 80% compaction-basic line shadows it in standard/code/cordis modes).
      */
     readonly nudgeEmergencyThresholdPct?: number;
     /**
@@ -124,10 +125,14 @@ export declare class AcpCompactionEngine extends CompactionEngine {
      */
     readonly env: ToolEnvironment;
     private readonly lastNudgeTurn;
+    /** Per-session emergency-nudge injection budget for the current user turn (issue #108). */
+    private readonly emergencyNudges;
     /** Successful compress call ids awaiting their tool/result so the pair can be hidden. */
     private readonly compressCallIdsToHide;
     /** Per provider/model route the resolved window (probe failures cached too). */
     private readonly windowCache;
+    /** Per route the adapter's per-request output cap (the output reservation); null = undisclosed. */
+    private readonly outputReservationCache;
     constructor(ctx: Context, config?: Partial<AcpConfig>);
     /**
      * Resolve the effective context window for an agent. An explicitly
@@ -138,9 +143,31 @@ export declare class AcpCompactionEngine extends CompactionEngine {
      * projectedContextWindow). Falls back to probing the model's real window
      * via `agent.ctx.llm.resolveModelInfo` (cached per provider/model route,
      * probe failures cached too) and finally to DEFAULT_CONTEXT_WINDOW when
-     * auto-detection is disabled or unavailable.
+     * auto-detection is disabled or unavailable. On the auto-detected paths the
+     * adapter's per-request output cap is then SUBTRACTED from the window
+     * (applyReservation): every downstream usage computation must run against
+     * the SUSTAINABLE input budget (window minus output reservation), not the
+     * raw window — a 96K window with a 16K cap carries at most 80K of input,
+     * so the raw denominator understates usage by cap/window (≈17% there, and
+     * far worse on short-window models). An explicit limit keeps the operator's
+     * exact value (they own the denominator); a failed probe keeps the raw
+     * fallback.
      */
     windowFor(agent: Agent): Promise<AcpWindow>;
+    /**
+     * The adapter's per-request output cap for a route, from one
+     * probeModelWindow call (a local catalog lookup — no request is sent),
+     * cached per route like the window itself.
+     */
+    private outputCapFor;
+    /**
+     * Subtract the output reservation from a resolved window: `limit` becomes
+     * the SUSTAINABLE input budget (`rawLimit - outputReserved`) that every
+     * downstream usage computation (nudge tiers, truncate, growth) measures
+     * against. No-op when the cap is unknown or not smaller than the window
+     * (degenerate config) — the raw-window behavior is preserved.
+     */
+    private applyReservation;
     /** ACP is model-driven: automatic pressure policy never summarizes by itself. */
     compactIfNeeded(_agent: CompactionAgentContext, _trigger: CompactionTrigger, signal: AbortSignal): Promise<CompactionResult | null>;
     /** Explicit idle-session compaction: ACP leaves the decision to the model. */

@@ -13,13 +13,12 @@
 
 import { randomUUID } from 'node:crypto'
 import type { Session, SessionEvent, SessionEventMap } from '@deepseek-ai/dsh-session'
-import {
-  CompactionId,
-  compactCheckpointSource,
-  toolPairingBalancedAfter,
-  toolPairingBalancedBefore,
-} from '@deepseek-ai/dsh-compaction'
-import { createAssistantMessage, createUserMessage, type ContentBlock } from '@deepseek-ai/dsh-llm'
+// toolPairingBalanced* come from the host package: the published seam reads
+// only eventAt / surface.replaceGeneration, present on every supported
+// session version. The issue #124 local-mirror workaround is gone (see
+// docs/dsh-porting-verification.md); tests/tool-pairing-host.test.ts guards it.
+import { CompactionId, compactCheckpointSource, toolPairingBalancedAfter, toolPairingBalancedBefore } from '@deepseek-ai/dsh-compaction'
+import { createUserMessage, type ContentBlock } from '@deepseek-ai/dsh-llm'
 import { defaultCountTokens } from 'acp-kernel'
 import {
   classifySurfaceEvent,
@@ -31,6 +30,18 @@ import {
   toolCallIdOfResultEvent,
 } from './messages.ts'
 import { hostPriceEvent } from './host-tokens.ts'
+import { eventAtOf, sessionEventsOf } from './session-events.ts'
+import { decodeAcpBlockLedger, encodeAcpBlockLedger, type AcpBlockLedgerPayload } from './block-ledger.ts'
+
+/**
+ * A surface sequence number as the INSTALLED `dsh-session` sees it. Since the
+ * 0.1.5 baseline dsh-session brands these as `SessionSeq` (a branded
+ * `number`). Deriving the element type from `Session['surface']` avoids
+ * naming the brand directly; `as SurfaceSeq` is the single admission point —
+ * a plain `number` produced by a caller (model ref, ledger field) is admitted
+ * as a surface seq only at the exact write/index site the session brands.
+ */
+type SurfaceSeq = Session['surface']['nodes'][number]
 
 /** One durable ACP block as rebuilt from the session log. */
 export interface AcpBlockLedgerEntry {
@@ -68,7 +79,19 @@ export function findOpenTurn(events: readonly SessionEvent[]): number | null {
   return open
 }
 
-/** Reject a second concurrent compaction for the same session. */
+/**
+ * Reject a second concurrent compaction for the same session.
+ *
+ * Compaction is synchronous and a session is single-writer, so a
+ * `compaction/start` with NO matching `compaction/end` in the durable log can
+ * only be a stale leftover from a prior run that died mid-write (a hard kill,
+ * not a caught throw — every caught throw is paired with a compensating
+ * `compaction/end` in runCompactionTransaction). Such a leftover must NOT
+ * permanently block every later compress call: this treats it as stale,
+ * surfaces it once, and lets a new compaction proceed. The old "already
+ * active" throw only fired when a genuine concurrent compaction existed,
+ * which the synchronous single-writer premise makes impossible.
+ */
 export function assertNoActiveCompaction(events: readonly SessionEvent[]): void {
   let active = false
   for (const event of events) {
@@ -76,7 +99,7 @@ export function assertNoActiveCompaction(events: readonly SessionEvent[]): void 
     else if (event.type === 'compaction/end') active = false
   }
   if (active) {
-    throw new Error('billion-context-dsh: another compaction is already active for this session')
+    console.warn('billion-context-dsh: clearing stale compaction flag — found a compaction/start with no matching compaction/end')
   }
 }
 
@@ -90,7 +113,7 @@ export function assertNoActiveCompaction(events: readonly SessionEvent[]): void 
  * them to the nearest clean cut.
  */
 function hasPlainRef(session: Session, seq: number): boolean {
-  const event = session.events[seq]
+  const event = eventAtOf(session, seq)
   if (event === undefined) return false
   switch (event.type) {
     case 'user/message':
@@ -155,19 +178,23 @@ type StaleRangeRecovery =
  *     span. Block checkpoint nodes are deliberately excluded: distilling a
  *     block on a STALE reference would silently change block structure the
  *     model never intended to touch — distillation requires targeting a live
- *     checkpoint seq directly.
+ *     checkpoint seq directly. Host system-prompt nodes (`system/message`)
+ *     are excluded too — protected fixed overhead, not compressible content.
  */
 function recoverStaleRange(session: Session, start: number, end: number): StaleRangeRecovery {
-  if (session.events[start] === undefined || session.events[end] === undefined) {
-    const failedEdge = session.events[start] === undefined ? start : end
+  if (eventAtOf(session, start) === undefined || eventAtOf(session, end) === undefined) {
+    const failedEdge = eventAtOf(session, start) === undefined ? start : end
     return { kind: 'unresolvable', failedEdge }
   }
   const liveInside = session.surface.nodes
     .filter((seq) => seq >= start && seq <= end)
     .sort((a, b) => a - b)
-  const plain = liveInside.filter((seq) => !isCheckpointNode(session.events[seq]!))
+  const plain = liveInside.filter((seq) => {
+    const event = eventAtOf(session, seq)!
+    return !isCheckpointNode(event) && !isSystemNode(event)
+  })
   if (plain.length === 0) {
-    const coveringBlockIds = rebuildBlockLedger(session.events)
+    const coveringBlockIds = rebuildBlockLedger(sessionEventsOf(session))
       .filter((entry) => entry.shadowedSeqs.some((seq) => seq >= start && seq <= end))
       .map((entry) => entry.blockId)
     return { kind: 'already-compressed', coveringBlockIds }
@@ -214,8 +241,8 @@ export function resolveSurfaceRange(
   if (start > end) {
     throw new Error(`billion-context-dsh: reversed range ${start}..${end}`)
   }
-  let requestedStartIdx = nodes.indexOf(start)
-  let requestedEndIdx = nodes.indexOf(end)
+  let requestedStartIdx = nodes.indexOf(start as SurfaceSeq)
+  let requestedEndIdx = nodes.indexOf(end as SurfaceSeq)
   let recovered = false
   if (requestedStartIdx < 0 || requestedEndIdx < 0) {
     const stale = recoverStaleRange(session, start, end)
@@ -233,8 +260,8 @@ export function resolveSurfaceRange(
     start = stale.start
     end = stale.end
     recovered = true
-    requestedStartIdx = nodes.indexOf(start)
-    requestedEndIdx = nodes.indexOf(end)
+    requestedStartIdx = nodes.indexOf(start as SurfaceSeq)
+    requestedEndIdx = nodes.indexOf(end as SurfaceSeq)
     if (requestedStartIdx < 0 || requestedEndIdx < 0) {
       // Unreachable in practice (recovery returns live nodes), but never let
       // a negative index reach the balancing passes.
@@ -253,10 +280,25 @@ export function resolveSurfaceRange(
     throw new Error(`billion-context-dsh: reversed range ${start}..${end}`)
   }
   // A boundary must be BOTH tool-pairing-balanced AND carry a bare-seq ref.
-  const cleanBefore = (index: number): boolean =>
-    toolPairingBalancedBefore(session, nodes[index]!) && hasPlainRef(session, nodes[index]!)
-  const cleanAfter = (index: number): boolean =>
-    toolPairingBalancedAfter(session, nodes[index]!) && hasPlainRef(session, nodes[index]!)
+  // A boundary must be BOTH tool-pairing-balanced AND carry a bare-seq ref,
+  // and never a host system prompt. The system check is explicit, not
+  // incidental: `hasPlainRef` happens to return false for `system/message`,
+  // but riding that default would silently invert if the projection ever
+  // learns to emit a bare-seq ref for system nodes.
+  const cleanBefore = (index: number): boolean => {
+    const event = eventAtOf(session, nodes[index]!)
+    return event !== undefined
+      && !isSystemNode(event)
+      && toolPairingBalancedBefore(session, nodes[index]!)
+      && hasPlainRef(session, nodes[index]!)
+  }
+  const cleanAfter = (index: number): boolean => {
+    const event = eventAtOf(session, nodes[index]!)
+    return event !== undefined
+      && !isSystemNode(event)
+      && toolPairingBalancedAfter(session, nodes[index]!)
+      && hasPlainRef(session, nodes[index]!)
+  }
   let startIdx = requestedStartIdx
   let endIdx = requestedEndIdx
   // First pass: nudge inward to the nearest clean cuts.
@@ -307,8 +349,8 @@ export function resolveSurfaceRange(
 /** The surface seqs shadowed by the inclusive positional span. */
 export function shadowedSeqsOf(session: Session, start: number, end: number): number[] {
   const nodes = session.surface.nodes
-  const startIdx = nodes.indexOf(start)
-  const endIdx = nodes.indexOf(end)
+  const startIdx = nodes.indexOf(start as SurfaceSeq)
+  const endIdx = nodes.indexOf(end as SurfaceSeq)
   return nodes.slice(startIdx, endIdx + 1)
 }
 
@@ -333,35 +375,18 @@ export interface CompactionTransactionInput {
   readonly effectiveMessageIds?: readonly string[]
 }
 
-/**
- * ACP tier extension fields carried on `compaction/summary` events. The
- * upstream dsh-compaction event type does not know them, so reads and writes
- * go through this precise intersection (never `any`).
- */
-export interface AcpCompactionSummaryFields {
-  /** Compression tier (1/2/3) — 1 = message range, 2 = distills tier-1, 3 = distills tier-2. */
-  readonly tier?: 1 | 2 | 3
-  /** Short block label (kernel `CompressionBlock.topic`) — the acp_status block title. */
-  readonly topic?: string
-  /** The acp-kernel block id (`bN`) created for this transaction. */
-  readonly kernelBlockId?: string
-  /** Durable compaction ids of the blocks distilled into this one. */
-  readonly parentBlockIds?: readonly string[]
-  /**
-   * The kernel block's direct message ids (raw CoreMessage ids) at creation —
-   * recorded so a restarted engine rehydrates the SAME coverage (a tier-2
-   * block's coverage is its parents' originals, not the checkpoint node).
-   */
-  readonly directMessageIds?: readonly string[]
-  /** The kernel block's effective message ids (raw CoreMessage ids) at creation. */
-  readonly effectiveMessageIds?: readonly string[]
-}
-
 type CompactionSummaryData = SessionEventMap['compaction/summary']
 
-/** Read a `compaction/summary` event's data including the ACP tier extension fields. */
-export function readCompactionSummary(event: SessionEvent): CompactionSummaryData & AcpCompactionSummaryFields {
-  return event.data as CompactionSummaryData & AcpCompactionSummaryFields
+/**
+ * Read a `compaction/summary` event's data. The six ACP tier/lineage fields are
+ * no longer top-level members (issue #141): post-fix writers carry them in the
+ * admitted optional `rawOutput` member (decode via {@link decodeAcpBlockLedger}),
+ * while logs written by pre-fix engines still carry them as top-level members —
+ * so the returned type also intersects with {@link AcpBlockLedgerPayload}, letting
+ * readers fall back to the legacy shape. Never `any`.
+ */
+export function readCompactionSummary(event: SessionEvent): CompactionSummaryData & AcpBlockLedgerPayload {
+  return event.data as CompactionSummaryData & AcpBlockLedgerPayload
 }
 
 /**
@@ -372,55 +397,119 @@ export function runCompactionTransaction(
   session: Session,
   input: CompactionTransactionInput,
 ): { compactionId: string; seqs: number[] } {
-  assertNoActiveCompaction(session.events)
-  const turn = findOpenTurn(session.events)
+  assertNoActiveCompaction(sessionEventsOf(session))
+  const turn = findOpenTurn(sessionEventsOf(session))
   const compactionId = CompactionId(randomUUID())
   const seqs: number[] = []
 
-  seqs.push(session.append('compaction/start', { compactionId, turn }).seq)
-  seqs.push(session.append('compaction/summary', {
-    compactionId,
-    summary: input.summary,
-    shadowedRange: { start: input.start, end: input.end },
-    shadowedSeqs: [...input.shadowedSeqs],
-    shadowedTokenCount: input.shadowedTokenCount,
-    provider: input.provider,
-    model: input.model,
-    tier: input.tier ?? 1,
-    ...(input.kernelBlockId === undefined ? {} : { kernelBlockId: input.kernelBlockId }),
-    ...(input.topic === undefined ? {} : { topic: input.topic }),
-    ...(input.parentBlockIds === undefined || input.parentBlockIds.length === 0
-      ? {}
-      : { parentBlockIds: [...input.parentBlockIds] }),
-    ...(input.directMessageIds === undefined ? {} : { directMessageIds: [...input.directMessageIds] }),
-    ...(input.effectiveMessageIds === undefined ? {} : { effectiveMessageIds: [...input.effectiveMessageIds] }),
-  } as CompactionSummaryData & AcpCompactionSummaryFields).seq)
+  // Fail fast on an unresolvable range BEFORE writing any durable event. If we
+  // let the host's surfaceOp replace throw below, we would first have recorded
+  // compaction/start and compaction/summary and then leave a dangling start
+  // (poisoning every later compress call) plus an orphan summary in the ledger.
+  // Validating the edges up front keeps a bad range a clean, zero-write no-op.
+  if (input.start > input.end) {
+    throw new Error(`billion-context-dsh: reversed range ${input.start}..${input.end}`)
+  }
+  if (eventAtOf(session, input.start) === undefined || eventAtOf(session, input.end) === undefined) {
+    const failedEdge = eventAtOf(session, input.start) === undefined ? input.start : input.end
+    throw new Error(
+      `billion-context-dsh: seq ${input.start}..${input.end} not in the current surface — `
+      + `edge seq ${failedEdge} is not in this session's log. `
+      + 'Surface seqs are sparse message nodes (only user/message, assistant/message, '
+      + 'tool/result events); consult acp_status for the current surface range',
+    )
+  }
 
-  const message = createUserMessage({
-    content: input.summary,
-    source: compactCheckpointSource(compactionId),
-  })
-  seqs.push(session.append('user/message', message, {
-    surfaceOp: { op: 'replace', start: input.start, end: input.end },
-    sourceEventSeqs: [...input.shadowedSeqs],
-  }).seq)
+  try {
+    seqs.push(session.append('compaction/start', { compactionId, turn }).seq)
+    // The six tier/lineage fields ride in the admitted optional `rawOutput`
+    // member (namespaced JSON via encodeAcpBlockLedger), NOT as top-level
+    // members: the frozen released-v0 reader rejects any non-admitted member and
+    // would brick the log on host upgrade (issue #141). See src/block-ledger.ts.
+    const ledgerPayload: AcpBlockLedgerPayload = {
+      tier: input.tier ?? 1,
+      ...(input.kernelBlockId === undefined ? {} : { kernelBlockId: input.kernelBlockId }),
+      ...(input.topic === undefined ? {} : { topic: input.topic }),
+      ...(input.parentBlockIds === undefined || input.parentBlockIds.length === 0
+        ? {}
+        : { parentBlockIds: [...input.parentBlockIds] }),
+      ...(input.directMessageIds === undefined ? {} : { directMessageIds: [...input.directMessageIds] }),
+      ...(input.effectiveMessageIds === undefined ? {} : { effectiveMessageIds: [...input.effectiveMessageIds] }),
+    }
+    seqs.push(session.append('compaction/summary', {
+      compactionId,
+      summary: input.summary,
+      shadowedRange: { start: input.start, end: input.end },
+      shadowedSeqs: [...input.shadowedSeqs],
+      shadowedTokenCount: input.shadowedTokenCount,
+      provider: input.provider,
+      model: input.model,
+      rawOutput: encodeAcpBlockLedger(ledgerPayload),
+    } as CompactionSummaryData).seq)
 
-  seqs.push(session.append('compaction/end', { compactionId, turn }).seq)
+    const message = createUserMessage({
+      content: input.summary,
+      source: compactCheckpointSource(compactionId),
+    })
+    // The replace op MUST use the 0.1.5 field names: dsh-session's validator
+    // accepts exactly { op, startSeq, endSeq } (exactly three keys) and rejects
+    // the pre-0.1.5 { op, start, end } dialect with "invalid replace surfaceOp"
+    // (issue #136). Both validators force exactly-three-keys, so a single
+    // dialect is the only option — hence the peer floor at 0.1.5-alpha.1.
+    seqs.push(session.append('user/message', message, {
+      surfaceOp: { op: 'replace', startSeq: input.start as SurfaceSeq, endSeq: input.end as SurfaceSeq },
+      sourceEventSeqs: [...input.shadowedSeqs] as SurfaceSeq[],
+    }).seq)
+
+    seqs.push(session.append('compaction/end', { compactionId, turn }).seq)
+  } catch (error) {
+    // Backstop: if any append AFTER compaction/start throws (the host rejects
+    // the surfaceOp replace for a reason we did not pre-validate, the summary
+    // serialization fails, …), write a compensating compaction/end so the
+    // durable log never holds a dangling start that would block every later
+    // compress call. A leftover compaction/summary with no applied replace is
+    // surfaced as an orphan ledger block, which is preferable to a hard
+    // permanent block.
+    try {
+      session.append('compaction/end', { compactionId, turn })
+    } catch (compensateError) {
+      // The durable log may now hold a dangling compaction/start; the next
+      // assertNoActiveCompaction call heals it. Never mask the original error.
+      console.warn('billion-context-dsh: failed to write a compensating compaction/end', compensateError)
+    }
+    throw error
+  }
   return { compactionId, seqs }
 }
 
-/** The seq of a compaction's checkpoint summary node in the log (visible or shadowed). */
-function summarySeqOfCompaction(events: readonly SessionEvent[], compactionId: string): number | null {
+/**
+ * One pass over the log: compactionId → seq of its checkpoint summary node
+ * (first checkpoint wins, matching the old per-block linear scan). Replaces
+ * the B full-log scans per rebuild that made the ledger O(B·N) (issue #133:
+ * (B+1) rebuilds per search × B scans × N events ≈ 5.8B iterations at
+ * B=190, N=160K).
+ */
+function summarySeqIndex(events: readonly SessionEvent[]): Map<string, number> {
+  const index = new Map<string, number>()
   for (const event of events) {
     if (event.type !== 'user/message') continue
     const source = (event.data as { source?: { plugin?: string; compactionId?: string } }).source
-    if (source?.plugin === 'compact' && source.compactionId === compactionId) return event.seq
+    const compactionId = source?.plugin === 'compact' ? source.compactionId : undefined
+    if (compactionId !== undefined && !index.has(compactionId)) index.set(compactionId, event.seq)
   }
-  return null
+  return index
 }
+
+// Memoized on the append-only snapshot array (stable until the next append,
+// see sessionEventsOf): identity+length never goes stale; avoids the (B+1)
+// full rebuilds per search (#109/#133).
+const blockLedgerCache = new WeakMap<readonly SessionEvent[], { len: number; ledger: AcpBlockLedgerEntry[] }>()
 
 /** Rebuild the block ledger from the durable log (no kernel state needed). */
 export function rebuildBlockLedger(events: readonly SessionEvent[]): AcpBlockLedgerEntry[] {
+  const cached = blockLedgerCache.get(events)
+  if (cached !== undefined && cached.len === events.length) return cached.ledger
+  const summarySeqs = summarySeqIndex(events)
   const ledger: AcpBlockLedgerEntry[] = []
   for (const event of events) {
     if (event.type !== 'compaction/summary') continue
@@ -436,28 +525,44 @@ export function rebuildBlockLedger(events: readonly SessionEvent[]): AcpBlockLed
         if (original !== undefined) shadowedTokenCount += defaultCountTokens(extractEventText(original))
       }
     }
-    const tier = data.tier === 2 || data.tier === 3 ? data.tier : 1
-    const parentBlockIds: string[] = Array.isArray(data.parentBlockIds) ? [...data.parentBlockIds] : []
-    const directMessageIds: string[] | undefined = Array.isArray(data.directMessageIds) ? [...data.directMessageIds] : undefined
-    const effectiveMessageIds: string[] | undefined = Array.isArray(data.effectiveMessageIds) ? [...data.effectiveMessageIds] : undefined
-    const summarySeq = summarySeqOfCompaction(events, data.compactionId)
+    // Block-ledger fields: prefer the rawOutput-embedded payload (post-fix
+    // writers + normalizer-recovered files); fall back to the legacy top-level
+    // members written by pre-fix engines onto v3 logs (which are not bricked) so
+    // in-flight sessions keep their tier/lineage across the upgrade.
+    // decodeAcpBlockLedger never throws and returns {} when no valid payload is present.
+    const embedded = decodeAcpBlockLedger(data.rawOutput)
+    const tier: 1 | 2 | 3 = embedded.tier ?? (data.tier === 2 || data.tier === 3 ? data.tier : 1)
+    const parentBlockIds: string[] = embedded.parentBlockIds
+      ? [...embedded.parentBlockIds]
+      : (Array.isArray(data.parentBlockIds) ? [...data.parentBlockIds] : [])
+    const directMessageIds: string[] | undefined = embedded.directMessageIds
+      ? [...embedded.directMessageIds]
+      : (Array.isArray(data.directMessageIds) ? [...data.directMessageIds] : undefined)
+    const effectiveMessageIds: string[] | undefined = embedded.effectiveMessageIds
+      ? [...embedded.effectiveMessageIds]
+      : (Array.isArray(data.effectiveMessageIds) ? [...data.effectiveMessageIds] : undefined)
+    const topic: string | undefined = embedded.topic ?? (typeof data.topic === 'string' ? data.topic : undefined)
+    const kernelBlockId: string | undefined = embedded.kernelBlockId
+      ?? (typeof data.kernelBlockId === 'string' ? data.kernelBlockId : undefined)
+    const summarySeq = summarySeqs.get(data.compactionId) ?? null
     ledger.push({
       blockId: data.compactionId,
       summary: extractText(data.summary),
-      ...(typeof data.topic === 'string' ? { topic: data.topic } : {}),
+      ...(topic === undefined ? {} : { topic }),
       shadowedSeqs: [...data.shadowedSeqs],
       shadowedTokenCount,
       start: data.shadowedRange.start,
       end: data.shadowedRange.end,
       tier,
       parentBlockIds,
-      ...(typeof data.kernelBlockId === 'string' ? { kernelBlockId: data.kernelBlockId } : {}),
+      ...(kernelBlockId === undefined ? {} : { kernelBlockId }),
       ...(summarySeq === null ? {} : { summarySeq }),
       ...(directMessageIds === undefined ? {} : { directMessageIds }),
       ...(effectiveMessageIds === undefined ? {} : { effectiveMessageIds }),
       createdAt: event.time,
     })
   }
+  blockLedgerCache.set(events, { len: events.length, ledger })
   return ledger
 }
 
@@ -479,6 +584,24 @@ function isToolEvent(event: SessionEvent): boolean {
   return Array.isArray(content) && content.some((block) => (block as { type?: unknown })?.type === 'tool-call')
 }
 
+// `isCheckpointNode` now lives in src/messages.ts (imported above) so the range
+// scanner, the protected-tail scan and `classifySurfaceEvent` cannot drift
+// apart. A local `isPruneTombstone` was dropped for the same reason: the prune
+// tombstone is written with `source: { kind: 'plugin', plugin:
+// 'billion-context-dsh' }` (see `hideSurfaceSeqs`), which `classifySurfaceEvent`
+// files under `metadata`, so `isRealUserTurn` already refuses it tail protection.
+
+/**
+ * Whether a surface node is a host-owned system prompt (`system/message`, new
+ * in dsh-session 0.1.5). The host protects it — replacing node 0 throws
+ * ("node 0 holds the system prompt …"), and its content is fixed overhead, not
+ * conversation — so it must never be offered as compressible nor count as
+ * still-live content when a stale range snaps back.
+ */
+function isSystemNode(event: SessionEvent): boolean {
+  return event.type === 'system/message'
+}
+
 /** Tool-call ids carried by one assistant surface message. */
 function toolCallIdsOfEvent(event: SessionEvent): string[] {
   if (event.type !== 'assistant/message') return []
@@ -494,31 +617,21 @@ function toolCallIdsOfEvent(event: SessionEvent): string[] {
 }
 
 /**
- * Provider/model to stamp on a synthetic empty assistant pruning node.
+ * Durable model-free prune: append `compaction/prune` as the shadow price,
+ * then replace the given surface seqs with a user message. dsh-session 0.1.5+
+ * allows only user/message (and system/message) replacements to cite source
+ * events — assistant/message FORBIDS `sourceEventSeqs` because it embeds its
+ * own provider stream — so there is no invisible replacement node anymore:
+ * every hidden span becomes a user message. Callers with meaningful text pass
+ * it (compress call/result hiding keeps the tool outcome visible to the
+ * model); callers without get the fixed prune note. The originals remain in
+ * the append-only log.
  */
-function assistantProviderModel(event: SessionEvent): { provider: string; model: string } {
-  if (event.type === 'assistant/message') {
-    const message = (event.data as { message?: { source?: { provider?: unknown; model?: unknown } } }).message
-    return {
-      provider: typeof message?.source?.provider === 'string' ? message.source.provider : 'billion-context-dsh',
-      model: typeof message?.source?.model === 'string' ? message.source.model : 'surface-prune',
-    }
-  }
-  return { provider: 'billion-context-dsh', model: 'surface-prune' }
-}
+export const PRUNE_NOTE = '(removed by context management)'
 
-/**
- * Durable model-free prune: append `compaction/prune` as the shadow price, then
- * replace the given surface seqs with either a user message carrying `text`
- * (used for compress call/result hiding, so the model still sees the tool
- * outcome) or an EMPTY assistant message (used for orphan cleanup, which DSH
- * derives to nothing). The originals remain in the append-only log.
- */
 function hideSurfaceSeqs(
   session: Session,
   seqs: readonly number[],
-  provider: string,
-  model: string,
   text?: string,
   priceEvent: (event: SessionEvent) => number = hostPriceEvent,
 ): void {
@@ -527,34 +640,24 @@ function hideSurfaceSeqs(
   const end = seqs[seqs.length - 1]!
   let shadowedTokenCount = 0
   for (const seq of seqs) {
-    const event = session.events[seq]
+    const event = eventAtOf(session, seq)
     // The prune claim MUST speak the host's token vocabulary (rule 12): the
     // default `hostPriceEvent` is the exact mirror of the host estimator.
     // NEVER defaultCountTokens — that overdraws the meter on CJK (#54).
     if (event !== undefined) shadowedTokenCount += priceEvent(event)
   }
   session.append('compaction/prune', {
-    shadowedRange: { start, end },
-    shadowedSeqs: [...seqs],
+    shadowedRange: { start: start as SurfaceSeq, end: end as SurfaceSeq },
+    shadowedSeqs: [...seqs] as SurfaceSeq[],
     shadowedTokenCount,
   })
-  if (text !== undefined) {
-    session.append('user/message', createUserMessage({
-      content: [{ type: 'text', text }],
-      source: { kind: 'plugin', plugin: 'billion-context-dsh' },
-    }), {
-      surfaceOp: { op: 'replace', start, end },
-      sourceEventSeqs: [...seqs],
-    })
-    return
-  }
-  session.append('assistant/message', {
-    turn: findOpenTurn(session.events) ?? 0,
-    step: 0,
-    message: createAssistantMessage({ content: [], source: { provider, model } }),
-  }, {
-    surfaceOp: { op: 'replace', start, end },
-    sourceEventSeqs: [...seqs],
+  const body = text !== undefined && text.trim().length > 0 ? text : PRUNE_NOTE
+  session.append('user/message', createUserMessage({
+    content: [{ type: 'text', text: body }],
+    source: { kind: 'plugin', plugin: 'billion-context-dsh' },
+  }), {
+    surfaceOp: { op: 'replace', startSeq: start as SurfaceSeq, endSeq: end as SurfaceSeq },
+    sourceEventSeqs: [...seqs] as SurfaceSeq[],
   })
 }
 
@@ -569,7 +672,8 @@ function hideSurfaceSeqs(
  */
 export function hideCompressToolPair(session: Session, callId: string, resultSeq?: number): boolean {
   let callSeq: number | null = null
-  for (const event of session.events) {
+  const events = sessionEventsOf(session)
+  for (const event of events) {
     if (event.type !== 'assistant/message') continue
     if (toolCallIdsOfEvent(event).includes(callId)) {
       callSeq = event.seq
@@ -580,11 +684,11 @@ export function hideCompressToolPair(session: Session, callId: string, resultSeq
   // Only hide a node that carries EXACTLY the compress call. Hiding a
   // multi-call node replaces the whole assistant message, which would orphan
   // the sibling calls' results (their call ids vanish with the node).
-  const callNodeIds = toolCallIdsOfEvent(session.events[callSeq]!)
+  const callNodeIds = toolCallIdsOfEvent(events[callSeq]!)
   if (callNodeIds.length !== 1 || callNodeIds[0] !== callId) return false
   let resolvedResultSeq = resultSeq ?? null
   if (resolvedResultSeq === null) {
-    for (const event of session.events) {
+    for (const event of events) {
       if (event.type === 'tool/result' && toolCallIdOfResultEvent(event) === callId) {
         resolvedResultSeq = event.seq
         break
@@ -593,15 +697,14 @@ export function hideCompressToolPair(session: Session, callId: string, resultSeq
   }
   if (resolvedResultSeq === null) return false
   const nodes = session.surface.nodes
-  const startIdx = nodes.indexOf(callSeq)
-  const endIdx = nodes.indexOf(resolvedResultSeq)
+  const startIdx = nodes.indexOf(callSeq as SurfaceSeq)
+  const endIdx = nodes.indexOf(resolvedResultSeq as SurfaceSeq)
   // Only hide an actually adjacent pair; never shadow unrelated messages that
   // happen to sit between a stale call and result.
   if (startIdx < 0 || endIdx < 0 || endIdx - startIdx !== 1) return false
-  const { provider, model } = assistantProviderModel(session.events[callSeq]!)
-  const resultEvent = session.events[resolvedResultSeq]
+  const resultEvent = events[resolvedResultSeq]
   const resultText = resultEvent === undefined ? '' : extractEventText(resultEvent)
-  hideSurfaceSeqs(session, [callSeq, resolvedResultSeq], provider, model, resultText.trim().length > 0 ? resultText : undefined)
+  hideSurfaceSeqs(session, [callSeq, resolvedResultSeq], resultText)
   return true
 }
 
@@ -633,7 +736,7 @@ export function stripOrphanedSurfaceToolMessages(
   const brokenResults = new Map<number, number>()
   for (let index = 0; index < nodes.length; index += 1) {
     const seq = nodes[index]!
-    const event = session.events[seq]
+    const event = eventAtOf(session, seq)
     if (event === undefined) continue
     if (event.type === 'assistant/message') {
       const ids = toolCallIdsOfEvent(event)
@@ -659,7 +762,7 @@ export function stripOrphanedSurfaceToolMessages(
       if (callNodeIds !== undefined) {
         adjacent = true
         for (let mid = call.index + 1; mid < index; mid += 1) {
-          const midEvent = session.events[nodes[mid]!]
+          const midEvent = eventAtOf(session, nodes[mid]!)
           if (midEvent === undefined || midEvent.type !== 'tool/result') {
             adjacent = false
             break
@@ -678,7 +781,7 @@ export function stripOrphanedSurfaceToolMessages(
   // call node seq -> ids of that node whose result is broken (non-adjacent).
   const brokenIdsByCallSeq = new Map<number, string[]>()
   for (const [resultSeq, callSeq] of brokenResults) {
-    const id = toolCallIdOfResultEvent(session.events[resultSeq]!)
+    const id = toolCallIdOfResultEvent(eventAtOf(session, resultSeq)!)
     if (id !== null) {
       const list = brokenIdsByCallSeq.get(callSeq) ?? []
       list.push(id)
@@ -701,10 +804,8 @@ export function stripOrphanedSurfaceToolMessages(
   const hidden = [...hiddenSet].sort((a, b) => a - b)
   let count = 0
   for (const seq of hidden) {
-    const event = session.events[seq]
-    if (event === undefined) continue
-    const { provider, model } = assistantProviderModel(event)
-    hideSurfaceSeqs(session, [seq], provider, model)
+    if (eventAtOf(session, seq) === undefined) continue
+    hideSurfaceSeqs(session, [seq])
     count += 1
   }
   return count
@@ -721,7 +822,7 @@ export function stripOrphanedSurfaceToolMessages(
 export function openToolCallIds(session: Session): Set<string> {
   const open = new Set<string>()
   for (const seq of session.surface.nodes) {
-    const event = session.events[seq]
+    const event = eventAtOf(session, seq)
     if (event === undefined) continue
     if (event.type === 'assistant/message') {
       for (const id of toolCallIdsOfEvent(event)) open.add(id)
@@ -775,8 +876,12 @@ export function deferCompressPairHide(
  */
 export function newestInstructionSeqsOf(session: Session): Set<number> {
   const newest = new Map<string, number>()
-  for (let seq = 0; seq < session.events.length; seq += 1) {
-    const event = session.events[seq]
+  // Snapshot read (0.1.5 seam): the host stripped `session.events`, so read
+  // the dense log array instead — `sessionEventsOf` prefers `snapshotEvents()`
+  // and only falls back to `.events` on the older generation (seq == index).
+  const events = sessionEventsOf(session)
+  for (let seq = 0; seq < events.length; seq += 1) {
+    const event = events[seq]
     if (event === undefined || !isAgentInstructionsRow(event)) continue
     const source = (event.data as { source?: { changes?: Array<{ scope?: unknown }> } }).source
     const changes = Array.isArray(source?.changes) ? source.changes : []
@@ -808,7 +913,7 @@ export function guardedSurfaceSeqsOf(session: Session): Set<number> {
   const guarded = new Set<number>()
   const newestInstructions = newestInstructionSeqsOf(session)
   for (const seq of session.surface.nodes) {
-    const event = session.events[seq]
+    const event = eventAtOf(session, seq)
     if (event === undefined) continue
     if (isAgentInstructionsRow(event) && newestInstructions.has(seq)) guarded.add(seq)
   }
@@ -848,13 +953,16 @@ export function buildCompressibleSeqRanges(
     for (const seq of nodes.slice(-preserve)) protectedSeqs.add(seq)
   }
   for (let index = nodes.length - 1; index >= 0; index -= 1) {
-    const event = session.events[nodes[index]!]
+    const event = eventAtOf(session, nodes[index]!)
     // Only a REAL user turn may win "last real user message" protection. The
     // scan this replaces protected "the last non-checkpoint user/message",
     // which on live sessions is frequently an injected AGENTS.md row (the
     // host appends it in the same enter batch as the user input) — the
     // actual last user message was left compressible while synthetic output
-    // sat safe (issue #71 PR1).
+    // sat safe (issue #71 PR1). The classifier subsumes the narrower guards
+    // main's version carried: checkpoints are their own class, and
+    // engine-authored rows (prune tombstones, compress-pair stubs) are
+    // `metadata`, so neither can steal the protection window.
     if (event !== undefined && isRealUserTurn(event)) {
       protectedSeqs.add(nodes[index]!)
       break
@@ -874,8 +982,8 @@ export function buildCompressibleSeqRanges(
     cur = null
   }
   for (const seq of nodes) {
-    const event = session.events[seq]
-    if (event === undefined || protectedSeqs.has(seq) || isCheckpointNode(event)) {
+    const event = eventAtOf(session, seq)
+    if (event === undefined || protectedSeqs.has(seq) || isCheckpointNode(event) || isSystemNode(event)) {
       flush()
       continue
     }
@@ -980,7 +1088,7 @@ export interface AcpBlockRegistryEntry {
  * until a later block lists it as a parent.
  */
 export function blockRegistry(session: Session): AcpBlockRegistryEntry[] {
-  const ledger = rebuildBlockLedger(session.events)
+  const ledger = rebuildBlockLedger(sessionEventsOf(session))
   const kernelIdOf = new Map<string, string>()
   const raw: AcpBlockRegistryEntry[] = []
   let next = 1
@@ -1023,7 +1131,7 @@ export function blockRegistry(session: Session): AcpBlockRegistryEntry[] {
  * anything else (plain messages, non-checkpoint nodes).
  */
 export function blockRefForSummarySeq(session: Session, seq: number): string | null {
-  const event = session.events[seq]
+  const event = eventAtOf(session, seq)
   if (event?.type !== 'user/message') return null
   const source = (event.data as { source?: { plugin?: string; compactionId?: string } }).source
   if (source?.plugin !== 'compact' || source.compactionId === undefined) return null
@@ -1077,7 +1185,7 @@ function checkpointBlockIdOf(events: readonly SessionEvent[], seq: number): stri
  * seqs. Cycle-safe (a block can never be its own ancestor).
  */
 export function expandShadowedSeqs(session: Session, blockId: string): number[] {
-  const ledger = rebuildBlockLedger(session.events)
+  const ledger = rebuildBlockLedger(sessionEventsOf(session))
   const byId = new Map(ledger.map((entry) => [entry.blockId, entry]))
   const root = byId.get(blockId)
   if (root === undefined) return []
@@ -1087,7 +1195,7 @@ export function expandShadowedSeqs(session: Session, blockId: string): number[] 
     if (seen.has(entry.blockId)) return
     seen.add(entry.blockId)
     for (const seq of entry.shadowedSeqs) {
-      const childId = checkpointBlockIdOf(session.events, seq)
+      const childId = checkpointBlockIdOf(sessionEventsOf(session), seq)
       const child = childId === null ? undefined : byId.get(childId)
       if (child !== undefined) visit(child)
       else out.push(seq)

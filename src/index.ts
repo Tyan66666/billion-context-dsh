@@ -35,15 +35,16 @@ import {
   type CompactionTrigger,
   type ManualCompactAgentContext,
 } from '@deepseek-ai/dsh-compaction'
-import { createCore, type CompressionCore } from 'acp-kernel'
+import { createCore, setDocCacheCap, type CompressionCore } from 'acp-kernel'
 import type { Agent } from '@deepseek-ai/dsh-agent'
+import { DEFAULT_SESSION_CACHE_LIMIT, LruMap } from './lru.ts'
 import { AcpStateStore } from './state.ts'
 import { makeTools, type ToolEnvironment } from './tools.ts'
 import { acpCommand } from './commands.ts'
-import { buildNudge } from './nudge.ts'
+import { buildNudge, EMERGENCY_NUDGE_MAX_PER_TURN } from './nudge.ts'
 import { ACP_SYSTEM_PROMPT_ORDER } from './system-prompt.ts'
 import { renderSystemPrompt, resolvePrompts, type AcpPrompts, type ResolvedPrompts } from './prompts.ts'
-import { DEFAULT_CONTEXT_WINDOW, detectContextWindow, projectedContextWindow, type AcpWindow } from './window.ts'
+import { DEFAULT_CONTEXT_WINDOW, probeModelWindow, projectedContextWindow, routeFor, type AcpWindow } from './window.ts'
 import { deferCompressPairHide, stripOrphanedSurfaceToolMessages } from './region.ts'
 
 export { AcpStateStore } from './state.ts'
@@ -65,7 +66,7 @@ export {
 } from './prompts.ts'
 export { makeTools, type ToolEnvironment } from './tools.ts'
 export { acpCommand } from './commands.ts'
-export { buildNudge, resolveTokenCount, type NudgeEnvironment, type NudgeOutcome } from './nudge.ts'
+export { buildNudge, resolveTokenCount, EMERGENCY_NUDGE_MAX_PER_TURN, type NudgeEnvironment, type NudgeOutcome } from './nudge.ts'
 export {
   DEFAULT_CONTEXT_WINDOW,
   detectContextWindow,
@@ -118,10 +119,11 @@ export interface AcpConfig {
    */
   readonly nudgeMaxContextLimitPct?: number
   /**
-   * Emergency nudge threshold (bypasses the per-turn dedup). Engine default
-   * 0.85 (down from the kernel/billion-context-pi default 0.95: 95% leaves
-   * the model no room to act before the API rejects, and the host's 80%
-   * compaction-basic line shadows it in standard/code/cordis modes).
+   * Emergency nudge threshold (bypasses the per-turn dedup, but is capped at
+   * EMERGENCY_NUDGE_MAX_PER_TURN = 3 injections per user turn — issue #108).
+   * Engine default 0.85 (down from the kernel/billion-context-pi default 0.95:
+   * 95% leaves the model no room to act before the API rejects, and the host's
+   * 80% compaction-basic line shadows it in standard/code/cordis modes).
    */
   readonly nudgeEmergencyThresholdPct?: number
   /**
@@ -195,11 +197,15 @@ export class AcpCompactionEngine extends CompactionEngine {
    */
   readonly env: ToolEnvironment
 
-  private readonly lastNudgeTurn = new Map<string, number>()
+  private readonly lastNudgeTurn = new LruMap<string, number>(DEFAULT_SESSION_CACHE_LIMIT)
+  /** Per-session emergency-nudge injection budget for the current user turn (issue #108). */
+  private readonly emergencyNudges = new Map<string, { turn: number; count: number }>()
   /** Successful compress call ids awaiting their tool/result so the pair can be hidden. */
   private readonly compressCallIdsToHide = new Set<string>()
   /** Per provider/model route the resolved window (probe failures cached too). */
   private readonly windowCache = new Map<string, AcpWindow>()
+  /** Per route the adapter's per-request output cap (the output reservation); null = undisclosed. */
+  private readonly outputReservationCache = new Map<string, number | null>()
 
   constructor(ctx: Context, config: Partial<AcpConfig> = {}) {
     super(ctx)
@@ -209,6 +215,19 @@ export class AcpCompactionEngine extends CompactionEngine {
     this.prompts = resolvePrompts(config.prompts)
     const ports = this.config.countTokens !== undefined ? { countTokens: this.config.countTokens } : {}
     this.kernel = createCore(ports)
+    // The kernel's docFeatures cache (per-doc search features) defaults to an
+    // 8MB SOURCE-CHAR cap — sized for multi-session server processes. A DSH
+    // profile is single-user and its search corpus (ALL shadowed originals)
+    // routinely exceeds 8MB, so the default re-tokenizes the corpus on every
+    // search_context call (issue #133: ~18s/call on a 40MB corpus, cold and
+    // warm identical). The cap cannot be tuned DOWN instead — it evicts FIFO
+    // and bills source chars only, so a cap below the corpus caches nothing
+    // (measured: half the corpus → 1.1× on a repeat scan). 128MB covers the
+    // largest reported session (17.6M shadowed tokens ≈ 70MB text). Retained
+    // feature heap is 2.1×–51× the billed chars (content-dependent, measured)
+    // — accepted, since the host already holds a log of that scale; the
+    // arithmetic and the upstream root cause are in AGENTS.md rule 14.
+    setDocCacheCap(128 * 1024 * 1024)
     this.store = new AcpStateStore()
 
     const env: ToolEnvironment = {
@@ -303,7 +322,20 @@ export class AcpCompactionEngine extends CompactionEngine {
       const decision = await next()
       if (decision.kind === 'reject') return decision
       const window = await this.windowFor(payload.agent)
-      const outcome = buildNudge(payload.agent, { ...env, modelContextLimit: window.limit }, this.lastNudgeTurn)
+      const outcome = buildNudge(
+        payload.agent,
+        { ...env, modelContextLimit: window.limit },
+        this.lastNudgeTurn,
+        this.emergencyNudges,
+        () => {
+          // The kernel still wants an emergency nudge but the per-turn budget
+          // is spent: log WHY the model stops receiving nudges instead of
+          // letting the silence look like a bug (issue #108 review).
+          ctx.logger.warn(
+            `billion-context-dsh: emergency nudge suppressed — per-turn budget of ${EMERGENCY_NUDGE_MAX_PER_TURN} spent (session ${payload.agent.session.id}); pressure is still above the emergency threshold`,
+          )
+        },
+      )
       if (outcome === null) return decision
       return { kind: 'enter', messages: [...decision.messages, outcome.message] }
     })
@@ -349,14 +381,24 @@ export class AcpCompactionEngine extends CompactionEngine {
    * projectedContextWindow). Falls back to probing the model's real window
    * via `agent.ctx.llm.resolveModelInfo` (cached per provider/model route,
    * probe failures cached too) and finally to DEFAULT_CONTEXT_WINDOW when
-   * auto-detection is disabled or unavailable.
+   * auto-detection is disabled or unavailable. On the auto-detected paths the
+   * adapter's per-request output cap is then SUBTRACTED from the window
+   * (applyReservation): every downstream usage computation must run against
+   * the SUSTAINABLE input budget (window minus output reservation), not the
+   * raw window — a 96K window with a 16K cap carries at most 80K of input,
+   * so the raw denominator understates usage by cap/window (≈17% there, and
+   * far worse on short-window models). An explicit limit keeps the operator's
+   * exact value (they own the denominator); a failed probe keeps the raw
+   * fallback.
    */
   async windowFor(agent: Agent): Promise<AcpWindow> {
     if (this.config.modelContextLimit !== undefined) {
       return { limit: this.config.modelContextLimit, source: 'explicit' }
     }
-    const provider = agent.options.provider ?? ''
-    const model = agent.options.model ?? ''
+    // The per-route output cap must be looked up against the session's LIVE
+    // route or it lags one switch behind (a stale agent.options snapshot names
+    // the PREVIOUS route) — routeFor owns that fallback chain for every caller.
+    const { provider, model } = routeFor(agent)
     const key = `${provider}\0${model}`
     // Projection source first: it reflects the live route (agent.options is a
     // stale snapshot after a model switch), and it is not cached here because
@@ -366,17 +408,24 @@ export class AcpCompactionEngine extends CompactionEngine {
     if (this.config.autoModelContextLimit) {
       const projected = projectedContextWindow(agent)
       if (projected !== null) {
-        return { limit: projected, source: 'projection', provider, model }
+        // The window comes from the live projection; the output cap comes from
+        // the (cached) model probe for the LIVE route — the projection schema
+        // carries no cap, so the cap follows the live provider/model resolved
+        // above (agent.options only as the pre-first-request fallback).
+        const cap = await this.outputCapFor(agent, provider, model)
+        return this.applyReservation({ limit: projected, source: 'projection', provider, model }, cap)
       }
     }
     const cached = this.windowCache.get(key)
     if (cached !== undefined) return cached
     let window: AcpWindow
+    let cap: number | null = null
     if (!this.config.autoModelContextLimit) {
       window = { limit: DEFAULT_CONTEXT_WINDOW, source: 'default', provider, model }
     } else {
-      const detected = await detectContextWindow(agent, provider, model)
-      if (detected === null) {
+      const probe = await probeModelWindow(agent, provider, model)
+      cap = probe.outputReservation
+      if (probe.contextWindow === null) {
         // Probe failures are cached below too, so the 128K fallback sticks for
         // the whole process lifetime — a gateway operator who fixes the model
         // API must restart (or set modelContextLimit) before the probe retries.
@@ -388,12 +437,41 @@ export class AcpCompactionEngine extends CompactionEngine {
           `billion-context-dsh: context-window auto-detection failed for ${provider}/${model} — using the ${DEFAULT_CONTEXT_WINDOW} fallback (restart to re-probe, or set modelContextLimit explicitly)`,
         )
         window = { limit: DEFAULT_CONTEXT_WINDOW, source: 'default', provider, model, probeFailed: true }
+        cap = null // the probe failed or disclosed nothing — no cap either
       } else {
-        window = { limit: detected, source: 'auto', provider, model }
+        window = { limit: probe.contextWindow, source: 'auto', provider, model }
       }
     }
+    window = this.applyReservation(window, cap)
     this.windowCache.set(key, window)
     return window
+  }
+
+  /**
+   * The adapter's per-request output cap for a route, from one
+   * probeModelWindow call (a local catalog lookup — no request is sent),
+   * cached per route like the window itself.
+   */
+  private async outputCapFor(agent: Agent, provider: string, model: string): Promise<number | null> {
+    if (provider === '' || model === '') return null
+    const key = `${provider}\0${model}`
+    const known = this.outputReservationCache.get(key)
+    if (known !== undefined) return known
+    const cap = (await probeModelWindow(agent, provider, model)).outputReservation
+    this.outputReservationCache.set(key, cap)
+    return cap
+  }
+
+  /**
+   * Subtract the output reservation from a resolved window: `limit` becomes
+   * the SUSTAINABLE input budget (`rawLimit - outputReserved`) that every
+   * downstream usage computation (nudge tiers, truncate, growth) measures
+   * against. No-op when the cap is unknown or not smaller than the window
+   * (degenerate config) — the raw-window behavior is preserved.
+   */
+  private applyReservation(window: AcpWindow, cap: number | null): AcpWindow {
+    if (cap === null || cap >= window.limit) return window
+    return { ...window, rawLimit: window.limit, outputReserved: cap, limit: window.limit - cap }
   }
 
   /** ACP is model-driven: automatic pressure policy never summarizes by itself. */

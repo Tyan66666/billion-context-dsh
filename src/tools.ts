@@ -17,7 +17,7 @@ import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
 import type { AcpStateStore } from './state.ts'
 import { kernelConfigFor, type KernelConfigInput } from './config.ts'
 import { resolveTokenCount } from './nudge.ts'
-import type { AcpWindow } from './window.ts'
+import { routeFor, type AcpWindow } from './window.ts'
 import {
   AlreadyCompressedRangeError,
   blockIdOfKernelRef,
@@ -37,6 +37,7 @@ import {
 } from './region.ts'
 import { allLogMessages, buildToolCallIndex, eventsToCoreMessages, extractEventText, surfaceEventsOf } from './messages.ts'
 import { shadowedTokensViaMeter } from './host-tokens.ts'
+import { eventAtOf, sessionEventsOf } from './session-events.ts'
 import { DEFAULT_RESOLVED, type ResolvedPrompts } from './prompts.ts'
 
 export interface ToolEnvironment extends KernelConfigInput {
@@ -534,14 +535,18 @@ async function handleCompress(env: ToolEnvironment, args: CompressArgs, exec: To
     const shadowedTokens = shadowedTokensViaMeter(session, shadowed, agent.ctx)
     const tier = block.tier === 2 || block.tier === 3 ? block.tier : 1
     const parentBlockIds = compactionIdsOfKernelBlocks(session, block.directBlockIds)
+    // Provenance follows the LIVE route, not `agent.options`: after a mid-session
+    // model switch the latter is a stale snapshot (the PREVIOUS route), so the
+    // summary node would be stamped with a route the summary did not come from.
+    const { provider, model } = routeFor(agent)
     const { compactionId } = runCompactionTransaction(session, {
       start,
       end,
       shadowedSeqs: shadowed,
       summary: [{ type: 'text', text: range.summary }],
       shadowedTokenCount: shadowedTokens,
-      provider: agent.options.provider ?? '',
-      model: agent.options.model ?? '',
+      provider,
+      model,
       tier,
       kernelBlockId: block.blockId,
       ...(range.topic === undefined ? {} : { topic: range.topic }),
@@ -600,7 +605,7 @@ interface DecompressArgs {
 function resolveBlockId(session: Session, arg: string): string | null {
   const byKernelRef = blockIdOfKernelRef(session, arg)
   if (byKernelRef !== null) return byKernelRef
-  const ledger = rebuildBlockLedger(session.events)
+  const ledger = rebuildBlockLedger(sessionEventsOf(session))
   const byPrefix = ledger.find((entry) => entry.blockId.startsWith(arg))
   return byPrefix?.blockId ?? null
 }
@@ -612,7 +617,7 @@ function handleDecompress(_env: ToolEnvironment, rawArgs: DecompressArgs, exec: 
   if (blockId === null) {
     return { text: `decompress: block "${args.blockId}" not found (see acp_status for the block list)` }
   }
-  const ledger = rebuildBlockLedger(session.events)
+  const ledger = rebuildBlockLedger(sessionEventsOf(session))
   const block = ledger.find((entry) => entry.blockId === blockId)
   if (block === undefined) {
     return { text: `decompress: block "${args.blockId}" not found (see acp_status for the block list)` }
@@ -620,7 +625,7 @@ function handleDecompress(_env: ToolEnvironment, rawArgs: DecompressArgs, exec: 
   const parts: string[] = []
   // Tier-2/3 blocks shadow parent checkpoint nodes: expand to the originals.
   for (const seq of expandShadowedSeqs(session, block.blockId)) {
-    const event = session.events[seq]
+    const event = eventAtOf(session, seq)
     const text = event === undefined ? '' : extractEventText(event)
     if (text.length > 0) parts.push(`[seq ${seq}] ${text}`)
   }
@@ -650,15 +655,27 @@ function roleOfEvent(event: SessionEvent): MessageRole | null {
   }
 }
 
+// The search corpus (block summaries + all shadowed originals) is a pure
+// function of the append-only log: rebuild it once per log snapshot and reuse
+// across searches until the next append (issue #133 — the per-call full
+// rebuild re-extracted and re-counted every shadowed message on every search;
+// the snapshot array is stable until the next append, see sessionEventsOf).
+const searchDocsCache = new WeakMap<readonly SessionEvent[], SearchDoc[]>()
+
 /**
  * Build the unified SearchDoc[] from the log: one block doc per ledger entry
  * (ref = compactionId, so `decompress({ blockId })` closes the loop) plus one
  * message doc per shadowed ORIGINAL (expanded through distilled parents; each
  * seq is claimed by the earliest/innermost block that covered it, mirroring
  * pi's owner map — decompress on that block recovers the original).
+ * Cached per log snapshot (see searchDocsCache). Exported for the issue #133
+ * regression tests (not part of the public API — index.ts re-exports only).
  */
-function buildSearchDocs(session: Session): SearchDoc[] {
-  const ledger = rebuildBlockLedger(session.events)
+export function buildSearchDocs(session: Session): SearchDoc[] {
+  const events = sessionEventsOf(session)
+  const cached = searchDocsCache.get(events)
+  if (cached !== undefined) return cached
+  const ledger = rebuildBlockLedger(events)
   const docs: SearchDoc[] = []
   const claimed = new Set<number>()
   for (const block of ledger) {
@@ -674,7 +691,7 @@ function buildSearchDocs(session: Session): SearchDoc[] {
     for (const seq of expandShadowedSeqs(session, block.blockId)) {
       if (claimed.has(seq)) continue
       claimed.add(seq)
-      const event = session.events[seq]
+      const event = eventAtOf(session, seq)
       if (event === undefined) continue
       const role = roleOfEvent(event)
       const text = extractEventText(event)
@@ -691,6 +708,7 @@ function buildSearchDocs(session: Session): SearchDoc[] {
       })
     }
   }
+  searchDocsCache.set(events, docs)
   return docs
 }
 

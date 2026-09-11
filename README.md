@@ -3,7 +3,7 @@
 [中文](./README.md) | [English](./README.en.md)
 
 > **⚠️ 测试版声明——请勿用于生产环境**
-> 本项目（**v0.2.17**）仍处于开发中的测试版。[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 本身也处于**公开测试版**阶段。**请勿将两者用于工程化 / 生产环境**——预期会有破坏性变更与粗糙之处。
+> 本项目（**v0.2.21**）仍处于开发中的测试版。[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 本身也处于**公开测试版**阶段。**请勿将两者用于工程化 / 生产环境**——预期会有破坏性变更与粗糙之处。
 
 <p align="center">
 <strong>衷心感谢以下项目——请给它们一个 ⭐：</strong>
@@ -71,14 +71,21 @@ dsh plugin --profile web add billion-context-dsh
 
 装完**重启 `dsh`**（bundle 层在启动时组合），新开会话即可用——让模型调用 `acp_status` 或执行 `/acp status` 自证。shipped 预设（standard / code / cordis）内部的 realm 级 `compaction-basic` 自动压缩兜底仍然保留（这些模式里"自动摘要"照旧，ACP 工具与 nudge 并存）；minimal 等不带 compaction realm 的预设直接使用本引擎。
 
-> **与 DSH 版本的兼容性。** 包声明 peer 依赖 `@deepseek-ai/dsh-compaction` 为
-> `^0.1.0-rc.6 || ^0.1.1-rc.1`，同时覆盖 `0.1.0-rc.x` 与 `0.1.1-rc.x` 两条 rc 线
-> （含当前最新 DSH release；从 `0.1.0-rc.6` 到 `0.1.1-rc.2`，seam 的 `src/` 源码
-> 零改动，公开 API 完全一致）。范围写成两个并集子句是**有意为之**：npm
-> （node-semver）的预发布匹配规则要求 range 里存在与候选版本**相同
-> `[major, minor, patch]` 元组**的比较器，单一 `^0.1.0-rc.6` 永远匹配不了
-> `0.1.1-rc.x`（issue #68）——因此旧发布的包在 DSH 0.1.1-rc.x 上装不上，
-> 升级到含本次修复的新版本即可。
+> **与 DSH 版本的兼容性。** 包把四个运行期 seam 包（`dsh-compaction` /
+> `dsh-session` / `dsh-llm` / `dsh-tools`）都声明为 peer 依赖，共享同一个
+> 范围 `>=0.1.5-alpha.1 <0.1.6-0`——恰好是整条 `0.1.5` 线（所有预发布加最终
+> `0.1.5`）。从 `0.1.5` 线起，会话 replace 操作的协议字段由 `{ op, start, end }`
+> 改名为 `{ op, startSeq, endSeq }`，且校验严格（只接受这三个字段）；本引擎只
+> 输出新形态，因此在更旧的 DSH（< 0.1.5）上每次 `compress` 都会被宿主在运行时
+> 拒绝（issue #136）——旧版本不再受支持，请先升级 DSH 再安装本发行版。范围
+> 写成显式区间而非 caret 是**有意为之**：caret 会悄悄放进未经验证的 0.1.6+
+> 线。把这四个 seam 包一并声明为 peer（而不只是 `dsh-compaction`），是为了让
+> 安装在 pnpm 的集成/封存布局下仍能把它们解析到**宿主自己的副本**，而不是
+> 某个与宿主不一致的陈旧嵌套副本。
+>
+> 行为注记（0.1.5 起）：宿主不再允许"不可见"替换节点，引擎清理孤立工具消息时
+> 会在其位置留下一条短可见占位消息；宿主的系统提示节点（surface node 0）被排除
+> 在可压缩范围表之外。
 
 **方式二：纯 `npm install`（只装包，需要手写组合行）。**
 
@@ -91,7 +98,7 @@ npm install billion-context-dsh
 **git 源安装（`github:` 规格，插件商店展示的形态）。** 预构建产物 `dist/` 已提交到仓库，从 git 源安装同样开箱即用——**无需任何构建步骤**，pnpm 11 默认拦截构建脚本（`allowBuilds`）的机制对这个包不构成障碍：
 
 ```bash
-dsh plugin --profile web add github:Tyan66666/billion-context-dsh#v0.2.17
+dsh plugin --profile web add github:Tyan66666/billion-context-dsh#v0.2.21
 ```
 
 建议带 `#<tag>` 安装，拿到与对应 npm 版本完全一致的产物；不带 ref 则装默认分支的最新构建。只有 clone 仓库自行从源码构建（`npm run build`）才需要放行构建。背景与方案取舍见 [docs/git-source-install-design.md](docs/git-source-install-design.md)（issue #92）。
@@ -166,11 +173,11 @@ DSH 的每个模型请求都派生自其 append-only 会话日志（*surface*）
 | refs（`m00001` 标签） | surface seq，由 nudge 的可压缩范围表携带 |
 | nudge（"效率提示——尽早压缩保持精简"） | 由内核的压力决策在 `agent/pre-step` 注入——效率通知 + 上下文分解 + 压缩规则，语气对齐 kernel/pi；绝非命令 |
 | `decompress` | 从日志只读恢复被遮蔽的原文 |
-| `search_context` | 从日志重建块摘要 + 被遮蔽原文的统一文档集，交 acp-kernel `searchBlocks`（hybrid：词干化 + CJK bigram + 字符 n-gram 模糊）打分；命中回链所属块 |
+| `search_context` | 从日志重建块摘要 + 被遮蔽原文的统一文档集（按日志快照缓存：新事件落盘前重复搜索直接复用，issue #133），交 acp-kernel `searchBlocks`（hybrid：词干化 + CJK bigram + 字符 n-gram 模糊）打分；命中回链所属块 |
 | `acp_status` | CONTEXT BREAKDOWN（tool/text/summaries 占可见总量）+ 压缩块账本 + nudge 决策行 + `Checkpoint seqs` 行（active 块的 `bN → seq` 映射——压缩某个 checkpoint seq 即蒸馏该块，issue #60）；不含上下文窗口；支持 scope/view/tool/sort/limit 钻取 |
 | 块状态 | 内存内核状态 + **日志重建账本**（无旁车文件） |
 | 分层蒸馏（T2/T3） | 再次压缩某块的摘要节点 = 蒸馏该块（tier 2），蒸馏 tier-2 块得 tier 3；tier 与内核块 id 持久化进日志，重启后内核状态从日志再水合、可继续蒸馏 |
-| 压缩记账（影子价格） | `shadowedTokenCount`（宿主占用率据此扣减）**用宿主 token-meter 的词汇计价**（`ctx.tokenMeter.measure` 优先，`src/host-tokens.ts` 精确镜像兜底）——绝不混用插件内部的 CJK 感知估算（那是展示货币，混用会把宿主账本扣成负数、卡死中文会话，issue #54） |
+| 压缩记账（影子价格） | `shadowedTokenCount`（宿主占用率据此扣减）**用宿主 token-meter 的固定启发价计价**（`ctx.tokenMeter.measure` 优先、按 `heuristicTokens ?? tokens` 读固定启发价基准，`src/host-tokens.ts` 精确镜像兜底）——绝不混用插件内部的 CJK 感知估算（那是展示货币，混用会把宿主账本扣成负数、卡死中文会话，issue #54），也不按路由重定价的 `node.tokens` 计价（0.1.2+ 图片路由计价下那是请求压力价，读它会让含图片区间的 claim 虚报视觉价、同样扣穿账本，issue #103） |
 | 注入指令行卫生 | 宿主会把 AGENTS.md 等策略文件注入会话表面；压缩其**当前副本**会让宿主立刻重注入同一份文件——压缩→重注→压缩死循环（issue #71）。可压缩范围表把注入行当屏障：永不提供、永不计入段；手动压缩（模型的 compress 工具、人用的 /acp compress 命令）若覆盖某文件的当前副本都会被**直接拒绝**（报错点名行号，并提示过期的旧副本可以压），因为压当前副本没有收益——宿主必重贴。按 `source.changes[].scope`（= 一个文件）分组，只有每组最新副本受保护——被更新取代的旧副本可以安全压缩 |
 
 承载性的压缩指引（工具、哲学、摘要规则、tier 蒸馏/浓缩规则）注册为一次性系统提示段；每条 nudge 携带精简版（效率提示 + 哲学 + 上下文分解 + 压缩规则 + 范围表 + 批量提示）。刻意**不做自动摘要**：自动策略只 nudge 模型（`compactIfNeeded` 返回 null）。
@@ -208,11 +215,11 @@ DSH 的每个模型请求都派生自其 append-only 会话日志（*surface*）
 
 | 键 | 默认值 | 含义 |
 |---|---|---|
-| `modelContextLimit` | 自动探测（回退 `128000`） | 用于内核压力决策的上下文窗口；显式配置时优先且跳过探测。省略时优先读宿主会话投影 `contextPressure.contextWindow`（按**当前真实路由**披露的新窗口，切模型会话自动跟随，无需重启），无投影时再从模型 API 探测 |
-| `autoModelContextLimit` | `true` | 从模型 API 自动探测真实窗口（`agent.ctx.llm.resolveModelInfo`）；探测失败回退默认值，`/acp` 命令展示窗口来源（模型工具 `acp_status` 不含窗口信息）。省略时窗口先读宿主投影（`windowFor` → `projectedContextWindow`，`src/window.ts`）再走探测；投影与探测在 `autoModelContextLimit: false` 时均跳过。探测失败会在宿主日志与 `/acp` 面板提示（`restart to re-probe`）——失败结果同样被缓存，修复网关后需重启或显式设置 `modelContextLimit` 才会重新探测 |
+| `modelContextLimit` | 自动探测（回退 `128000`） | 用于内核压力决策的上下文窗口；显式配置时优先且跳过探测。省略时优先读宿主会话投影 `contextPressure.contextWindow`（按**当前真实路由**披露的新窗口，切模型会话自动跟随，无需重启），无投影时再从模型 API 探测；显式配置同样跳过输出预留扣减（分母完全由操作者定义） |
+| `autoModelContextLimit` | `true` | 从模型 API 自动探测真实窗口（`agent.ctx.llm.resolveModelInfo`）；探测失败回退默认值，`/acp` 命令展示窗口来源（模型工具 `acp_status` 不含窗口信息）。省略时窗口先读宿主投影（`windowFor` → `projectedContextWindow`，`src/window.ts`）再走探测；投影与探测在 `autoModelContextLimit: false` 时均跳过。探测失败会在宿主日志与 `/acp` 面板提示（`restart to re-probe`）——失败结果同样被缓存，修复网关后需重启或显式设置 `modelContextLimit` 才会重新探测。探测成功后还会**扣减 adapter 的每请求输出上限**（`defaultMaxTokens`，窗口末端每请求保证的输出预留）：所有下游压力决策（nudge 档位、truncate、growth）以「可持续输入预算」（窗口 − 输出预留）为分母——96K 窗口 + 16K 上限实际最多承载 80K 输入，原裸窗口分母会把用量低估 cap/window（此处 ≈17%；小上下文窗口模型比例更高）；上限未披露、显式配置或探测失败时保持裸窗口行为，`/acp status` 展示扣减明细（raw − reservation） |
 | `nudgeMinContextLimitPct` | 内核默认 `0.45` | Nudge 窗口下界（用量占比）——仅作配置校验，增长路径的触发没有百分比下限——与 billion-context-pi 相同的默认值 |
 | `nudgeMaxContextLimitPct` | engine 默认 `0.70`（内核/pi 默认 `0.75`） | 过限线：超过此值则无论增长与否都触发 nudge——刻意低于宿主 compaction-basic 的 80% 自动压缩线，保证强制 nudge 先触发；显式配置优先（`coreOverrides.nudge` 同名键优先级更高，见下） |
-| `nudgeEmergencyThresholdPct` | engine 默认 `0.85`（内核/pi 默认 `0.95`） | 紧急 nudge（绕过每轮去重）——从 `0.95` 下调：95% 时模型已无操作空间且会被 80% 自动压缩线遮蔽；显式配置优先（`coreOverrides.nudge` 同名键优先级更高，见下） |
+| `nudgeEmergencyThresholdPct` | engine 默认 `0.85`（内核/pi 默认 `0.95`） | 紧急 nudge（绕过每轮去重，但每个 user turn 最多注入 3 次——issue #108）——从 `0.95` 下调：95% 时模型已无操作空间且会被 80% 自动压缩线遮蔽；显式配置优先（`coreOverrides.nudge` 同名键优先级更高，见下） |
 | `coreOverrides` | — | 任何其他 acp-kernel `Config` 覆盖（billion-context-pi 的 `coreOverrides` 逃生口）。合并顺序：内核默认 → 顶层 pct 配置 → `coreOverrides.nudge` 最后落地——同名键以它为准 |
 | `autoTools` | `true` | 在 `ctx.tools` 注册四个模型工具 |
 | `autoCommand` | `true` | 在 `ctx.commands` 注册 `/acp` 命令 |
@@ -226,7 +233,10 @@ npm install
 npm run typecheck   # 严格 TS
 npm test            # node --import tsx --test tests/*.test.ts
 npm run build       # tsup 打包（内联 acp-kernel）+ .d.ts
+npm run test:e2e   # 端到端宿主回归：真实 agent 循环 + 脚本化假 LLM（见下文）
 ```
+
+端到端回归（`scripts/e2e/`）在进程内组装真实 DSH 宿主（cordis + agent-loop + DeepSeek 适配器），指向脚本化假 LLM 服务，挂载本引擎作为压缩后端，然后断言持久化事件日志：compaction 起止配对、durable replace 节点、严格 tool-call/result 配对、nudge 注入节奏。背景与取舍见 [docs/e2e-harness-design.md](docs/e2e-harness-design.md)（issue #120）。
 
 `dist/index.js` 自包含，仅外链 `@deepseek-ai/*` 接缝包（由宿主部署提供）。
 
@@ -238,11 +248,12 @@ src/
 ├── messages.ts     # M1: 会话事件 ↔ acp-kernel CoreMessage 投影
 ├── state.ts        # M2: 每会话内核状态
 ├── region.ts       # M5: 持久化区域事务 + 日志重建块账本
+├── block-ledger.ts # M5 支持：tier/lineage 字段编码进 compaction/summary 的 rawOutput（绝不作顶层成员，issue #141）
 ├── tools.ts        # M3: compress / decompress / search_context / acp_status
 ├── nudge.ts        # M4: 内核压力决策 → 注入的建议式 nudge
 ├── system-prompt.ts# M4: 一次性 ACP 指引段（让 nudge 保持简短）
 ├── config.ts       # 内核配置组装（阈值 + coreOverrides）
-├── window.ts       # 自动上下文窗口探测（宿主投影优先，LLM 运行时探测回退，兜底 128000）
+├── window.ts       # 自动上下文窗口探测（宿主投影优先，LLM 运行时探测回退，兜底 128000）+ 输出预留探测（defaultMaxTokens，windowFor 内扣除）
 └── commands.ts     # M4: /acp 斜杠命令
 ```
 

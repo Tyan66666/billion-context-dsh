@@ -11,7 +11,7 @@ mkdir -p ~/.dsh/profiles/web/node_modules
 ln -s /Users/yintianan/GitHub/billion-context-dsh ~/.dsh/profiles/web/node_modules/billion-context-dsh
 ```
 
-依赖说明：`dist/index.js` 内联了 acp-kernel，运行时只外链 `@deepseek-ai/dsh-compaction` 与 `@deepseek-ai/cordis`，二者由项目 `devDependencies` 提供（`billion-context-dsh/node_modules` 已在解析链上）。`@deepseek-ai/dsh-compaction` 的 **peer 范围**为 `^0.1.0-rc.6 || ^0.1.1-rc.1`，同时覆盖 `0.1.0-rc.x` 与 `0.1.1-rc.x` 两条 rc 线（DSH 0.1.1-rc.x 及以后）。范围必须写成并集：node-semver 的预发布匹配要求 range 中带与候选相同 `[major, minor, patch]` 元组的比较器，单一 `^0.1.0-rc.6` 匹配不了 `0.1.1-rc.x`（issue #68）。
+依赖说明：`dist/index.js` 内联了 acp-kernel，运行时把四个 seam 包 `@deepseek-ai/dsh-compaction`、`@deepseek-ai/dsh-session`、`@deepseek-ai/dsh-llm`、`@deepseek-ai/dsh-tools` 作为**外部依赖**（由 `devDependencies` 提供并同时声明为 `peerDependencies`，`billion-context-dsh/node_modules` 已在解析链上）；`@deepseek-ai/cordis` 同为 peer。这四个 seam 包共享同一个 **peer 范围** `>=0.1.5-alpha.1 <0.1.6-0`——恰好是整条 `0.1.5` 线（所有预发布加最终 `0.1.5`）。从 `0.1.5` 线起，会话 replace 操作的协议字段由 `{ op, start, end }` 改名为 `{ op, startSeq, endSeq }` 且校验严格（只接受这三个字段）；本引擎只输出新形态，在更旧的 DSH（< 0.1.5）上每次 compress 都会被宿主在运行时拒绝（issue #136），因此旧版本不在兼容范围内——请先升级 DSH 再安装。显式区间（而非 caret）是有意为之：caret 会悄悄放进未经验证的 0.1.6+ 线。四个包一并声明为 peer（而非只声明 `dsh-compaction`），是为了让安装在 pnpm 的集成/封存布局下仍能把它们解析到**宿主自己的副本**，而不是某个与宿主不一致的陈旧嵌套副本。
 
 ### 方式 B：打包安装（发布前验证）
 
@@ -52,7 +52,7 @@ dsh plugin --profile web add billion-context-dsh
 不受影响：
 
 ```bash
-dsh plugin --profile web add github:Tyan66666/billion-context-dsh#v0.2.17
+dsh plugin --profile web add github:Tyan66666/billion-context-dsh#v0.2.19
 ```
 
 建议带 `#<tag>`，拿到与对应 npm 版本完全一致的产物；不带 ref 则装默认分支的最新构建。
@@ -84,9 +84,11 @@ dsh plugin --profile web add github:Tyan66666/billion-context-dsh#v0.2.17
       name: 'billion-context-dsh'
       config:
         # 模型的真实上下文窗口！省略（推荐）时会自动从模型 API 探测
-        # （agent.ctx.llm.resolveModelInfo），探测失败回退默认 128000；
-        # 显式配置则优先且跳过探测。分母配小（如百万窗口模型配 128K）
-        # 会让使用率虚高 8 倍、nudge 过频。growth 触发阈值（50000）不随此值变化。
+        # （agent.ctx.llm.resolveModelInfo），并自动扣除每请求输出预留
+        # （defaultMaxTokens）——实际分母是「窗口 − 输出预留」；探测失败
+        # 回退默认 128000。显式配置则优先、不探测也不扣减：分母完全由
+        # 你定义。分母配小（如百万窗口模型配 128K）会让使用率虚高 8 倍、
+        # nudge 过频。growth 触发阈值（50000）不随此值变化。
         modelContextLimit: 128000
         # （可选）自定义提示词文案：按槽位覆盖 nudge / 范围表 / system prompt /
         # 工具描述，模板 + 命名占位符，构造期校验（拼写错误启动即抛）。未配置时
@@ -141,7 +143,8 @@ cp <deepseek-harness>/apps/cli/config/agent-presets/standard/{agent.cordis.yml,p
 - id: compaction-acp
   name: 'billion-context-dsh'
   config:
-    # 同上：省略时自动探测模型真实窗口，显式配置优先（默认 128000 按 128K 窗口）。
+    # 同上：省略时自动探测模型真实窗口（并扣除每请求输出预留
+    # defaultMaxTokens），显式配置优先且不扣减（默认 128000 按 128K 窗口）。
     modelContextLimit: 128000
 ```
 

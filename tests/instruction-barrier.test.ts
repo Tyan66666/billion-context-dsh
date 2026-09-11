@@ -35,6 +35,7 @@ import { acpCommand } from '../src/commands.ts'
 import { buildCompressibleSeqRanges, newestInstructionSeqsOf, guardedSurfaceSeqsOf } from '../src/region.ts'
 import { makeTools, currentInstructionRowsInSpan, protectedRowRejectionNote, type ToolEnvironment } from '../src/tools.ts'
 import { AcpStateStore } from '../src/state.ts'
+import { sessionEventsOf } from '../src/session-events.ts'
 import { appendTurn, appendUser, appendAssistant, appendToolCall, appendToolResult, buildTextSession, longText } from './helpers.ts'
 
 /** The exact source shape the host stamps on injected AGENTS.md rows. */
@@ -54,7 +55,7 @@ function appendInstruction(session: Session, scope: string, version: string): nu
     content: [{ type: 'text', text: `Instructions for ${scope} (${version}): keep tests green; docs in sync.` }],
     source: instructionSource(scope, version),
   }), { surfaceOp: 'append' })
-  return session.events.length - 1
+  return sessionEventsOf(session).length - 1
 }
 
 /** A legacy instruction row without changes[] — no file identity at all. */
@@ -63,7 +64,7 @@ function appendInstructionNoChanges(session: Session): number {
     content: [{ type: 'text', text: 'Instructions (legacy shape, no changes[]).' }],
     source: { kind: 'agent-instructions' },
   }), { surfaceOp: 'append' })
-  return session.events.length - 1
+  return sessionEventsOf(session).length - 1
 }
 
 /** Any other host-injected policy row (e.g. the skill catalog). */
@@ -72,7 +73,7 @@ function appendPluginRow(session: Session, source: Record<string, unknown>): num
     content: [{ type: 'text', text: 'injected policy row' }],
     source,
   }), { surfaceOp: 'append' })
-  return session.events.length - 1
+  return sessionEventsOf(session).length - 1
 }
 
 function makeEnv(): ToolEnvironment {
@@ -147,7 +148,7 @@ test('PR1: tail-scan regression — the REAL last user message is protected, not
   appendTurn(session, 1)
   appendUser(session, longText('q0', 0))            // seq 1 — real, first
   appendAssistant(session, longText('a0', 1), 1, 1) // seq 2
-  const realLastUser = session.events.length // next append's seq
+  const realLastUser = sessionEventsOf(session).length // next append's seq
   appendUser(session, longText('q1', 2))            // real last user turn
   appendAssistant(session, longText('a1', 3), 1, 3)
   appendInstruction(session, '.\u0000AGENTS.md', 'v1') // LAST user/message on the surface
@@ -248,7 +249,7 @@ test('PR1: handleCompress REJECTS a manual range covering a current instruction 
   assert.match(text, /seqs \d+\.\.\d+ rejected/)
   assert.match(text, /seq 6/, 'the current row is named')
   assert.ok(
-    !session.events.some((event) => String((event as { type?: string }).type).startsWith('compaction')),
+    !sessionEventsOf(session).some((event) => String((event as { type?: string }).type).startsWith('compaction')),
     'nothing durable landed — the kernel never saw the rejected range',
   )
 
@@ -326,7 +327,7 @@ test('PR1: /acp compress rejects a current instruction row exactly like the tool
   assert.match(rejected.text, /rejected/)
   assert.match(rejected.text, /seq 6/, 'the current row is named')
   assert.ok(
-    !session.events.some((event) => String((event as { type?: string }).type).startsWith('compaction')),
+    !sessionEventsOf(session).some((event) => String((event as { type?: string }).type).startsWith('compaction')),
     'nothing durable landed — the human command cannot bypass the gate',
   )
 

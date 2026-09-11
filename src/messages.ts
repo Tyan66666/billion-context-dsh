@@ -12,7 +12,8 @@
  */
 
 import type { CoreMessage } from 'acp-kernel'
-import type { SessionEvent } from '@deepseek-ai/dsh-session'
+import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
+import { eventAtOf, sessionEventsOf } from './session-events.ts'
 
 /**
  * Extract plain text from a DSH content block array or string.
@@ -182,9 +183,9 @@ export function eventsToCoreMessages(events: readonly SessionEvent[], toolNames?
 }
 
 /** The surface-visible message events of a session, in model-visible order. */
-export function surfaceEventsOf(session: import('@deepseek-ai/dsh-session').Session): SessionEvent[] {
+export function surfaceEventsOf(session: Session): SessionEvent[] {
   return session.surface.nodes
-    .map((seq) => session.events[seq])
+    .map((seq) => eventAtOf(session, seq))
     .filter((event): event is SessionEvent => event !== undefined)
 }
 
@@ -196,7 +197,7 @@ export function surfaceEventsOf(session: import('@deepseek-ai/dsh-session').Sess
  * distillation requires the full log, not just the visible surface.
  */
 export function allLogMessages(session: import('@deepseek-ai/dsh-session').Session): CoreMessage[] {
-  return eventsToCoreMessages(session.events)
+  return eventsToCoreMessages(sessionEventsOf(session))
 }
 
 /** Extract the model-facing text of any surface message event. */

@@ -3,56 +3,92 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import semver from 'semver'
 
-// Issue #68: the peer range must cover BOTH `0.1.0-rc.x` and `0.1.1-rc.x` of
-// `@deepseek-ai/dsh-compaction`. node-semver (what npm uses for peer
-// resolution) only lets a prerelease version satisfy a range when the range
-// has a comparator on the SAME [major, minor, patch] tuple — a lone
-// `^0.1.0-rc.6` (tuple 0.1.0) can never match `0.1.1-rc.2` (tuple 0.1.1), so
-// the plugin failed to install on DSH releases that bumped the seam to
-// 0.1.1-rc.x even though the public API did not change. The fix is the
-// explicit two-clause range below; this test pins the real npm behavior so a
-// future tightening of the range turns red here.
+// The peer contract spans FOUR seam packages the plugin VALUE-imports at
+// runtime (not type-only, so they must resolve to the host's copy, not a
+// stale nested copy): dsh-compaction, dsh-session, dsh-llm, dsh-tools. All
+// four publish the SAME version line (in lockstep because DSH releases them
+// together), so one shared range guards them all.
 //
-// The versions below come from `npm view @deepseek-ai/dsh-compaction
-// versions` (the full published list, plus 0.1.1 and 0.2.x as the
-// not-yet-published neighbors the range must anticipate or reject).
+// ISSUE #136 — the range now floors at the 0.1.5 line. The replace surfaceOp
+// protocol is DRAFTED per session version by a strict validator that accepts
+// EXACTLY three keys: `dsh-session <= 0.1.3-alpha.2` wants `{ op, start, end }`,
+// `>= 0.1.5-alpha.1` wants `{ op, startSeq, endSeq }`. The engine emits one
+// dialect only (the current one), so hosts on older lines reject every
+// compress at runtime — admitting them in the peer range would be a lie. The
+// 0.1.5 line also changed the assistant settlement shape (required `stream`)
+// and forbids `sourceEventSeqs` on assistant replaces; both are pinned by the
+// typecheck against the 0.1.5-rc.1 devDeps.
+//
+// The explicit `>=0.1.5-alpha.1 <0.1.6-0` form pins EXACTLY the 0.1.5 line
+// (every 0.1.5 prerelease plus the final 0.1.5) and nothing beyond it: node-semver
+// sorts `0.1.6-0` before any `0.1.6-x` prerelease (numeric ids precede
+// alphanumeric ones), so the next line's alphas/rCs are rejected until someone
+// verifies them deliberately. A caret (`^0.1.5-alpha.1`) would silently admit
+// 0.1.6+ — never allowed here (house rule: no unverified line).
+//
+// The same-tuple prerelease rule still applies underneath: a candidate with a
+// prerelease tag only satisfies a range when some comparator shares its
+// [major, minor, patch] tuple — `0.1.5-alpha.1`/`rc.x` all share tuple 0.1.5,
+// which is why one clause covers the whole line.
+//
+// Versions below come from `npm view @deepseek-ai/dsh-session versions` — the
+// published line matches dsh-compaction / dsh-llm / dsh-tools exactly.
 
 const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as {
-	peerDependencies: { '@deepseek-ai/dsh-compaction': string }
+	peerDependencies: Record<string, string>
 }
 
-const peerRange = pkg.peerDependencies['@deepseek-ai/dsh-compaction']
+// The runtime VALUE-imported seam packages (matches what dist/index.js pulls
+// in). cordis is also a peer but ships on a 4.x line and is NOT part of this
+// seam version band, so it is excluded — these four move in lockstep with the
+// DSH host.
+const seamPeers = ['@deepseek-ai/dsh-compaction', '@deepseek-ai/dsh-session', '@deepseek-ai/dsh-llm', '@deepseek-ai/dsh-tools']
 
-test('peer range accepts every published dsh-compaction rc line the seam shares', () => {
-	// Every version ever published on the 0.1.0 → 0.1.1 seam line must install.
-	// (The DSH release diffs for rc.7 → rc.8 → 0.1.1-rc.1 → 0.1.1-rc.2 touch
-	// only package.json + README — src/ is unchanged.)
-	for (const v of ['0.1.0-rc.6', '0.1.0-rc.7', '0.1.0-rc.8', '0.1.1-rc.1', '0.1.1-rc.2']) {
-		assert.equal(
-			semver.satisfies(v, peerRange),
-			true,
-			`${v} must satisfy ${peerRange} (same seam API as 0.1.0-rc.6)`,
-		)
-	}
-	// A future final 0.1.1 (no prerelease) is a normal version and stays in range.
-	assert.equal(semver.satisfies('0.1.1', peerRange), true)
-	// The `^0.1.1-rc.1` clause covers the WHOLE 0.1.1 line: its `>=0.1.1-rc.1`
-	// comparator carries tuple 0.1.1, matching the tuple of every future
-	// 0.1.1-rc.x — publishing newer rcs on the same line never breaks installs.
-	for (const v of ['0.1.1-rc.3', '0.1.1-rc.9', '0.1.1-rc.99']) {
-		assert.equal(semver.satisfies(v, peerRange), true, `${v} must satisfy ${peerRange} (same-line rc)`)
-	}
-})
+for (const peerName of seamPeers) {
+	const peerRange = pkg.peerDependencies[peerName]
+	assert.equal(typeof peerRange, 'string', `${peerName} must be declared as a peer (runtime VALUE-import)`)
 
-test('peer range keeps rejecting older and next-minor versions', () => {
-	// Below the floor: nothing before 0.1.0-rc.6 (the old workaround era).
-	for (const v of ['0.0.1-rc.5', '0.1.0-rc.2', '0.1.0-rc.5']) {
-		assert.equal(semver.satisfies(v, peerRange), false, `${v} must NOT satisfy ${peerRange}`)
-	}
-	// Next lines: 0.1.2-rc.x (the soonest future seam bump), a jump to 0.1.3,
-	// and 0.2.x are all deliberate, later decisions — never silently allowed.
-	// They each need their own tuple clause when the seam gets there.
-	for (const v of ['0.1.2-rc.1', '0.1.3-rc.1', '0.2.0-rc.1', '0.2.0', '0.2.1']) {
-		assert.equal(semver.satisfies(v, peerRange), false, `${v} must NOT satisfy ${peerRange}`)
+	test(`${peerName}: peer range accepts the whole 0.1.5 seam line`, () => {
+		// Every published 0.1.5 version installs — including the live desktop
+		// build from issue #136 (0.1.5-alpha.2).
+		for (const v of ['0.1.5-alpha.1', '0.1.5-alpha.2', '0.1.5-rc.1']) {
+			assert.equal(
+				semver.satisfies(v, peerRange),
+				true,
+				`${v} must satisfy ${peerRange} (same replace-op dialect as 0.1.5-alpha.1)`,
+			)
+		}
+		// Future same-tuple prereleases keep installing: publishing newer rCs on
+		// the 0.1.5 line never breaks installs.
+		for (const v of ['0.1.5-rc.9', '0.1.5-rc.99']) {
+			assert.equal(semver.satisfies(v, peerRange), true, `${v} must satisfy ${peerRange} (same-line rc)`)
+		}
+		// A final 0.1.5 (no prerelease) is a normal version and stays in range.
+		assert.equal(semver.satisfies('0.1.5', peerRange), true)
+	})
+
+	test(`${peerName}: peer range keeps rejecting older and next-line versions`, () => {
+		// Below the floor: every pre-0.1.5 line, including the former devDep
+		// baseline 0.1.0-rc.6 and the 0.1.2/0.1.3 seams. Their session validators
+		// reject the startSeq/endSeq dialect at runtime (issue #136), so they are
+		// intentionally out of contract.
+		for (const v of ['0.1.0-rc.6', '0.1.1-rc.2', '0.1.2-alpha.4', '0.1.2-rc.1', '0.1.3-alpha.2']) {
+			assert.equal(semver.satisfies(v, peerRange), false, `${v} must NOT satisfy ${peerRange}`)
+		}
+		// Next lines: 0.1.6 (any prerelease or final) and 0.2.x are deliberate,
+		// later decisions — never silently allowed.
+		for (const v of ['0.1.6-alpha.1', '0.1.6-rc.1', '0.1.6', '0.2.0-rc.1', '0.2.0']) {
+			assert.equal(semver.satisfies(v, peerRange), false, `${v} must NOT satisfy ${peerRange}`)
+		}
+	})
+}
+
+test('every runtime VALUE-imported seam package is declared as a peer', () => {
+	// dist/index.js must never carry a VALUE import of a @deepseek-ai seam
+	// package that is NOT a peer — in a non-hoisted / stale-nested install that
+	// resolves to a copy inconsistent with the host (the "reading 7" class of
+	// crash). seamPeers above are the complete runtime set.
+	for (const name of seamPeers) {
+		assert.equal(typeof pkg.peerDependencies[name], 'string', `${name} must be a peer (runtime VALUE-import)`)
 	}
 })

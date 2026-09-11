@@ -10,11 +10,12 @@
  * @module billion-context-dsh/tools
  */
 import { type ToolDefinition } from '@deepseek-ai/dsh-tools';
-import { type CompressionCore } from 'acp-kernel';
+import { type CompressionCore, type SearchDoc } from 'acp-kernel';
 import type { Agent } from '@deepseek-ai/dsh-agent';
+import type { Session } from '@deepseek-ai/dsh-session';
 import type { AcpStateStore } from './state.ts';
 import { type KernelConfigInput } from './config.ts';
-import type { AcpWindow } from './window.ts';
+import { type AcpWindow } from './window.ts';
 import { type ResolvedPrompts } from './prompts.ts';
 export interface ToolEnvironment extends KernelConfigInput {
     readonly kernel: CompressionCore;
@@ -41,30 +42,14 @@ export interface ToolEnvironment extends KernelConfigInput {
  */
 export declare function resolveEffectiveWindow(env: ToolEnvironment, agent: Agent): Promise<AcpWindow>;
 /**
- * Pure gate helpers for the compress tool's CURRENT-instruction-row rejection.
- *
- * Decision history (issue #71 review): the first draft only WARNED when a
- * manual compress range swallowed a current injected row (F7), because the
- * compression is safe and self-healing. The owner reversed that during PR1
- * review: compressing a CURRENT row has NO legitimate outcome — the host
- * re-injects the newest AGENTS.md copy unconditionally the moment it leaves
- * the surface (presence gate, deepseek-harness
- * packages/context/agent-instructions/src/index.ts:137/:163), so the tokens
- * come straight back and the call is pure waste — and a hard reject keeps the
- * manual path consistent with the system-side GC's iron rule (PR2: never
- * clear a group's newest row). STALE copies stay compressible: removing them
- * while the newest stays visible is the actual cleanup and triggers no
- * re-injection. The range table (buildCompressibleSeqRanges) never offers
- * these rows, so the gate only fires on hand-built ranges.
- *
- * `currentInstructionRowsInSpan` is the overlap probe over the RESOLVED span
- * (shrink-then-expand may move edges, so the requested span is not enough);
- * `protectedRowRejectionNote` renders the rejection the model sees — it must
- * name the seqs and point at the stale-copy alternative so the model can
- * re-cut instead of retrying the same call. `guardedSurfaceSeqsOf` supplies
- * the protected set.
+ * Build the unified SearchDoc[] from the log: one block doc per ledger entry
+ * (ref = compactionId, so `decompress({ blockId })` closes the loop) plus one
+ * message doc per shadowed ORIGINAL (expanded through distilled parents; each
+ * seq is claimed by the earliest/innermost block that covered it, mirroring
+ * pi's owner map — decompress on that block recovers the original).
+ * Cached per log snapshot (see searchDocsCache). Exported for the issue #133
+ * regression tests (not part of the public API — index.ts re-exports only).
  */
-export declare function currentInstructionRowsInSpan(guarded: ReadonlySet<number>, start: number, end: number): number[];
-export declare function protectedRowRejectionNote(start: number, end: number, hits: readonly number[]): string;
+export declare function buildSearchDocs(session: Session): SearchDoc[];
 /** Build the four ACP model tools bound to one engine. */
 export declare function makeTools(env: ToolEnvironment): ToolDefinition[];
