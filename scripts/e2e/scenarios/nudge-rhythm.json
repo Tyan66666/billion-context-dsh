@@ -1,0 +1,23 @@
+{
+  "name": "nudge-rhythm",
+  "persona": "You are a concise coding agent.",
+  "engine": { "modelContextLimit": 24000, "autoCommand": false },
+  "userTurns": [
+  { "filler": { "topic": "pruning", "count": 80 } },
+  { "filler": { "topic": "ledger", "count": 80 } },
+  { "filler": { "topic": "region", "count": 80 } },
+  { "filler": { "topic": "pairing", "count": 80 } },
+  { "filler": { "topic": "replay", "count": 80 } },
+  { "filler": { "topic": "big", "count": 260 } },
+  { "filler": { "topic": "big", "count": 260 } }
+],
+  "responses": [
+  { "kind": "text", "text": "Noted." },
+  { "kind": "text", "text": "Noted." },
+  { "kind": "text", "text": "Noted." },
+  { "kind": "text", "text": "Noted." },
+  { "kind": "text", "text": "Noted." },
+  { "kind": "text", "text": "Received the big message." },
+  { "kind": "text", "text": "Received the second big message." }
+]
+}

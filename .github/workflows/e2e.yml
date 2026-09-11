@@ -1,0 +1,42 @@
+name: E2E
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# The end-to-end suite drives a REAL DeepSeek agent loop (in-process) with a
+# scripted fake LLM and our engine mounted as the compaction backend, then
+# asserts the persisted event log: compaction start/end pairing, durable
+# replace node, strict tool-call/result pairing on the wire, nudge injection
+# rhythm. These are exactly the host-integration behaviors unit tests cannot
+# reach (no agent loop, no pre-step waterfall, no real tool dispatch there),
+# so this job gates every PR. See docs/e2e-harness-design.md.
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    # Backstop for a future "never finishes" regression: the suite itself is
+    # ~3s and waitForIdle fails a turn after 60s, so 10 minutes is generous;
+    # without this a hang burns the runner for the 6-hour Actions default.
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      # The harness imports the SHIPPED artifact (scripts/e2e/harness.mjs
+      # loads ../../dist/index.js) — the same file users get — so the suite
+      # must run after the build, and it tests the real bundle, not src.
+      - name: End-to-end host harness
+        run: npm run test:e2e

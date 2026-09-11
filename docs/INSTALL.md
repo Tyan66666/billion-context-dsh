@@ -11,7 +11,7 @@ mkdir -p ~/.dsh/profiles/web/node_modules
 ln -s /Users/yintianan/GitHub/billion-context-dsh ~/.dsh/profiles/web/node_modules/billion-context-dsh
 ```
 
-依赖说明：`dist/index.js` 内联了 acp-kernel，运行时把四个 seam 包 `@deepseek-ai/dsh-compaction`、`@deepseek-ai/dsh-session`、`@deepseek-ai/dsh-llm`、`@deepseek-ai/dsh-tools` 作为**外部依赖**（由 `devDependencies` 提供并同时声明为 `peerDependencies`，`billion-context-dsh/node_modules` 已在解析链上）；`@deepseek-ai/cordis` 同为 peer。这四个 seam 包共享同一个 **peer 范围** `^0.1.0-rc.6 || ^0.1.1-rc.1 || ^0.1.2-alpha.4`，同时覆盖 `0.1.0-rc.x` 与 `0.1.1-rc.x` 两条 rc 线以及 `0.1.2-alpha.x` 线（DSH 0.1.2-alpha.x 及以后）。范围必须写成并集：node-semver 的预发布匹配要求 range 中带与候选相同 `[major, minor, patch]` 元组的比较器，单一 `^0.1.0-rc.6` 匹配不了 `0.1.1-rc.x`（issue #68），也匹配不了 `0.1.2-alpha.x`。四个包一并声明为 peer（而非只声明 `dsh-compaction`），是为了让安装在 pnpm 的集成/封存布局下仍能把它们解析到**宿主自己的副本**，而不是某个与宿主不一致的陈旧嵌套副本。
+依赖说明：`dist/index.js` 内联了 acp-kernel，运行时把四个 seam 包 `@deepseek-ai/dsh-compaction`、`@deepseek-ai/dsh-session`、`@deepseek-ai/dsh-llm`、`@deepseek-ai/dsh-tools` 作为**外部依赖**（由 `devDependencies` 提供并同时声明为 `peerDependencies`，`billion-context-dsh/node_modules` 已在解析链上）；`@deepseek-ai/cordis` 同为 peer。这四个 seam 包共享同一个 **peer 范围** `>=0.1.5-alpha.1 <0.1.6-0`——恰好是整条 `0.1.5` 线（所有预发布加最终 `0.1.5`）。从 `0.1.5` 线起，会话 replace 操作的协议字段由 `{ op, start, end }` 改名为 `{ op, startSeq, endSeq }` 且校验严格（只接受这三个字段）；本引擎只输出新形态，在更旧的 DSH（< 0.1.5）上每次 compress 都会被宿主在运行时拒绝（issue #136），因此旧版本不在兼容范围内——请先升级 DSH 再安装。显式区间（而非 caret）是有意为之：caret 会悄悄放进未经验证的 0.1.6+ 线。四个包一并声明为 peer（而非只声明 `dsh-compaction`），是为了让安装在 pnpm 的集成/封存布局下仍能把它们解析到**宿主自己的副本**，而不是某个与宿主不一致的陈旧嵌套副本。
 
 ### 方式 B：打包安装（发布前验证）
 
@@ -161,7 +161,7 @@ cp <deepseek-harness>/apps/cli/config/agent-presets/standard/{agent.cordis.yml,p
 | 1. 工具注册 | 新会话里要求模型列出可用工具，或观察工具目录 | 出现 `compress`、`decompress`、`search_context`、`acp_status` |
 | 2. 状态可用 | 让模型调用 `acp_status`（或带钻取参数 `{"scope":"uncompressed","view":"messages","limit":5}`） | 返回 CONTEXT BREAKDOWN（tool/text/summaries 占可见总量）、压缩块列表、nudge 状态行（不含上下文窗口信息）；钻取模式逐行/逐块列出体积，行 ref 为内核 mN——可直接作为 `compress` 的 `startSeq`/`endSeq`（自动映射为 live surface seq） |
 | 3. 压缩闭环 | 在一个较长会话（消息多、上下文超过窗口时），模型按 nudge 或自行调用 `compress({ content: [{ startSeq, endSeq, summary }] })` | 返回 `Compressed N block(s)`；会话上下文明显缩小；`acp_status` 的 COMPRESSED BLOCKS 增加 |
-| 4. 可恢复 | 调用 `decompress({ blockId })` | 返回被压缩范围的原文 |
+| 4. 可恢复 | 调用 `decompress({ blockId })`（大块按字符预算分页，用 `offset`/`limit` + 续页提示走完全块） | 返回被压缩范围的原文 |
 | 5. 可搜索 | 调用 `search_context({ query })` | 命中被压缩块内信息 |
 | 6. nudge | 持续对话到出现可压缩堆积。增长路径：某层 pending ≥ 5 万 token 且较上次检测增长 ≥ 2.25 万 token（无百分比下限，中前期就可能触发）；保证线：使用率 ≥ 70%；紧急：≥ 85% | 注入消息提示压缩，带 `seq a..b` 范围表 |
 | 7. 持久性 | 重启后同一会话 | `acp_status` 仍能从日志重建块账本（block ledger 来自 `compaction/summary` 事件） |
