@@ -43,10 +43,13 @@ import { shadowedTokensViaMeter } from './host-tokens.ts'
 import { eventAtOf, sessionEventsOf } from './session-events.ts'
 import { DEFAULT_RESOLVED, type ResolvedPrompts } from './prompts.ts'
 import type { SettingsCommandSurface } from './settings.ts'
+import type { PresetName } from './presets.ts'
 
 export interface ToolEnvironment extends KernelConfigInput {
   readonly kernel: CompressionCore
   readonly store: AcpStateStore
+  /** Display-only: the named preset that produced the nudge thresholds above, if any (`/acp status` names it). Never read by the kernel path. */
+  readonly preset?: PresetName
   /** Resolve the effective context window for an agent (optional: status falls back to modelContextLimit). */
   readonly windowFor?: (agent: Agent) => Promise<AcpWindow>
   /** Resolved prompt templates (optional: falls back to DEFAULT_RESOLVED). */

@@ -57,9 +57,18 @@ import {
   type AcpSettings,
   type SettingsCommandSurface,
 } from './settings.ts'
+import { PRESETS, PRESET_NAMES, isPresetName, resolvePreset, type NudgePreset, type PresetName } from './presets.ts'
 
 export { AcpStateStore } from './state.ts'
 export { kernelConfigFor, type KernelConfigInput } from './config.ts'
+export {
+  PRESETS,
+  PRESET_NAMES,
+  isPresetName,
+  resolvePreset,
+  type NudgePreset,
+  type PresetName,
+} from './presets.ts'
 export { ACP_SYSTEM_PROMPT, ACP_SYSTEM_PROMPT_ORDER } from './system-prompt.ts'
 export {
   DEFAULT_PROMPTS,
@@ -154,6 +163,19 @@ export interface AcpConfig {
    */
   readonly nudgeEmergencyThresholdPct?: number
   /**
+   * Named bundle for the three nudge thresholds — how eagerly the model is
+   * asked to compress, in one word. One of 'preserve' | 'relaxed' | 'balanced'
+   * | 'efficient' | 'aggressive' (see src/presets.ts). It fills ONLY the nudge
+   * thresholds you did not set explicitly, so precedence is explicit value >
+   * preset > engine default and a partial override on top of a preset still
+   * wins. An unknown name fails engine construction (fail-fast). No effect on
+   * any other knob (`modelContextLimit`, `autoNudge`, prompts, coreOverrides).
+   * An unknown name fails construction, and so does a merged window that ends up
+   * inverted (min > max, max > emergency or min > emergency — the kernel itself
+   * only warns about that, see `assertNudgeThresholdOrder`).
+   */
+  readonly preset?: PresetName
+  /**
    * Any other acp-kernel Config override (billion-context-pi's `coreOverrides`
    * escape hatch). Merge order per section: kernel defaults → the engine pct
    * knobs above → these keys land LAST, so a same-name key here wins.
@@ -205,7 +227,63 @@ const DEFAULT_CONFIG: AcpConfig = {
 }
 
 export function resolveAcpConfig(config: Partial<AcpConfig> = {}): AcpConfig {
-  return { ...DEFAULT_CONFIG, ...config }
+  const resolved = resolvePresetThresholds({ ...DEFAULT_CONFIG, ...config }, config)
+  assertNudgeThresholdOrder(resolved)
+  return resolved
+}
+
+/**
+ * Apply `config.preset`, if one was given: an unknown name throws here at
+ * construction, and the preset fills ONLY the thresholds the caller left unset.
+ */
+function resolvePresetThresholds(base: AcpConfig, config: Partial<AcpConfig>): AcpConfig {
+  if (base.preset === undefined) return base
+  // Fail fast on an unknown preset name (same contract as prompt-template
+  // validation): a typo must break construction, never silently fall back to
+  // the engine defaults.
+  const preset = resolvePreset(base.preset)
+  // Precedence: explicit value > preset > engine default. Read the caller's
+  // EXPLICIT choices from `config`, not from `base` — base already merged
+  // DEFAULT_CONFIG, so `base.X ?? preset.X` would let the engine default (e.g.
+  // max 0.70) mask the preset. `config.X ?? preset.X` keeps an explicit value
+  // while letting the preset fill anything the caller left unset.
+  return {
+    ...base,
+    nudgeMinContextLimitPct: config.nudgeMinContextLimitPct ?? preset.nudgeMinContextLimitPct,
+    nudgeMaxContextLimitPct: config.nudgeMaxContextLimitPct ?? preset.nudgeMaxContextLimitPct,
+    nudgeEmergencyThresholdPct: config.nudgeEmergencyThresholdPct ?? preset.nudgeEmergencyThresholdPct,
+  }
+}
+
+/**
+ * Construction-time guard on the resolved nudge thresholds.
+ *
+ * The kernel tolerates an inverted window: `validateConfig` only *warns* when a
+ * turn runs ("Thresholds may not fire correctly"), it never rejects the config.
+ * That leaves a silent trap on this feature — combining a preset with a single
+ * explicit override is the whole point of the precedence rule, and it can
+ * produce e.g. `preset: 'preserve'` (min 0.55) + `nudgeMaxContextLimitPct:
+ * 0.5`, where the over-limit line sits below… and an emergency line above it
+ * fires first, inverting what the user asked for. We own this merge, so we
+ * reject the merged result loudly instead of shipping a window that quietly
+ * does something else.
+ *
+ * Only values that are actually set are compared: an omitted `min` falls back
+ * to the kernel default (0.45) inside the kernel, and mirroring that constant
+ * here would duplicate kernel state we deliberately do not track.
+ */
+function assertNudgeThresholdOrder(config: AcpConfig): void {
+  const { nudgeMinContextLimitPct: min, nudgeMaxContextLimitPct: max, nudgeEmergencyThresholdPct: emergency } = config
+  const describe = `min ${min ?? 'kernel default'} / max ${max ?? 'kernel default'} / emergency ${emergency ?? 'kernel default'}`
+  if (min !== undefined && max !== undefined && min > max) {
+    throw new Error(`nudge thresholds are inverted (${describe}) — nudgeMinContextLimitPct must be <= nudgeMaxContextLimitPct`)
+  }
+  if (max !== undefined && emergency !== undefined && max > emergency) {
+    throw new Error(`nudge thresholds are inverted (${describe}) — nudgeMaxContextLimitPct must be <= nudgeEmergencyThresholdPct`)
+  }
+  if (min !== undefined && emergency !== undefined && min > emergency) {
+    throw new Error(`nudge thresholds are inverted (${describe}) — nudgeMinContextLimitPct must be <= nudgeEmergencyThresholdPct`)
+  }
 }
 
 /**
@@ -352,6 +430,10 @@ export class AcpCompactionEngine extends CompactionEngine {
       get nudgeMaxContextLimitPct() { return engine.readSettingsSource().nudgeMaxContextLimitPct },
       get nudgeEmergencyThresholdPct() { return engine.readSettingsSource().nudgeEmergencyThresholdPct },
       coreOverrides: this.config.coreOverrides,
+      // Display-only: which named preset produced the thresholds above (if any),
+      // so /acp status can name it. The resolved pct values above are what the
+      // kernel actually reads — this field never feeds kernelConfigFor.
+      preset: this.config.preset,
       windowFor: (agent) => this.windowFor(agent),
       prompts: this.prompts,
       compressCallIdsToHide: this.compressCallIdsToHide,

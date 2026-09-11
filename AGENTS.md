@@ -31,6 +31,7 @@ src/
 ├── nudge.ts        # M4: kernel renderNudgeText (default) + seq-range-table adaptation; template path on prompts override; emergency nudges capped per user turn (issue #108) + stripNudgeGuidance slim nudges (guidance sections live in the system prompt only, stripped on BOTH kernel and template paths) — rule 17
 ├── system-prompt.ts# M4: one-time ACP guidance section
 ├── prompts.ts      # M4: configurable prompt templates + render/validate (config.prompts)
+├── presets.ts      # named nudge-threshold tiers (config.preset): five levels resolved into the nudge*Pct knobs; explicit value > preset > default
 ├── config.ts       # kernel config assembly (thresholds + coreOverrides)
 ├── host-tokens.ts  # shadow-price pricing: host-vocabulary mirror (estimateHostContent/estimateHostMessage/hostPriceEvent) + shadowedTokensViaMeter (ctx.tokenMeter.measure preferred, mirror fallback) — rule 12
 ├── window.ts       # auto context-window detection (session projection first, LLM runtime probe fallback, default 128000) + output-reservation probe (defaultMaxTokens, subtracted in windowFor) + routeFor/liveRoute (the session's live request/context route — the ONE route source for the cap and the compression provenance)

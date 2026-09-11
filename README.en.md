@@ -245,12 +245,35 @@ This project reuses `acp-kernel`'s compression core and `billion-context-pi`'s d
 | `nudgeMinContextLimitPct` | kernel default `0.45` | Nudge window lower bound (usage fraction) — validation only; the growth-driven trigger has no percentage floor — same default as billion-context-pi (runtime-adjustable: `/acp config`) |
 | `nudgeMaxContextLimitPct` | engine default `0.70` (kernel/pi default `0.75`) | Over-limit line: above this the nudge fires regardless of growth — deliberately below the host compaction-basic 80% auto-compaction line so the forced nudge fires first; an explicit value wins (a same-name key in `coreOverrides.nudge` outranks it — see below) (runtime-adjustable: `/acp config`) |
 | `nudgeEmergencyThresholdPct` | engine default `0.85` (kernel/pi default `0.95`) | Emergency nudge (bypasses the per-turn dedup, but is capped at 3 injections per user turn — issue #108) — lowered from `0.95`: at 95% the model has no room to act and the 80% auto-compaction line shadows it; an explicit value wins (a same-name key in `coreOverrides.nudge` outranks it — see below) (runtime-adjustable: `/acp config`) |
+| `preset` | — | (optional) Pick the nudge aggressiveness in one word: `preserve` / `relaxed` / `balanced` / `efficient` / `aggressive` (see “Presets” below). Fills ONLY the three nudge thresholds you did not set explicitly; precedence is explicit value > `preset` > engine default. An unknown name fails construction, and so does a merged window that ends up inverted (wrong `min` / `max` / `emergency` order). Does not touch any other knob (`modelContextLimit` / `autoNudge` / `prompts` / `coreOverrides`) (composition-only: not yet wired into `/acp config` — a follow-up on issue #75) |
 | `coreOverrides` | — | Any other acp-kernel `Config` override (billion-context-pi's `coreOverrides` escape hatch). Merge order: kernel defaults → top-level pct knobs → `coreOverrides.nudge` lands last — same-name keys take its value (read-only: composition-row-only, not exposed through settings) |
 | `autoTools` | `true` | Register the four model tools on `ctx.tools` |
 | `autoCommand` | `true` | Register the `/acp` command on `ctx.commands` |
 | `autoNudge` | `true` | Inject the nudge into `agent/pre-step` (runtime-adjustable: `/acp config`) |
 | `settingsEnabled` | `true` (enabled when unset) | (optional) Disable the runtime-settings integration entirely (composition-row-only, deliberately NOT in the settings layer — the switch cannot turn itself off; with it off the composition-row `config:` stays the only effective channel) |
 | `prompts` | — | (optional) Custom prompt copy: per-slot overrides for nudge / range table / system prompt / tool descriptions (template + named placeholders, validated at construction; see “Custom prompt copy” above and [docs/configurable-prompts-design.md](docs/configurable-prompts-design.md)) |
+
+## Presets
+
+If you do not want to tune three percentages by hand, pick the nudge aggressiveness in one word — five tiers from “keep context as long as possible” to “compress early and often”:
+
+| `preset` | min | max | emergency | Trade-off |
+|---|---|---|---|---|
+| `preserve` | 0.55 | 0.78 | 0.93 | Keep context as long as possible — nudge only close to the limit |
+| `relaxed` | 0.50 | 0.75 | 0.90 | Light-touch compression — nudges a little earlier than preserve |
+| `balanced` | 0.45 | 0.70 | 0.85 | Default balance — the same thresholds the plugin ships with (choosing this changes nothing) |
+| `efficient` | 0.40 | 0.60 | 0.78 | Trim more often — favors low token usage over keeping full history |
+| `aggressive` | 0.30 | 0.50 | 0.70 | Lean context — compresses early and frequently |
+
+- **Fills only what you left unset**: `preset` fills ONLY the `nudge*ContextLimitPct` values you did not set explicitly; if you set both a `preset` and one of those thresholds, your explicit value wins (precedence: explicit > preset > default).
+- **No other knob is touched**: `modelContextLimit`, `autoNudge`, `prompts`, and `coreOverrides` are unaffected; `coreOverrides.nudge` still lands last and its same-name keys outrank everything.
+- **See the active tier**: `/acp status` prints the effective `preset` and the three thresholds **actually in force** — the line mirrors `kernelConfigFor`'s merge order, so any explicit override you made on top of the preset AND any same-name key in `coreOverrides.nudge` are shown as they really apply.
+- **A typo fails loudly**: an unknown name throws at engine construction and lists the valid tiers (the same fail-fast contract as custom prompt templates) — it never silently falls back to the defaults. The bundle row itself carries no `config`, so a `preset` can only come from your own same-id `compaction-acp` row; if that row fails to construct, the profile stays down until you fix it (intended fail-fast, not a defect).
+- **Runtime hot-swap**: presets are set at composition time today (install / `cordis.patch.yml`); once #75's settings.yaml hot-reload lands they can be changed from `/acp config`. This PR makes them available at the composition layer first.
+- **Two knobs deliberately left out**: the original request also named `growthRatio` (exists in acp-kernel as `nudge.growthRatio`, reachable via `coreOverrides`) and `protectedLastMessages` (≈ kernel `preserveRecentMessages`). Neither is a first-class engine knob here; adopting them as named keys / UI items is an owner decision, so they are not baked into the presets.
+- **An inverted window is rejected**: if merging with explicit thresholds produces `min > max`, `max > emergency` or `min > emergency` (e.g. `preset: 'preserve'` with `nudgeMaxContextLimitPct: 0.5`), the engine throws at construction and lists the three values. The kernel only warns about such a config, so this check is added by the engine in `resolveAcpConfig`.
+- **`max` is the value that races the host's 80% line**: each tier's onset is decided by `max`; the `preserve` / `relaxed` emergency values (0.93 / 0.90) sit above the host compaction-basic 80% line and act only as a label upgrade past it, so they are never reached when the host compacts first.
+- **`min` has no runtime effect yet**: the pinned kernel reads it only in `validateConfig` (as the `nudgeMinContextLimitPct` option says), so tiers differ in practice by `max` and `emergency`.
 
 ## Development
 

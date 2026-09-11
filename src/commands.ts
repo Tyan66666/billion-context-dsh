@@ -37,6 +37,7 @@ import { shadowedTokensViaMeter } from './host-tokens.ts'
 import { eventAtOf, sessionEventsOf } from './session-events.ts'
 import { defaultConfig } from 'acp-kernel'
 import { routeFor, windowSourceLabel } from './window.ts'
+import { PRESETS } from './presets.ts'
 
 async function statusText(env: ToolEnvironment, agent: Agent): Promise<string> {
   const session = agent.session
@@ -62,6 +63,19 @@ async function statusText(env: ToolEnvironment, agent: Agent): Promise<string> {
     `  estimated context: ${estimated} / ${limit} (${Math.round((estimated / limit) * 100)}%)`,
     windowLine,
   ]
+  // Name the active preset (if any) with the thresholds it resolved to: the whole
+  // point of a preset is that the user sees at a glance which tier is in effect.
+  // The three numbers mirror kernelConfigFor's merge order — a same-name key in
+  // `coreOverrides.nudge` lands AFTER these env values there, so reading only the
+  // env values would print a lower number than the one actually in force.
+  if (env.preset !== undefined) {
+    const ov = env.coreOverrides?.nudge
+    const pct = (value?: number): string => `${Math.round((value ?? 0) * 100)}%`
+    lines.push(
+      `  preset: ${env.preset} (${PRESETS[env.preset].label})`
+      + ` [min ${pct(ov?.minContextLimitPct ?? env.nudgeMinContextLimitPct)} · max ${pct(ov?.maxContextLimitPct ?? env.nudgeMaxContextLimitPct)} · emergency ${pct(ov?.emergencyThresholdPct ?? env.nudgeEmergencyThresholdPct)}]`,
+    )
+  }
   // A failed probe falls back to the 128K default AND is cached for the
   // process lifetime — the /acp panel must say so explicitly, or the operator
   // can't tell why pressure looks wrong (issue #63: a gateway that disclosed
