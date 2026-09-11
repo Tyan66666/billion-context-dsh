@@ -7,7 +7,7 @@
 
 import type { CommandDefinition } from '@deepseek-ai/dsh-commands'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import { resolveEffectiveWindow, type ToolEnvironment } from './tools.ts'
+import { guardedRowsInSpan, protectedRowRejectionNote, resolveEffectiveWindow, type ToolEnvironment } from './tools.ts'
 import { resolveTokenCount } from './nudge.ts'
 import { kernelConfigFor } from './config.ts'
 import { SettingsConflictError } from '@deepseek-ai/dsh-settings'
@@ -23,6 +23,7 @@ import {
   blockIdOfKernelRef,
   blockRefForSummarySeq,
   expandShadowedSeqs,
+  guardedSurfaceSeqsOf,
   rebuildBlockLedger,
   resolveSurfaceRange,
   runCompactionTransaction,
@@ -32,7 +33,7 @@ import { allLogMessages, eventsToCoreMessages, extractEventText, surfaceEventsOf
 import { shadowedTokensViaMeter } from './host-tokens.ts'
 import { eventAtOf, sessionEventsOf } from './session-events.ts'
 import { defaultConfig } from 'acp-kernel'
-import { windowSourceLabel } from './window.ts'
+import { routeFor, windowSourceLabel } from './window.ts'
 
 async function statusText(env: ToolEnvironment, agent: Agent): Promise<string> {
   const session = agent.session
@@ -108,22 +109,40 @@ function compressText(env: ToolEnvironment, agent: Agent, args: string[]): strin
   if (blockRefForSummarySeq(session, start) !== null || blockRefForSummarySeq(session, end) !== null) {
     return '/acp compress: the range touches a compressed block summary node — distill it with the compress tool (seq-based batch), not /acp compress'
   }
-  // The RESOLVED edges define the claim span, never the raw inputs:
-  // resolveSurfaceRange may adjust them to a balanced cut, and a raw edge
-  // absent from the surface makes shadowedSeqsOf slice a garbage span that
-  // assertProvenance rejects when the transaction lands (AGENTS.md rule 12).
+  // The same hard reject as the compress tool (src/tools.ts): a CURRENT
+  // injected instruction row cannot be legitimately compressed by ANY caller,
+  // human or model — the host re-injects the newest AGENTS.md copy
+  // unconditionally, so the tokens come straight back and nothing is
+  // reclaimed. Explicit intent does not override that arithmetic; older
+  // copies of the same file stay compressible.
+  // Probe the span that will ACTUALLY be shadowed — the positional slice the
+  // transaction prices and `assertProvenance` verifies — never a numeric
+  // `start <= seq <= end` interval: the surface is locally non-monotonic after
+  // earlier replacements, so a legitimate range can have a current instruction
+  // row numerically inside its edges while the sliced span excludes it (issue
+  // #71 review B1). Resolved edges, not the raw inputs: resolveSurfaceRange may
+  // move them to a balanced cut, and a raw edge absent from the surface makes
+  // shadowedSeqsOf slice a garbage span.
   const shadowed = shadowedSeqsOf(session, start, end)
+  const instructionHits = guardedRowsInSpan(guardedSurfaceSeqsOf(session), shadowed)
+  if (instructionHits.length > 0) {
+    return protectedRowRejectionNote(start, end, instructionHits, shadowed)
+  }
   // Price the reclaimed tokens in the HOST's token vocabulary (rule 12):
   // prefer the live meter's per-node prices, fall back to the exact mirror.
   const shadowedTokens = shadowedTokensViaMeter(session, shadowed, agent.ctx)
+  // Provenance follows the LIVE route, not `agent.options`: after a mid-session
+  // model switch the latter is a stale snapshot (the PREVIOUS route), so the
+  // summary node would be stamped with a route the summary did not come from.
+  const { provider, model } = routeFor(agent)
   const { compactionId } = runCompactionTransaction(session, {
     start,
     end,
     shadowedSeqs: shadowed,
     summary: [{ type: 'text', text: summary }],
     shadowedTokenCount: shadowedTokens,
-    provider: agent.options.provider ?? '',
-    model: agent.options.model ?? '',
+    provider,
+    model,
   })
   return `Compressed seqs ${start}..${end} (${shadowed.length} messages) as block ${compactionId.slice(0, 8)}`
 }
@@ -181,6 +200,14 @@ function isSettingsKey(key: string): key is SettingsKey {
   return (SETTINGS_KEYS as readonly string[]).includes(key)
 }
 
+/** Uniform wording for a failed settings write — the same copy `configSetText` shows. */
+function settingsWriteFailure(error: unknown): string {
+  if (error instanceof SettingsConflictError) {
+    return 'conflict: another writer changed this setting at the same time — run /acp config again'
+  }
+  return `rejected: ${String(error)}`
+}
+
 /** Display form of one knob in the list table: an absent value shows what it MEANS, not a blank. */
 function formatSettingsValue(key: SettingsKey, value: AcpSettings[SettingsKey]): string {
   if (value === undefined) {
@@ -227,6 +254,11 @@ async function configSetText(surface: SettingsCommandSurface | undefined, key: s
     // `null` is the reset-this-key sentinel: same path as /acp config reset.
     return configResetText(surface, key)
   }
+  // Boolean keys take `true`/`false` only: `1` would reach the settings service
+  // and come back as an internal validation message instead of advice.
+  if ((key === 'autoNudge' || key === 'autoModelContextLimit') && typeof parsed.value !== 'boolean') {
+    return `${key} takes true or false (got "${String(parsed.value)}")`
+  }
   // Narrow the union to the key's field type; the settings schema re-validates
   // at the service boundary, so a mismatched value fails there, not here.
   const patch: AcpSettingsInput = key === 'autoNudge' || key === 'autoModelContextLimit'
@@ -235,10 +267,7 @@ async function configSetText(surface: SettingsCommandSurface | undefined, key: s
   try {
     await surface.update(patch)
   } catch (error) {
-    if (error instanceof SettingsConflictError) {
-      return 'conflict: another writer changed this setting at the same time — run /acp config again'
-    }
-    return `rejected: ${String(error)}`
+    return settingsWriteFailure(error)
   }
   const windowNote = key === 'modelContextLimit' || key === 'autoModelContextLimit'
     ? '\n  window cache cleared — the next step re-resolves the context window'
@@ -252,7 +281,11 @@ async function configResetText(surface: SettingsCommandSurface | undefined, targ
     return 'no settings provider in this process — edit the compaction-acp row in cordis.patch.yml instead (a restart applies it)'
   }
   if (target === 'all') {
-    await surface.replaceSection({})
+    try {
+      await surface.replaceSection({})
+    } catch (error) {
+      return settingsWriteFailure(error)
+    }
     return '✓ all runtime settings reset — values now come from the composition row / engine defaults'
   }
   if (!isSettingsKey(target)) {
@@ -261,9 +294,16 @@ async function configResetText(surface: SettingsCommandSurface | undefined, targ
   const descriptor = surface.describe()
   // Single-key reset = delete the key from the USER section; the namespace
   // then falls back to the composition row (base) or the engine default.
+  // Every OTHER key is carried through verbatim, including one the schema does
+  // not know: the settings layer does not whitelist keys, so filtering the
+  // section here would silently delete a hand-written entry from settings.yaml.
   const userSection = isRecord(descriptor?.user) ? { ...descriptor.user } : {}
   delete userSection[target]
-  await surface.replaceSection(userSection)
+  try {
+    await surface.replaceSection(userSection)
+  } catch (error) {
+    return settingsWriteFailure(error)
+  }
   const baseSection = isRecord(descriptor?.base) ? descriptor.base : {}
   const baseValue = baseSection[target]
   return `✓ ${target} reset — it now reads ${baseValue === undefined ? 'the engine default' : `the composition value ${String(baseValue)}`}`

@@ -35,16 +35,17 @@ import {
   type CompactionTrigger,
   type ManualCompactAgentContext,
 } from '@deepseek-ai/dsh-compaction'
-import { createCore, type CompressionCore } from 'acp-kernel'
+import { createCore, setDocCacheCap, type CompressionCore } from 'acp-kernel'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import { installSettingsSection, type SettingsProvider } from '@deepseek-ai/dsh-settings'
+import type { SettingsProvider } from '@deepseek-ai/dsh-settings'
+import { DEFAULT_SESSION_CACHE_LIMIT, LruMap } from './lru.ts'
 import { AcpStateStore } from './state.ts'
 import { makeTools, type ToolEnvironment } from './tools.ts'
 import { acpCommand } from './commands.ts'
-import { buildNudge } from './nudge.ts'
+import { buildNudge, EMERGENCY_NUDGE_MAX_PER_TURN } from './nudge.ts'
 import { ACP_SYSTEM_PROMPT_ORDER } from './system-prompt.ts'
 import { renderSystemPrompt, resolvePrompts, type AcpPrompts, type ResolvedPrompts } from './prompts.ts'
-import { DEFAULT_CONTEXT_WINDOW, probeModelWindow, projectedContextWindow, type AcpWindow } from './window.ts'
+import { DEFAULT_CONTEXT_WINDOW, probeModelWindow, projectedContextWindow, routeFor, type AcpWindow } from './window.ts'
 import { deferCompressPairHide, stripOrphanedSurfaceToolMessages } from './region.ts'
 import {
   ACP_SETTINGS_NAMESPACE,
@@ -76,7 +77,7 @@ export {
 } from './prompts.ts'
 export { makeTools, type ToolEnvironment } from './tools.ts'
 export { acpCommand } from './commands.ts'
-export { buildNudge, resolveTokenCount, type NudgeEnvironment, type NudgeOutcome } from './nudge.ts'
+export { buildNudge, resolveTokenCount, EMERGENCY_NUDGE_MAX_PER_TURN, type NudgeEnvironment, type NudgeOutcome } from './nudge.ts'
 export {
   DEFAULT_CONTEXT_WINDOW,
   detectContextWindow,
@@ -145,10 +146,11 @@ export interface AcpConfig {
    */
   readonly nudgeMaxContextLimitPct?: number
   /**
-   * Emergency nudge threshold (bypasses the per-turn dedup). Engine default
-   * 0.85 (down from the kernel/billion-context-pi default 0.95: 95% leaves
-   * the model no room to act before the API rejects, and the host's 80%
-   * compaction-basic line shadows it in standard/code/cordis modes).
+   * Emergency nudge threshold (bypasses the per-turn dedup, but is capped at
+   * EMERGENCY_NUDGE_MAX_PER_TURN = 3 injections per user turn — issue #108).
+   * Engine default 0.85 (down from the kernel/billion-context-pi default 0.95:
+   * 95% leaves the model no room to act before the API rejects, and the host's
+   * 80% compaction-basic line shadows it in standard/code/cordis modes).
    */
   readonly nudgeEmergencyThresholdPct?: number
   /**
@@ -229,12 +231,14 @@ export class AcpCompactionEngine extends CompactionEngine {
    */
   readonly env: ToolEnvironment
 
-  private readonly lastNudgeTurn = new Map<string, number>()
+  private readonly lastNudgeTurn = new LruMap<string, number>(DEFAULT_SESSION_CACHE_LIMIT)
+  /** Per-session emergency-nudge injection budget for the current user turn (issue #108). */
+  private readonly emergencyNudges = new Map<string, { turn: number; count: number }>()
   /** Successful compress call ids awaiting their tool/result so the pair can be hidden. */
   private readonly compressCallIdsToHide = new Set<string>()
   /** Per provider/model route the resolved window (probe failures cached too). */
   private readonly windowCache = new Map<string, AcpWindow>()
-  /** Live settings snapshot thunk (composition → user settings layer); swapped by installSettingsSection. */
+  /** Live settings snapshot thunk (composition → user settings layer); swapped when the settings provider attaches (SettingsProvider.installSection). */
   private readSettingsSource: () => AcpSettings = () => resolveAcpSettings({})
   /** The settings service, captured lazily for /acp config (undefined in provider-less processes). */
   private settingsService: SettingsProvider | undefined
@@ -250,6 +254,19 @@ export class AcpCompactionEngine extends CompactionEngine {
     this.prompts = resolvePrompts(config.prompts)
     const ports = this.config.countTokens !== undefined ? { countTokens: this.config.countTokens } : {}
     this.kernel = createCore(ports)
+    // The kernel's docFeatures cache (per-doc search features) defaults to an
+    // 8MB SOURCE-CHAR cap — sized for multi-session server processes. A DSH
+    // profile is single-user and its search corpus (ALL shadowed originals)
+    // routinely exceeds 8MB, so the default re-tokenizes the corpus on every
+    // search_context call (issue #133: ~18s/call on a 40MB corpus, cold and
+    // warm identical). The cap cannot be tuned DOWN instead — it evicts FIFO
+    // and bills source chars only, so a cap below the corpus caches nothing
+    // (measured: half the corpus → 1.1× on a repeat scan). 128MB covers the
+    // largest reported session (17.6M shadowed tokens ≈ 70MB text). Retained
+    // feature heap is 2.1×–51× the billed chars (content-dependent, measured)
+    // — accepted, since the host already holds a log of that scale; the
+    // arithmetic and the upstream root cause are in AGENTS.md rule 14.
+    setDocCacheCap(128 * 1024 * 1024)
     this.store = new AcpStateStore()
 
     // ── Runtime settings seam (M6) ──────────────────────────────────────
@@ -262,7 +279,15 @@ export class AcpCompactionEngine extends CompactionEngine {
     // OPTIONAL-service consumer: with no settings provider (plain npm-install
     // compositions) nothing registers and the engine behaves exactly as
     // composed — the same values, read through the same thunk.
-    let current: AcpSettings = resolveAcpSettings(filterSettingsEntry(this.config))
+    // The BASE layer the seam registers is the composition row's own scalar
+    // subset, taken from the RAW row — not from `this.config`, which already has
+    // engine defaults merged in; using it would turn every uncomposed key into a
+    // `base` override that shadows the schema default (so /acp config list would
+    // report `base` for keys nobody composed, and a reset would keep the value).
+    // `current` is the resolved snapshot reads start from; the two differ only
+    // in which keys are PRESENT, never in the values they resolve to.
+    const compositionEntry = filterSettingsEntry(config)
+    let current: AcpSettings = resolveAcpSettings(compositionEntry)
     this.readSettingsSource = () => current
     const engine = this
     const applySettings = (): void => {
@@ -280,20 +305,38 @@ export class AcpCompactionEngine extends CompactionEngine {
     }
     this.settingsCommand = makeSettingsCommandSurface(() => this.settingsService, () => current)
     if (this.config.settingsEnabled !== false) {
-      installSettingsSection(ctx, ACP_SETTINGS_NAMESPACE, AcpSettingsSchema, current, {
-        // The helper swaps the source thunk when the provider mounts and
-        // restores the composition entry when it detaches.
-        setSource: (source) => {
-          this.readSettingsSource = source
-        },
-        onChange: applySettings,
-      })
-      // The helper registers and watches but hands out no service handle;
-      // /acp config needs describe/update/replace, so capture the service
-      // through a parallel optional inject (fires only when a provider
-      // exists — harmless no-op otherwise).
-      ctx.inject(['settings'], (sctx) => {
-        this.settingsService = sctx.settings
+      // The seam's consumer entry point is `SettingsProvider.installSection` —
+      // a METHOD on the provider as of the 0.1.5 line (the standalone
+      // `installSettingsSection` helper this was written against is gone).
+      // It registers the composition-row subset as the base layer while a
+      // provider is attached and swaps the source thunk when the provider
+      // mounts. The detach side is OURS (the disposer below): once the provider
+      // is gone the seam hands no source back, so without it the engine would
+      // keep reading the last published value and later settings.yaml edits
+      // would silently stop applying.
+      ctx.inject(['settings'], (settingsCtx) => {
+        settingsCtx.settings.installSection(ctx, ACP_SETTINGS_NAMESPACE, AcpSettingsSchema, compositionEntry, {
+          // The seam's source type follows the entry it registered, so `source`
+          // is a partial view of the settings; re-resolve it into a
+          // fully-defaulted snapshot so every reader sees the same shape the
+          // composition path produced.
+          setSource: (source) => {
+            this.readSettingsSource = () => resolveAcpSettings(source())
+          },
+          onChange: applySettings,
+        })
+        // installSection hands out no service handle, and /acp config needs
+        // describe/update/replace — capture the service from the same optional
+        // inject (fires only while a provider exists; a no-op otherwise).
+        this.settingsService = settingsCtx.settings
+        // Detach cleanup: cordis disposes the value an inject callback returns
+        // when the provider fiber unloads. Without it the engine would keep a
+        // dead provider handle (/acp config would still report available and
+        // write into a disposed service) and freeze reads at the last value.
+        return () => {
+          this.settingsService = undefined
+          this.readSettingsSource = () => current
+        }
       })
     }
 
@@ -393,7 +436,20 @@ export class AcpCompactionEngine extends CompactionEngine {
       const decision = await next()
       if (decision.kind === 'reject') return decision
       const window = await this.windowFor(payload.agent)
-      const outcome = buildNudge(payload.agent, { ...env, modelContextLimit: window.limit }, this.lastNudgeTurn)
+      const outcome = buildNudge(
+        payload.agent,
+        { ...env, modelContextLimit: window.limit },
+        this.lastNudgeTurn,
+        this.emergencyNudges,
+        () => {
+          // The kernel still wants an emergency nudge but the per-turn budget
+          // is spent: log WHY the model stops receiving nudges instead of
+          // letting the silence look like a bug (issue #108 review).
+          ctx.logger.warn(
+            `billion-context-dsh: emergency nudge suppressed — per-turn budget of ${EMERGENCY_NUDGE_MAX_PER_TURN} spent (session ${payload.agent.session.id}); pressure is still above the emergency threshold`,
+          )
+        },
+      )
       if (outcome === null) return decision
       return { kind: 'enter', messages: [...decision.messages, outcome.message] }
     })
@@ -454,21 +510,23 @@ export class AcpCompactionEngine extends CompactionEngine {
     if (live.modelContextLimit !== undefined) {
       return { limit: live.modelContextLimit, source: 'explicit' }
     }
-    const provider = agent.options.provider ?? ''
-    const model = agent.options.model ?? ''
+    // The per-route output cap must be looked up against the session's LIVE
+    // route or it lags one switch behind (a stale agent.options snapshot names
+    // the PREVIOUS route) — routeFor owns that fallback chain for every caller.
+    const { provider, model } = routeFor(agent)
     const key = `${provider}\0${model}`
     // Projection source first: it reflects the live route (agent.options is a
     // stale snapshot after a model switch), and it is not cached here because
     // the projection itself refreshes on every request — caching would freeze
     // the old model's window for the whole process (the false-EMERGENCY trap).
     // Only consulted when auto detection is enabled (same gate as the probe).
-    if (this.config.autoModelContextLimit) {
+    if (live.autoModelContextLimit) {
       const projected = projectedContextWindow(agent)
       if (projected !== null) {
-        // The window comes from the live projection; the output cap still
-        // comes from the (cached) model probe — the projection schema carries
-        // no cap. After a mid-session switch agent.options names the
-        // PREVIOUS route, so the cap is the best available, not the live one.
+        // The window comes from the live projection; the output cap comes from
+        // the (cached) model probe for the LIVE route — the projection schema
+        // carries no cap, so the cap follows the live provider/model resolved
+        // above (agent.options only as the pre-first-request fallback).
         const cap = await this.outputCapFor(agent, provider, model)
         return this.applyReservation({ limit: projected, source: 'projection', provider, model }, cap)
       }

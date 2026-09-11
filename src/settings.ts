@@ -2,7 +2,7 @@
  * M6 — runtime settings integration. Wires the engine's scalar knobs into the
  * host's user-settings layer (`~/.dsh/settings.yaml`, section
  * `compaction-acp`) through the official consumer seam
- * `installSettingsSection` (@deepseek-ai/dsh-settings), so editing the file
+ * `SettingsProvider.installSection` (@deepseek-ai/dsh-settings), so editing the file
  * applies to RUNNING sessions without a restart.
  *
  * Layering (per key): schemastery schema default → composition-row subset
@@ -19,14 +19,16 @@
  */
 
 import z from '@deepseek-ai/schemastery'
-import {
-  settingsNamespace,
-  type SettingsDescriptor,
-  type SettingsProvider,
-} from '@deepseek-ai/dsh-settings'
+import type { SettingsDescriptor, SettingsProvider } from '@deepseek-ai/dsh-settings'
 
-/** The host settings namespace — same id as the bundle/composition row, so "the settings.yaml section" and "the cordis.patch.yml row" are one mental object. */
-export const ACP_SETTINGS_NAMESPACE = settingsNamespace('compaction-acp')
+/**
+ * The host settings namespace — same id as the bundle/composition row, so "the
+ * settings.yaml section" and "the cordis.patch.yml row" are one mental object.
+ * A plain string literal as of the 0.1.5 line: the seam's `settingsNamespace()`
+ * runtime helper is gone and the brand is applied at the call site instead
+ * (`installSection`'s `Namespace & SettingsNamespaceInput<Namespace>`).
+ */
+export const ACP_SETTINGS_NAMESPACE = 'compaction-acp'
 
 /** The six knobs exposed to the runtime settings layer. Order defines /acp config listing order. */
 export const SETTINGS_KEYS = [
@@ -237,7 +239,9 @@ export function makeSettingsCommandSurface(
     describe() {
       const service = getService()
       if (service === undefined) return undefined
-      return service.describe().find((descriptor) => descriptor.ns === ACP_SETTINGS_NAMESPACE)
+      // `descriptor.ns` carries the seam's compile-time brand, which a plain
+      // literal never satisfies — compare through String() instead.
+      return service.describe().find((descriptor) => String(descriptor.ns) === ACP_SETTINGS_NAMESPACE)
     },
     async update(patch) {
       await requireService(getService).update(ACP_SETTINGS_NAMESPACE, patch)

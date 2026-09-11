@@ -25,10 +25,31 @@
 2. **没有统一入口**。宿主已有完整的用户设置层（`~/.dsh/settings.yaml`，分 namespace 分层解析、
    热重载、写校验），bash 预算、agent-loop 并行度等都已接入。我们不接入，用户就要学两套配置心智。
 
-宿主侧机制调查结论（2026-07，逐条对着安装版 dsh 0.1.0-rc.6 的 `lib/` 源码验证过）：
+宿主侧机制调查结论（2026-07，逐条对着安装版 dsh 0.1.0-rc.6 的 `lib/` 源码验证过；
+2026-09 已按本仓库 devDep 的 0.1.5 线（`0.1.5-rc.2`）重新核验——接缝 API 在该线发生破坏性变更，见下）：
 
-- **接缝**：`@deepseek-ai/dsh-settings` 导出 `installSettingsSection(ctx, ns, schema, entry, hooks)`
-  （`lib/index.js:618`），是官方钦定的可选消费者接线：
+- **接缝（0.1.5 现状，PR #130 已按此接线）**：官方可选消费者接线是 provider 上的**方法**
+  `settingsProvider.installSection(ctx, ns, schema, entry, hooks)`（`lib/types/index.d.ts:228`），
+  在 `ctx.inject(['settings'], (settingsCtx) => { … })` 回调内以
+  `settingsCtx.settings.installSection(...)` 调用：
+  ```ts
+  installSection<const Namespace extends string, T>(
+    owner: Context,
+    ns: Namespace & SettingsNamespaceInput<Namespace>,
+    schema: z<T>,
+    entry: T,
+    hooks: SettingsSectionHooks<T>,
+  ): void
+  ```
+  namespace 不再是运行时 helper：0.1.5 线删除了 `settingsNamespace()`，`ACP_SETTINGS_NAMESPACE`
+  就是一个普通字符串字面量 `'compaction-acp'`，编译期 brand 由调用点上的泛型约束
+  `Namespace & SettingsNamespaceInput<Namespace>` 施加。`SettingsProvider` / `SettingsDescriptor` /
+  `SettingsConflictError` 仍是导出；`publish` 仍是 `protected` 方法；provider 子类仍实现
+  `readonly writable` + `protected load()` + `protected persist(ns, section)`。
+- **接缝（0.1.0-rc.6 历史，保留）**：当时的 dsh-settings 导出独立函数
+  `installSettingsSection(ctx, ns, schema, entry, hooks)`（`lib/index.js:618`），namespace 由
+  `settingsNamespace(ns)` 构造；PR #130 初版即基于这条线写。实现体与 0.1.5 的 `installSection`
+  同源，仅入口从自由函数搬到了 provider 方法：
   ```js
   function installSettingsSection(ctx, ns, schema, entry, hooks) {
     ctx.inject(["settings"], (sctx) => {
@@ -50,8 +71,9 @@
     });
   }
   ```
-  `hooks = { setSource(current), onChange(), validate?(value) }`。注册随注入 fiber 走：
-  没有挂 settings 服务的 profile 上整段不执行，引擎按纯组合层行为工作（可选服务语义）。
+- **hook 合同（两线一致）**：`hooks = { setSource(current), onChange(), validate?(value) }`。
+  注册随注入 fiber 走：没有挂 settings 服务的 profile 上整段不执行，
+  引擎按纯组合层行为工作（可选服务语义）。
 - **分层**（`SettingsScope.get()`）：schema 默认值 → 组合 `base` 层 → 用户层
   （`~/.dsh/settings.yaml` 里该 namespace 的 section）。`replace({})` 整体重置回 base+默认。
 - **写路径**：service 级 `update(ns, patch, expectedRevision?)` / `replace(ns, section, …)` /
@@ -131,9 +153,10 @@ dsh-settings-file 监听 ~/.dsh/settings.yaml
 
 ```ts
 import z from '@deepseek-ai/schemastery'
-import { settingsNamespace } from '@deepseek-ai/dsh-settings'
 
-export const ACP_SETTINGS_NAMESPACE = settingsNamespace('compaction-acp')
+// 0.1.5 线：namespace 是普通字符串字面量（`settingsNamespace()` helper 已删除），
+// 编译期 brand 由 installSection 调用点的 `Namespace & SettingsNamespaceInput<Namespace>` 施加
+export const ACP_SETTINGS_NAMESPACE = 'compaction-acp'
 
 // 注意：schemastery 3.18.1 的 number 链上没有 .int() / .positive()
 // （已核验 lib/index.mjs：仅有 min/max/step/pattern；官方快捷方式
@@ -162,7 +185,8 @@ export type AcpSettings = z.output<typeof AcpSettingsSchema>
 
 ### 4.2 base 过滤（保持 resolved 快照干净）
 
-`installSettingsSection(ctx, ns, schema, entry, …)` 把 `entry` 原样作为 `base` 注册。评审核验：
+`SettingsProvider.installSection(ctx, ns, schema, entry, …)` 把 `entry` 原样作为 `base` 注册
+（0.1.0-rc.6 线为自由函数 `installSettingsSection(ctx, ns, schema, entry, …)`，行为相同）。评审核验：
 **register 并不校验 base**（dsh-settings lib/index.js:311-313 原样存入），且 schemastery 的
 object 解析器默认非 strict（lib/index.mjs:479-487 `if (!strict) merge(result, data)`）——未知键
 会**透传进 deepFreeze 后的 resolved 快照**。所以过滤的理由不是「防注册失败」，而是：
@@ -199,7 +223,7 @@ export interface SettingsRuntimeSource { (): AcpSettings }
 const baseEntry = filterSettingsEntry(this.config)
 let source: SettingsRuntimeSource = () => ({
   // 初始活源 = 过滤后的组合子集经引擎默认值补齐（settings 服务接管前/缺席时的等价兜底，
-  // 与服务脱离时 installSettingsSection 回落的同一个 filtered 对象同源同形）
+  // 与服务脱离时 installSection 回落的同一个 filtered 对象同源同形）
   ...resolveAcpConfig(baseEntry),
 })
 // 上次已应用的快照——onChange 无参回调（helper 不透传 watch 的 next/prev），前值必须自己记。
@@ -232,13 +256,15 @@ const env: ToolEnvironment = {
 }
 
 if (this.config.settingsEnabled !== false) {   // kill switch，见下
-  installSettingsSection(ctx, ACP_SETTINGS_NAMESPACE, AcpSettingsSchema, baseEntry, {
-    validate: (value) => this.validateSettings(value),   // §4.5
-    setSource: (current) => { source = current },        // 官方接线：换活源
-    onChange: () => { applySettingsChange() },
+  ctx.inject(['settings'], (settingsCtx) => {
+    settingsCtx.settings.installSection(ctx, ACP_SETTINGS_NAMESPACE, AcpSettingsSchema, baseEntry, {
+      validate: (value) => this.validateSettings(value),   // §4.5
+      setSource: (current) => { source = current },        // 官方接线：换活源
+      onChange: () => { applySettingsChange() },
+    })
+    // /acp config 用的服务句柄（同一次注入内捕获；installSection 不吐 scope，不重复注册 namespace）
+    this.settingsService = settingsCtx.settings
   })
-  // /acp config 用的服务句柄（平行注入，只捕获引用，不重复注册 namespace）
-  ctx.inject(['settings'], (sctx) => { this.settingsService = sctx.settings })
 }
 ```
 
@@ -300,10 +326,14 @@ private onSettingsChanged(prev: AcpSettings, next: AcpSettings): void {
 挂在现有 `acpCommand`（src/commands.ts:141-150 的 status|compress|decompress 之后）：
 `/acp config [set <key> <value> | reset <key>|all]`。
 
-- **服务句柄获取**：`installSettingsSection` 不吐 scope，但 service 级 API 够用。引擎另起一个
-  平行注入只捕获服务引用（**不重复注册** namespace）：
+- **服务句柄获取**：`SettingsProvider.installSection` 不吐 scope，但 service 级 API 够用。0.1.5 线
+  `installSection` 是 provider 方法、必须在注入回调里调用，所以服务引用就在**同一次注入**内捕获
+  （不重复注册 namespace）：
   ```ts
-  ctx.inject(['settings'], (sctx) => { this.settingsService = sctx.settings })
+  ctx.inject(['settings'], (settingsCtx) => {
+    settingsCtx.settings.installSection(ctx, ACP_SETTINGS_NAMESPACE, AcpSettingsSchema, baseEntry, { … })
+    this.settingsService = settingsCtx.settings
+  })
   ```
   effect 清理时置回 undefined。`/acp config` 执行时若服务缺席（TUI 纯净 profile 等），
   输出一句人话：「设置服务在本 profile 未启用，请改用 cordis.patch.yml 的 compaction-acp 行配置」。
@@ -329,6 +359,11 @@ private onSettingsChanged(prev: AcpSettings, next: AcpSettings): void {
   输出必须讲清楚回落到哪：「reset to composition base (0.80) — schema default is 0.70;
   change the compaction-acp composition row or override via coreOverrides if you want a different
   base」——**reset 回落的是组合行 base，不是引擎默认值**，这是分层模型最反直觉的一点。
+- **单键 reset 只删目标键**：`user` section 里其余键（包括 schema 不认识的）原样写回——设置层不白名单键名
+  （实测：`publish` 未知键会进 `descriptor.user`，`update({bogus: 1})` 也被接受），按 `SETTING_KEYS` 重建 section
+  会静默删掉用户手写的条目。代价是 namespace 里可能出现非六键内容；写回数据始终来自 YAML 文件本身，
+  不会把 `this.config` 的对象/函数值带进设置层（规则 3 不破）。两条 reset 路径与 `set` 共用同一段
+  `SettingsConflictError` 映射，避免并发写冲突以裸 rejection 逃逸。
 - 命令全程进程内调用，**不经过 wire 白名单**，TUI/web/headless 通吃；web 端设置页看不到本
   namespace 是预期行为（§8），`/acp config` 就是 web 模式下的替代入口。
 - 输出文案遵守仓库「plain-language」规范；与现有 `/acp status` 输出风格一致（英文正文）。
@@ -336,15 +371,21 @@ private onSettingsChanged(prev: AcpSettings, next: AcpSettings): void {
 ### 4.7 依赖与打包
 
 - `package.json` peerDependencies 新增：
-  - `"@deepseek-ai/dsh-settings": "^0.1.0-rc.6 || ^0.1.1-rc.1"` —— 双元组 clause，
-    issue #68 规则（node-semver prerelease 匹配要求同 tuple 比较子）；
+  - `"@deepseek-ai/dsh-settings": ">=0.1.5-alpha.1 <0.1.6-0"` —— 与四个宿主接缝 peer
+    （dsh-compaction / dsh-session / dsh-llm / dsh-tools）**同一形式、同一 0.1.5 下限**。
+    为什么不能再写 0.1.0 线的双元组 clause：现在调用的是 provider 方法
+    `SettingsProvider.installSection`，它只存在于 0.1.5 线；0.1.0/0.1.1 线只有自由函数
+    `installSettingsSection`，装上也无法工作。显式区间钉死整条 0.1.5 线（全部 0.1.5 预发布
+    加最终 0.1.5），`0.1.6-0` 上界挡住未验证的下一线（house rule：不默许未验证的版本线）。
   - `"@deepseek-ai/schemastery": "^3.18.1"` —— 普通语义化版本，与宿主包一致，无 tuple 问题。
-- devDependencies 新增两者、钉在 `0.1.0-rc.6` / `3.18.1`（稳定测试基线规则）。
+- devDependencies 新增两者：`dsh-settings` 与宿主接缝 devDep 统一钉在 `0.1.5-rc.2`，
+  `schemastery` 钉在 `3.18.1`（稳定测试基线规则）。
 - tsup external 已按 `@deepseek-ai/*` 前缀外置，无需改（实现时确认 glob 覆盖新包名）。
 - 运行时可解析性依据：两包均为 dsh 安装根 node_modules 内的既存包（dsh-settings 由 apiproxy/
   client-ui-* 等运行时依赖，schemastery 由约 90 个包含 dsh-compaction-basic 运行时依赖），
   第三方插件经 Node 祖先链遍历解析；我们现有 `@deepseek-ai/*` peer 走的就是同一机制。
-- `tests/peer-range.test.ts` 增加 dsh-settings 的双元组断言（该文件就是为此设的回归守卫）。
+- `tests/peer-range.test.ts` 把 dsh-settings 并入共享的 `seamPeers` 数组（现五项），与其余四个
+  接缝 peer 共用同一组 0.1.5 断言；原先的 dsh-settings 专属双元组测试块已删除。
 
 ## 5. 明确不做的事（及优先级语义）
 
@@ -404,11 +445,11 @@ coreOverrides.nudge.X  >  settings.yaml compaction-acp.X / 组合行 config.X（
    不抛错。
 5. **validate 宽容矩阵**：越界（1.2、-0.1、NaN 序列化形）被 schema 拒；min≥max、max>emergency
    通过校验。
-6. **detach 回落**：模拟 settings 服务脱离（触发 installSettingsSection 的 effect 清理路径）→
+6. **detach 回落**：模拟 settings 服务脱离（触发 installSection 的 effect 清理路径）→
    source 回落到 baseEntry，env 继续可用。（对齐 helper 合同的消费者侧断言。）
 7. **E2E-ish 全环**：用 `@deepseek-ai/dsh-settings` 导出的 `SettingsProvider` 基类造内存 provider
    ——子类实现 `writable/load/persist` 并在测试里**调用继承的 `this.publish(doc)`** 推送文档
-   （publish 是 protected 方法，调用而非覆写），真实 service + `installSettingsSection` + 我们的接线：
+   （publish 是 protected 方法，调用而非覆写），真实 service + `SettingsProvider.installSection` + 我们的接线：
    update → watch 回调 → env getter 反映 → kernelConfigFor 产物含新 pct →
    `replace({})` 重置回落。非法 section publish → last-good 保持。
 8. **`windowFor` 活值语义**：设置 `modelContextLimit: 200000` → `windowFor` 返回
@@ -416,16 +457,20 @@ coreOverrides.nudge.X  >  settings.yaml compaction-acp.X / 组合行 config.X（
    隐式语义变更」的显式锁定用例（评审要求）。
 9. **set 即时可见性**：`update` resolve 完成后、下一个 pre-step 前，`{ ...env }` 已反映新值
    （写队列串行化保证 update await 返回即生效）。
-10. **kill switch**：`settingsEnabled: false` → 不触发注册路径（spy installSettingsSection 或
+10. **kill switch**：`settingsEnabled: false` → 不触发注册路径（spy installSection 或
     断言无 settings 相关 effect）、env 读初始组合值、行为与今天完全一致。
 11. **autoNudge 翻转**：false→true 时 `lastNudgeTurn.clear()` 被调用；true→false 不清。
 12. **schema 边界实测**：`min(0).max(1)` 是否含边界——0 与 1 必须通过、1.0000001 被拒；
     `modelContextLimit` 的 `.step(1).min(1)`：1 通过、0 与小数被拒。
 13. **/acp config**：列表输出含来源标记 + coreOverrides 脚注；set 合法/非法键（含 `.7` 小数、
     `'null'` 转 reset、垃圾串报错文案）；reset 单键与 all 的回落值展示；服务缺席时的降级文案。
-14. **peer-range**：`tests/peer-range.test.ts` 补 dsh-settings 双元组断言。
+14. **peer-range**：`tests/peer-range.test.ts` 把 dsh-settings 并入 `seamPeers`（五项）共用 0.1.5 断言。
 15. **全量回归**：现有 162+ 测试全绿——env 形状不变是前提，任何下游测试红都说明接线侵入了
     不该侵入的地方。
+16. **合并评审补齐的回归锁定**（每条都带「改前值 / 改后值」双断言，所以按老代码运行必红）：filtered `base` 入口 +
+    `/acp config list` 来源列；seam → `windowFor` 门（设置层的 `autoModelContextLimit: false` 必须让窗口路径
+    不再走 projection）；`kernelConfigFor` 产物含新 pct；provider 单独 detach 后回落组合值（走 inject disposer）；
+    单键 reset 保留手写键。
 
 ## 7. 文档同步清单（同一 PR 内完成）
 
@@ -468,6 +513,11 @@ v2 状态：R1–R5 已由评审核验关闭，遗留两个实现期验证门（
 
 ## 修订记录
 
+- **v3（0.1.5 接缝对齐，仅文档）**：PR #130 初版基于 dsh-settings 0.1.0-rc.6 的自由函数
+  `installSettingsSection` + `settingsNamespace()` 编写；宿主线升到 0.1.5 后两者都已删除
+  （`installSection` 成为 provider 方法、namespace 变普通字符串字面量），源代码与测试已经适配。
+  本次把本文档同步到 0.1.5 形态：§1 接缝描述、§4.1 namespace 声明、§4.2/§4.3/§4.6 调用点、
+  §4.7 peer 区间与 §6 测试计划；0.1.0-rc.6 的形态作为历史保留并显式标注。
 - **v2（评审吸收稿）**：三路独立评审（宿主接缝合规 / 引擎架构与回归风险 / 对抗性边界，
   全部「修改后通过」）+ 主笔人对关键指控的源码复核后修订：
   - 【阻断】schema `.int()/.positive()` 不存在（三路一致 + lib/index.mjs 复核）→

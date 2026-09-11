@@ -68,24 +68,26 @@ The command installs the package and automatically layers this package's bundle 
 
 Restart `dsh` afterwards (bundle layers are composed at startup), open a new session, and verify: ask the model to call `acp_status`, or run `/acp status`. Shipped presets (standard / code / cordis) keep their realm-local `compaction-basic` fallback (automatic pressure compression still runs there; the ACP tools and nudge coexist); minimal and presets without a compaction realm use this engine directly.
 
-> **DSH version compatibility.** The package declares all four runtime seam
-> packages (`dsh-compaction` / `dsh-session` / `dsh-llm` / `dsh-tools`) as peer
-> dependencies, sharing the range
-> `^0.1.0-rc.6 || ^0.1.1-rc.1 || ^0.1.2-alpha.4`,
-> covering the `0.1.0-rc.x` and `0.1.1-rc.x` release lines (including the current
-> DSH release; the seam's `src/` is unchanged from `0.1.0-rc.6` to `0.1.1-rc.2`, so the public
-> API is identical) and the `0.1.2-alpha.x` line (which removed the
-> `Session.events` getter in favour of `snapshotEvents()` / `eventAt()`; this
-> engine feature-detects both shapes, so one build runs on either seam). The
-> range is multiple `||` clauses **on purpose**: npm
-> (node-semver) only lets a prerelease version satisfy a range that carries a
-> comparator on the SAME `[major, minor, patch]` tuple as the candidate, so a lone
-> `^0.1.0-rc.6` can never match `0.1.1-rc.x` (issue #68) or `0.1.2-alpha.x` —
-> older releases fail to install on DSH 0.1.1-rc.x / 0.1.2-alpha.x; upgrade to a
-> release containing this fix. Declaring all four seam packages as peers (not
-> just `dsh-compaction`) ensures that, even under pnpm's
+> **DSH version compatibility.** The package declares all five runtime seam
+> packages (`dsh-compaction` / `dsh-session` / `dsh-llm` / `dsh-tools` /
+> `dsh-settings`) as peer
+> dependencies, sharing the range `>=0.1.5-alpha.1 <0.1.6-0` — exactly the
+> `0.1.5` line (every prerelease plus the final `0.1.5`). From the `0.1.5` line
+> on, the session's replace operation was renamed from `{ op, start, end }` to
+> `{ op, startSeq, endSeq }` and is validated strictly (exactly those three
+> keys), so the engine emits the new shape only: on older DSH hosts (< 0.1.5)
+> every `compress` call is rejected at runtime (issue #136), which is why the
+> old lines are out of contract — upgrade DSH before installing this release.
+> The explicit bounds (instead of a caret) are deliberate: a caret would
+> silently admit the unverified 0.1.6+ line. Declaring all five seam packages
+> as peers (not just `dsh-compaction`) ensures that, even under pnpm's
 > hoisted/linked layout, installations resolve them to the **host's own** copy
 > rather than a stale nested copy inconsistent with the host.
+>
+> Behavior note (from 0.1.5 on): the host no longer permits invisible
+> replacement nodes, so when the engine cleans up orphaned tool messages it
+> leaves one short visible placeholder message in their place; the host-owned
+> system prompt node (surface node 0) is excluded from compressible ranges.
 
 **Path B: plain `npm install` (package only — a composition row is required).**
 
@@ -193,11 +195,12 @@ DSH derives every model request from its append-only session log (the *surface*)
 | refs (`m00001` tags) | surface seqs, carried by the nudge's compressible-range table |
 | nudge ("efficiency note — compress early and keep context lean") | injected at `agent/pre-step` by the kernel's pressure decision — efficiency note + context breakdown + compression rules, tone aligned with kernel/pi; never an order |
 | `decompress` | read-only recovery of shadowed originals from the log |
-| `search_context` | scores a unified doc set (block summaries + shadowed originals) rebuilt from the log via acp-kernel `searchBlocks` (hybrid: stemming + CJK bigrams + char n-gram fuzzy); hits link back to the owning block |
+| `search_context` | scores a unified doc set (block summaries + shadowed originals) rebuilt from the log — cached per log snapshot, so repeated searches before the next append reuse it (issue #133) — via acp-kernel `searchBlocks` (hybrid: stemming + CJK bigrams + char n-gram fuzzy); hits link back to the owning block |
 | `acp_status` | CONTEXT BREAKDOWN (tool/text/summaries shares of the visible total) + compressed-block ledger + nudge decision line + a `Checkpoint seqs` row mapping each ACTIVE block's kernel ref (`bN`) to its checkpoint summary seq — compressing a checkpoint seq distills that block (issue #60); no context-window rows; scope/view/tool/sort/limit drilldown supported |
 | block state | in-memory kernel state + **log-rebuilt ledger** (no sidecar files) |
 | tiered distillation (T2/T3) | re-compressing a block's summary node distills that block (tier 2); distilling a tier-2 block yields tier 3. Tier + kernel block ids are persisted to the log, so kernel state rehydrates from the log after a restart and stays distillable |
 | compression accounting (shadow price) | `shadowedTokenCount` (what the host occupancy display deducts) is priced with the **host token-meter's fixed-heuristic price** (`ctx.tokenMeter.measure` preferred, reading the `heuristicTokens ?? tokens` fixed-heuristic basis; exact mirror in `src/host-tokens.ts` as fallback) — never the plugin's internal CJK-aware estimate (that is display currency; mixing it into the host ledger can drive `messageTokens` negative and brick a CJK-heavy session, issue #54), and never the route-repriced `node.tokens` either (under 0.1.2+ image route pricing that is request-pressure currency; summing it overstates an image range's claim and folds the same ledger negative, issue #103) |
+| injected-instruction hygiene | the host injects policy files (AGENTS.md etc.) onto the session surface; compressing the **current copy** of one makes the host re-inject the same file immediately — a compress → re-inject → compress loop (issue #71). The compressible-range table treats injected rows as barriers: never offered, never part of a span; a manual compress — the model's compress tool AND the human /acp compress command alike — that covers a file's current copy is **rejected outright** (the error names the seq(s) and points out that stale copies are fine to compress) — compressing a current copy reclaims nothing because the host always re-pastes it. Rows are grouped by `source.changes[].scope` (= one file) and only each group's newest copy is protected — older copies superseded by an update stay safely compressible |
 
 The load-bearing compression guidance (tools, philosophy, summary rules, tier rules) is registered as a one-time system-prompt section; each nudge carries a condensed version (efficiency note + philosophy + context breakdown + HOW_TO_COMPRESS_RULES + range table + batch tip). There is deliberately **no automatic summarization**: automatic policy only nudges the model (`compactIfNeeded` returns null).
 
@@ -238,7 +241,7 @@ This project reuses `acp-kernel`'s compression core and `billion-context-pi`'s d
 | `autoModelContextLimit` | `true` | Resolve the real context window automatically: the host projection first (`windowFor` → `projectedContextWindow`, `src/window.ts`), then the model API probe (`agent.ctx.llm.resolveModelInfo`); both are skipped when `autoModelContextLimit: false`. On probe failure it falls back to the default, and the `/acp` command shows the window source (the `acp_status` model tool carries no window info). A failed probe is surfaced in the host log and the `/acp` panel (`restart to re-probe`) — the failure is cached like a success, so fixing the gateway requires a restart or an explicit `modelContextLimit` before the probe retries. On a successful probe the adapter's per-request output cap (`defaultMaxTokens` — the output reservation the provider guarantees at the end of the window) is SUBTRACTED, so every downstream pressure decision (nudge tiers, truncate, growth) measures usage against the SUSTAINABLE input budget (window − reservation): a 96K window with a 16K cap carries at most 80K of input, and the raw denominator understated usage by cap/window (≈17% there — and the ratio is far higher on short-window models, where the same cap is a quarter or more of the window). When the cap is undisclosed, the limit is explicit, or the probe fails, the raw-window behavior is kept; `/acp status` shows the subtraction (raw − reservation). Changing `modelContextLimit`/`autoModelContextLimit` via `/acp config` clears the window cache so the probe re-runs immediately |
 | `nudgeMinContextLimitPct` | kernel default `0.45` | Nudge window lower bound (usage fraction) — validation only; the growth-driven trigger has no percentage floor — same default as billion-context-pi (runtime-adjustable: `/acp config`) |
 | `nudgeMaxContextLimitPct` | engine default `0.70` (kernel/pi default `0.75`) | Over-limit line: above this the nudge fires regardless of growth — deliberately below the host compaction-basic 80% auto-compaction line so the forced nudge fires first; an explicit value wins (a same-name key in `coreOverrides.nudge` outranks it — see below) (runtime-adjustable: `/acp config`) |
-| `nudgeEmergencyThresholdPct` | engine default `0.85` (kernel/pi default `0.95`) | Emergency nudge (bypasses the per-turn dedup) — lowered from `0.95`: at 95% the model has no room to act and the 80% auto-compaction line shadows it; an explicit value wins (a same-name key in `coreOverrides.nudge` outranks it — see below) (runtime-adjustable: `/acp config`) |
+| `nudgeEmergencyThresholdPct` | engine default `0.85` (kernel/pi default `0.95`) | Emergency nudge (bypasses the per-turn dedup, but is capped at 3 injections per user turn — issue #108) — lowered from `0.95`: at 95% the model has no room to act and the 80% auto-compaction line shadows it; an explicit value wins (a same-name key in `coreOverrides.nudge` outranks it — see below) (runtime-adjustable: `/acp config`) |
 | `coreOverrides` | — | Any other acp-kernel `Config` override (billion-context-pi's `coreOverrides` escape hatch). Merge order: kernel defaults → top-level pct knobs → `coreOverrides.nudge` lands last — same-name keys take its value (read-only: composition-row-only, not exposed through settings) |
 | `autoTools` | `true` | Register the four model tools on `ctx.tools` |
 | `autoCommand` | `true` | Register the `/acp` command on `ctx.commands` |
@@ -253,7 +256,10 @@ npm install
 npm run typecheck   # strict TS
 npm test            # node --import tsx --test tests/*.test.ts
 npm run build       # tsup bundle (inlines acp-kernel) + .d.ts
+npm run test:e2e   # end-to-end host regression: real agent loop + scripted fake LLM (see below)
 ```
+
+The end-to-end regression suite (`scripts/e2e/`) assembles the real DSH host in-process (cordis + agent-loop + the DeepSeek adapter), points it at a scripted fake LLM server, mounts this engine as the compaction backend, and asserts the persisted event log: compaction start/end pairing, the durable replace node, strict tool-call/result pairing, and the nudge injection rhythm. Background and trade-offs: [docs/e2e-harness-design.md](docs/e2e-harness-design.md) (issue #120).
 
 `dist/index.js` is self-contained except for the `@deepseek-ai/*` seam packages, which the hosting deployment provides.
 
@@ -265,6 +271,7 @@ src/
 ├── messages.ts     # M1: session events ↔ acp-kernel CoreMessage projection
 ├── state.ts        # M2: per-session kernel state
 ├── region.ts       # M5: durable region transaction + log-rebuilt block ledger
+├── block-ledger.ts # M5 support: tier/lineage fields encoded inside compaction/summary rawOutput, never top-level (issue #141)
 ├── tools.ts        # M3: compress / decompress / search_context / acp_status
 ├── nudge.ts        # M4: kernel pressure decision → injected advisory nudge
 ├── system-prompt.ts# M4: one-time ACP guidance section (keeps nudges short)

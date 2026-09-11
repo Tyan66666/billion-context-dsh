@@ -26,8 +26,11 @@
 - **auto 路径** — 窗口与上限来自同一次探测；探测失败时保留原始 128K 兜底，
   同时**丢弃上限**（探测没给出任何信息）。
 - **projection 路径** — 窗口来自实时投影（投影 schema 不携带上限）；上限来自
-  同一个按路由缓存的模型探测。会话中途切换模型后 `agent.options` 指向的是
-  **旧**路由，所以上限是「尽力可得」值，不是当前路由的。
+  同一个按路由缓存的模型探测。路由取会话最后一次 `request/context` 事件
+  （`routeFor()`）。宿主在同一 step 的 `buildRequest` 里才 append 这条事件，所以
+  切换模型后的**首次** `agent/pre-step` 仍读到上一路由——与投影窗口同源、同步
+  滞后一次请求后自愈（同 acp-status-align-design.md 记录的那次滞后）；只有会话
+  还没记录过任何路由时才回退到 `agent.options`。
 - **显式 `modelContextLimit`** — 从不探测、从不扣减：操作者的值就是分母，
   到此为止。
 - **`autoModelContextLimit: false` / 上限 ≥ 窗口（退化）** — 保持原始行为。
@@ -50,3 +53,9 @@ growth）——在缝合处扣减一次，所有站点一次性修正，无需�
 （每条路由一次探测）、无上限 no-op、上限 ≥ 窗口的退化情形、显式值从不
 扣减（也从不探测）。所有既有窗口测试保持原期望（显式值不探测；探测失败的
 `deepEqual` 不变；`autoModelContextLimit: false` 不动）。
+切换路由后上限跟随实时路由（`routeFor()`；宿主在同一 step 的 `buildRequest` 才
+append，故切换后首次 pre-step 滞后一次请求、随后自愈），以及 `liveRoute()` 的
+「全有或全无」守卫（缺一半／空串／null／未记录／宿主抛错一律返回 null 并整条
+回退）。压缩事务写进 `compaction/summary` 的
+`provider`/`model` 同样以实时路由为准：`tests/tools.test.ts`（`compress`）与
+`tests/commands.test.ts`（`/acp compress`）各自钉住这两列。

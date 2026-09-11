@@ -17,7 +17,7 @@ import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
 import type { AcpStateStore } from './state.ts'
 import { kernelConfigFor, type KernelConfigInput } from './config.ts'
 import { resolveTokenCount } from './nudge.ts'
-import type { AcpWindow } from './window.ts'
+import { routeFor, type AcpWindow } from './window.ts'
 import {
   AlreadyCompressedRangeError,
   blockIdOfKernelRef,
@@ -25,6 +25,7 @@ import {
   blockRegistry,
   compactionIdsOfKernelBlocks,
   expandShadowedSeqs,
+  guardedSurfaceSeqsOf,
   rebuildBlockLedger,
   resolveSurfaceRange,
   runCompactionTransaction,
@@ -34,7 +35,7 @@ import {
   surfaceSummary,
   type ResolvedSurfaceRange,
 } from './region.ts'
-import { allLogMessages, buildToolCallIndex, eventsToCoreMessages, extractEventText, surfaceEventsOf } from './messages.ts'
+import { allLogMessages, buildToolCallIndex, eventsToCoreMessages, extractEventText, isCheckpointNode, surfaceEventsOf } from './messages.ts'
 import { shadowedTokensViaMeter } from './host-tokens.ts'
 import { eventAtOf, sessionEventsOf } from './session-events.ts'
 import { DEFAULT_RESOLVED, type ResolvedPrompts } from './prompts.ts'
@@ -296,7 +297,59 @@ function validateContentItems(content: NonNullable<CompressArgs['content']>): vo
   if (violations.length > 0) throw new ToolArgsError(violations)
 }
 
-/** Resolve seq → kernel ref, then applyCompression and land the transaction. */
+/**
+ * Pure gate helpers for the compress tool's CURRENT-instruction-row rejection.
+ *
+ * Decision history (issue #71 review): the first draft only WARNED when a
+ * manual compress range swallowed a current injected row (F7), because the
+ * compression is safe and self-healing. The owner reversed that during PR1
+ * review: compressing a CURRENT row has NO legitimate outcome — the host
+ * re-injects the newest AGENTS.md copy unconditionally the moment it leaves
+ * the surface (presence gate, deepseek-harness
+ * packages/context/agent-instructions/src/index.ts:137/:163), so the tokens
+ * come straight back and the call is pure waste — and a hard reject keeps the
+ * manual path consistent with the system-side GC's iron rule (PR2: never
+ * clear a group's newest row). STALE copies stay compressible: removing them
+ * while the newest stays visible is the actual cleanup and triggers no
+ * re-injection. The range table (buildCompressibleSeqRanges) never offers
+ * these rows, so the gate only fires on hand-built ranges.
+ *
+ * `guardedRowsInSpan` is the overlap probe. It takes the POSITIONAL span the
+ * transaction will actually shadow (`shadowedSeqsOf`), never a numeric
+ * `start <= seq <= end` interval: the surface is locally non-monotonic after
+ * earlier replacements (a checkpoint seq spliced ahead of older residual
+ * nodes), so a tier-2 distill of two checkpoints can carry a CURRENT
+ * instruction row numerically inside its edges while the sliced span excludes
+ * it — the interval probe rejected exactly the call the nudge hands the model
+ * (issue #71 review B1). Probing the slice also keeps guard and effect in
+ * agreement: `shadowedSeqsOf` is what the transaction prices and
+ * `assertProvenance` verifies.
+ * `protectedRowRejectionNote` renders the rejection the model sees: it names
+ * the offending seqs AND the compressible slices left in the span, so the model
+ * can re-cut (or split into two calls) instead of retrying the same call.
+ * `guardedSurfaceSeqsOf` supplies the protected set.
+ */
+export function guardedRowsInSpan(guarded: ReadonlySet<number>, shadowed: readonly number[]): number[] {
+  const inSpan = new Set(shadowed)
+  return [...guarded].filter((seq) => inSpan.has(seq)).sort((a, b) => a - b)
+}
+
+export function protectedRowRejectionNote(start: number, end: number, hits: readonly number[], shadowed: readonly number[]): string {
+  const preview = hits.slice(0, 4).join(', ')
+  const more = hits.length > 4 ? ` +${hits.length - 4} more` : ''
+  const first = shadowed.indexOf(hits[0]!)
+  const last = shadowed.indexOf(hits[hits.length - 1]!)
+  const before = first > 0 ? shadowed.slice(0, first) : []
+  const after = last >= 0 && last < shadowed.length - 1 ? shadowed.slice(last + 1) : []
+  const slices = [before, after]
+    .filter((slice) => slice.length > 0)
+    .map((slice) => `${slice[0]}..${slice[slice.length - 1]}`)
+  const recovery = slices.length === 0
+    ? 'no part of this span is compressible while those rows are current — pick an OLDER span instead (acp_status lists the live ranges)'
+    : `the compressible part of this span is seq ${slices.join(' and ')} — submit them as separate content entries (or two compress calls), each with its own summary`
+  return `  seqs ${start}..${end} rejected — the span covers ${hits.length} CURRENT injected instruction row(s) (seq ${preview}${more}); the host re-injects the newest AGENTS.md copy the moment it leaves the surface, so compressing it reclaims nothing — ${recovery} (older/stale copies of the same file are fine to compress)`
+}
+
 async function handleCompress(env: ToolEnvironment, args: CompressArgs, exec: ToolRunContext): Promise<TextOutput> {
   const agent = requireAgent(exec)
   const session = agent.session
@@ -356,6 +409,15 @@ async function handleCompress(env: ToolEnvironment, args: CompressArgs, exec: To
   // Ranges whose whole span was already shadowed by earlier compressions.
   // They land as advisory warnings, never as errors or phantom blocks.
   const alreadyCompressedNotes: string[] = []
+  // Ranges rejected because they cover a CURRENT injected instruction row —
+  // hard reject before the kernel apply (supersedes the F7 warn-only draft,
+  // see protectedRowRejectionNote): the kernel never sees these ranges, so no
+  // phantom block can exist. Computed once here: the surface is stable from
+  // the orphan strip onward, the deferred compress-pair hide only touches tool
+  // events, and every accepted range lands in ONE applyCompression call at the
+  // end of the loop — so the set cannot go stale mid-batch.
+  const rejectedNotes: string[] = []
+  const guardedSeqs = guardedSurfaceSeqsOf(session)
   for (const range of args.content!) {
     const startSeq = parseBoundary(range.startSeq, byRef)
     const endSeq = parseBoundary(range.endSeq, byRef)
@@ -382,6 +444,21 @@ async function handleCompress(env: ToolEnvironment, args: CompressArgs, exec: To
       }
       throw error
     }
+    // Hard reject BEFORE the kernel: a span covering a CURRENT injected
+    // instruction row has no legitimate outcome — the host re-injects the
+    // newest copy the moment it leaves the surface (compress → re-inject loop
+    // fuel, issue #71). Stale copies pass: removing them while the newest
+    // stays visible is the real cleanup and triggers no re-injection.
+    // Probe the set that will ACTUALLY be shadowed (`shadowedSeqsOf`, the
+    // positional slice the transaction prices) rather than a numeric interval —
+    // see guardedRowsInSpan for why the interval false-positives on a locally
+    // non-monotonic surface.
+    const shadowedSpan = shadowedSeqsOf(session, resolved.start, resolved.end)
+    const instructionHits = guardedRowsInSpan(guardedSeqs, shadowedSpan)
+    if (instructionHits.length > 0) {
+      rejectedNotes.push(protectedRowRejectionNote(resolved.start, resolved.end, instructionHits, shadowedSpan))
+      continue
+    }
     // An edge on an ACTIVE block's checkpoint summary node resolves to the
     // kernel block ref (bN) — the boundary that makes applyCompression distill
     // (tier 2/3) instead of folding the summary as a plain message.
@@ -406,11 +483,13 @@ async function handleCompress(env: ToolEnvironment, args: CompressArgs, exec: To
     })
   }
 
-  // Nothing to do: every requested range was already compressed.
+  // Nothing to do: every requested range was already compressed or rejected.
   if (ranges.length === 0) {
-    const text = ['Compressed 0 block(s), ~0 tokens reclaimed.', ...alreadyCompressedNotes]
+    const text = ['Compressed 0 block(s), ~0 tokens reclaimed.', ...alreadyCompressedNotes, ...rejectedNotes]
     if (alreadyCompressedNotes.length > 0) {
       text.push('  (all requested ranges were already compressed — decompress a block to recover its originals)')
+    } else if (rejectedNotes.length > 0) {
+      text.push('  (nothing compressed — every range covered a current injected instruction row; see the rejections above)')
     }
     return { text: text.join('\n') }
   }
@@ -488,14 +567,18 @@ async function handleCompress(env: ToolEnvironment, args: CompressArgs, exec: To
     const shadowedTokens = shadowedTokensViaMeter(session, shadowed, agent.ctx)
     const tier = block.tier === 2 || block.tier === 3 ? block.tier : 1
     const parentBlockIds = compactionIdsOfKernelBlocks(session, block.directBlockIds)
+    // Provenance follows the LIVE route, not `agent.options`: after a mid-session
+    // model switch the latter is a stale snapshot (the PREVIOUS route), so the
+    // summary node would be stamped with a route the summary did not come from.
+    const { provider, model } = routeFor(agent)
     const { compactionId } = runCompactionTransaction(session, {
       start,
       end,
       shadowedSeqs: shadowed,
       summary: [{ type: 'text', text: range.summary }],
       shadowedTokenCount: shadowedTokens,
-      provider: agent.options.provider ?? '',
-      model: agent.options.model ?? '',
+      provider,
+      model,
       tier,
       kernelBlockId: block.blockId,
       ...(range.topic === undefined ? {} : { topic: range.topic }),
@@ -523,9 +606,15 @@ async function handleCompress(env: ToolEnvironment, args: CompressArgs, exec: To
   }
 
   const summaryLine = `Compressed ${applied.result.blocksCreated} block(s), ~${applied.result.tokensCompressed} tokens reclaimed.`
-  const totalSkipped = skippedRanges + alreadyCompressedNotes.length
+  const totalSkipped = skippedRanges + alreadyCompressedNotes.length + rejectedNotes.length
   const failedLines = applied.result.errors.map((error) => `  ${error}`)
-  const warningLines = [...freeWarnings.map((warning) => `  ${warning}`), ...failedLines, ...alreadyCompressedNotes, ...lines]
+  const warningLines = [
+    ...freeWarnings.map((warning) => `  ${warning}`),
+    ...failedLines,
+    ...alreadyCompressedNotes,
+    ...rejectedNotes,
+    ...lines,
+  ]
   const footer = totalSkipped > 0
     ? `  (${totalSkipped} range(s) skipped or failed — see above)`
     : ''
@@ -598,15 +687,27 @@ function roleOfEvent(event: SessionEvent): MessageRole | null {
   }
 }
 
+// The search corpus (block summaries + all shadowed originals) is a pure
+// function of the append-only log: rebuild it once per log snapshot and reuse
+// across searches until the next append (issue #133 — the per-call full
+// rebuild re-extracted and re-counted every shadowed message on every search;
+// the snapshot array is stable until the next append, see sessionEventsOf).
+const searchDocsCache = new WeakMap<readonly SessionEvent[], SearchDoc[]>()
+
 /**
  * Build the unified SearchDoc[] from the log: one block doc per ledger entry
  * (ref = compactionId, so `decompress({ blockId })` closes the loop) plus one
  * message doc per shadowed ORIGINAL (expanded through distilled parents; each
  * seq is claimed by the earliest/innermost block that covered it, mirroring
  * pi's owner map — decompress on that block recovers the original).
+ * Cached per log snapshot (see searchDocsCache). Exported for the issue #133
+ * regression tests (not part of the public API — index.ts re-exports only).
  */
-function buildSearchDocs(session: Session): SearchDoc[] {
-  const ledger = rebuildBlockLedger(sessionEventsOf(session))
+export function buildSearchDocs(session: Session): SearchDoc[] {
+  const events = sessionEventsOf(session)
+  const cached = searchDocsCache.get(events)
+  if (cached !== undefined) return cached
+  const ledger = rebuildBlockLedger(events)
   const docs: SearchDoc[] = []
   const claimed = new Set<number>()
   for (const block of ledger) {
@@ -639,6 +740,7 @@ function buildSearchDocs(session: Session): SearchDoc[] {
       })
     }
   }
+  searchDocsCache.set(events, docs)
   return docs
 }
 
@@ -703,16 +805,6 @@ interface StatusArgs {
   limit?: number
 }
 
-/** A compaction checkpoint summary node (`source.plugin === 'compact'`). These
- *  are NOT in any block's `effectiveMessageIds`, so feeding them to
- *  `buildStatusReport` would double-count the summary — once as `block.summary`
- *  (summaryTokens) and once as a visible text message (totalText). Excluded
- *  before status rendering (design §4.2 P1-3). */
-function isCheckpointEvent(event: SessionEvent): boolean {
-  if (event.type !== 'user/message') return false
-  const source = (event.data as { source?: { plugin?: string } }).source
-  return source?.plugin === 'compact'
-}
 
 async function handleStatus(env: ToolEnvironment, rawArgs: StatusArgs, exec: ToolRunContext): Promise<TextOutput> {
   // The model channel may wrap ANY tool's args under `{ arguments: {…} }`;
@@ -739,7 +831,7 @@ async function handleStatus(env: ToolEnvironment, rawArgs: StatusArgs, exec: Too
   const turn = env.kernel.processTurn({ messages: coreMessages, state, config, tokenCount })
   // Status messages = visible surface EXCLUDING checkpoint summary nodes (P1-3).
   const statusMessages = eventsToCoreMessages(
-    surface.filter((event) => !isCheckpointEvent(event)),
+    surface.filter((event) => isCheckpointNode(event) === false),
     toolNames,
   )
   // Upstream-aligned: the kernel renders the breakdown (percentages of the

@@ -9,6 +9,9 @@
  *  - E2E: a REAL engine on a bare cordis Context with an in-memory settings
  *    provider — external edits hot-apply to the live env, /acp config
  *    list/set/reset round-trips, the kill switch ignores the provider;
+ *  - regression locks added in review: the filtered `base` entry, the
+ *    seam-to-window gate, the kernelConfigFor output, provider detach
+ *    fallback, and reset preserving hand-written keys;
  *  - V1 gate: dispose-then-remount the same namespace (HMR-style reload)
  *    must not hit "settings namespace is already registered".
  */
@@ -18,6 +21,7 @@ import assert from 'node:assert/strict'
 import { Context } from '@deepseek-ai/cordis'
 import { SettingsProvider, type SettingsNamespace } from '@deepseek-ai/dsh-settings'
 import type { Agent } from '@deepseek-ai/dsh-agent'
+import { Session } from '@deepseek-ai/dsh-session'
 import {
   ACP_SETTINGS_NAMESPACE,
   AcpSettingsSchema,
@@ -29,6 +33,7 @@ import {
   SETTING_DEFAULTS,
 } from '../src/settings.ts'
 import { AcpCompactionEngine, resolveAcpConfig, type AcpConfig } from '../src/index.ts'
+import { kernelConfigFor } from '../src/config.ts'
 import { acpCommand } from '../src/commands.ts'
 import type { ToolEnvironment } from '../src/tools.ts'
 import { DEFAULT_CONTEXT_WINDOW } from '../src/window.ts'
@@ -271,5 +276,121 @@ test('M6: HMR-style remount of the same namespace does not hit duplicate registr
     assert.equal(second.engine.env.nudgeMaxContextLimitPct, 0.7)
   } finally {
     await second.fiber.dispose()
+  }
+})
+
+// ── Locks for the merge-review findings ───────────────────────────────────
+
+test('M6: installSection registers the FILTERED composition subset as `base`', async () => {
+  const root = new Context()
+  await root.plugin(MemorySettingsProvider)
+  const { fiber, engine } = await mountEngine(root, { nudgeMaxContextLimitPct: 0.66 })
+  try {
+    const descriptor = engine.env.settingsCommand?.describe()
+    assert.ok(descriptor !== undefined, 'the settings surface is available')
+    // Registering the RESOLVED snapshot instead would make every untouched key
+    // look composed (`source: base`), so /acp config reset would report a
+    // composition value the operator never wrote.
+    assert.deepEqual(descriptor.base, filterSettingsEntry({ nudgeMaxContextLimitPct: 0.66 }))
+    const list = await runAcp(engine.env, 'config')
+    assert.match(list, /nudgeMaxContextLimitPct[^\n]*base/)
+    assert.match(list, /nudgeEmergencyThresholdPct[^\n]*default/)
+  } finally {
+    await fiber.dispose()
+  }
+})
+
+test('M6: a settings edit reaches kernelConfigFor, not just the env getters', async () => {
+  const root = new Context()
+  await root.plugin(MemorySettingsProvider)
+  const { fiber, engine } = await mountEngine(root)
+  try {
+    assert.equal(kernelConfigFor(engine.env).nudge.maxContextLimitPct, 0.7)
+    const provider = root.get('settings') as MemorySettingsProvider
+    provider.publishForTest({ [ACP_SETTINGS_NAMESPACE]: { nudgeMaxContextLimitPct: 0.6 } })
+    await flushRounds()
+    assert.equal(kernelConfigFor(engine.env).nudge.maxContextLimitPct, 0.6)
+  } finally {
+    await fiber.dispose()
+  }
+})
+
+test('M6: a settings-layer autoModelContextLimit false gates the window projection', async () => {
+  const root = new Context()
+  await root.plugin(MemorySettingsProvider)
+  // Composition keeps auto detection ON — only the settings layer turns it off.
+  const { fiber, engine } = await mountEngine(root)
+  try {
+    const ctx = new Context()
+    ctx.provide('sessionProjections', {
+      snapshot: () => ({ values: { contextPressure: { contextWindow: 1000000 } } }),
+    })
+    ctx.provide('llm', {
+      resolveModelInfo: async () => ({ context: { contextWindow: 64000 } }),
+    })
+    const agent = {
+      id: 'test-session',
+      session: Session.create('test-session'),
+      options: { provider: 'test-provider', model: 'test-model' },
+      ctx,
+    } as unknown as Agent
+    // Reading the COMPOSITION value at the gate would keep consulting the
+    // projection even though the user disabled auto detection.
+    assert.equal((await engine.windowFor(agent)).source, 'projection')
+    const provider = root.get('settings') as MemorySettingsProvider
+    provider.publishForTest({ [ACP_SETTINGS_NAMESPACE]: { autoModelContextLimit: false } })
+    await flushRounds()
+    assert.notEqual((await engine.windowFor(agent)).source, 'projection')
+  } finally {
+    await fiber.dispose()
+  }
+})
+
+test('M6: a detached provider falls back to the composition values', async () => {
+  const root = new Context()
+  const providerFiber = await root.plugin(MemorySettingsProvider)
+  const { fiber, engine } = await mountEngine(root, { nudgeMaxContextLimitPct: 0.66 })
+  try {
+    const provider = root.get('settings') as MemorySettingsProvider
+    provider.publishForTest({ [ACP_SETTINGS_NAMESPACE]: { nudgeMaxContextLimitPct: 0.4 } })
+    await flushRounds()
+    assert.equal(engine.env.nudgeMaxContextLimitPct, 0.4)
+    assert.equal(engine.env.settingsCommand?.available, true)
+
+    await providerFiber.dispose()
+    await flushRounds()
+
+    // Without a disposer the engine holds the dead thunk: the command would
+    // still report available and the pct would freeze at 0.4.
+    assert.equal(engine.env.settingsCommand?.available, false)
+    assert.equal(engine.env.nudgeMaxContextLimitPct, 0.66)
+  } finally {
+    await fiber.dispose()
+  }
+})
+
+test('M6: reset keeps keys the six-key schema does not know (no silent data loss)', async () => {
+  const root = new Context()
+  await root.plugin(MemorySettingsProvider)
+  const { fiber, engine } = await mountEngine(root)
+  try {
+    const provider = root.get('settings') as MemorySettingsProvider
+    provider.publishForTest({
+      [ACP_SETTINGS_NAMESPACE]: { nudgeMaxContextLimitPct: 0.6, handWritten: 'keep-me' },
+    })
+    await flushRounds()
+
+    const reset = await runAcp(engine.env, 'config reset nudgeMaxContextLimitPct')
+    assert.match(reset, /✓/)
+    await flushRounds()
+
+    // The settings layer does not whitelist keys, so rebuilding the section
+    // from SETTING_KEYS alone would delete the operator's own entry.
+    const user = engine.env.settingsCommand?.describe()?.user
+    assert.equal(user?.handWritten, 'keep-me')
+    assert.equal(user?.nudgeMaxContextLimitPct, undefined)
+    assert.equal(engine.env.nudgeMaxContextLimitPct, 0.7)
+  } finally {
+    await fiber.dispose()
   }
 })

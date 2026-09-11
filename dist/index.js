@@ -2458,6 +2458,14 @@ function docFeatures(text) {
   }
   return f;
 }
+function setDocCacheCap(chars) {
+  capChars = Math.max(1, chars);
+  while (cachedChars > capChars && cache.size > 0) {
+    const k = cache.keys().next().value;
+    cachedChars -= k.length;
+    cache.delete(k);
+  }
+}
 var substringAlgorithm = {
   name: "substring",
   description: "Exact substring counting (original baseline). Predictable, no normalization.",
@@ -2635,12 +2643,37 @@ function makePreview(text, query, len) {
   return prefix + text.slice(start, end).trim() + suffix;
 }
 
-// src/index.ts
-import { installSettingsSection } from "@deepseek-ai/dsh-settings";
+// src/lru.ts
+var DEFAULT_SESSION_CACHE_LIMIT = 512;
+var LruMap = class extends Map {
+  maxEntries;
+  constructor(maxEntries) {
+    super();
+    this.maxEntries = Math.max(1, Math.floor(maxEntries));
+  }
+  get(key) {
+    if (!super.has(key)) return void 0;
+    const value = super.get(key);
+    super.delete(key);
+    super.set(key, value);
+    return value;
+  }
+  set(key, value) {
+    super.delete(key);
+    super.set(key, value);
+    while (this.size > this.maxEntries) {
+      const oldest = this.keys().next().value;
+      if (oldest === void 0) break;
+      super.delete(oldest);
+    }
+    return this;
+  }
+};
 
 // src/region.ts
 import { randomUUID } from "crypto";
-import { CompactionId, compactCheckpointSource } from "@deepseek-ai/dsh-compaction";
+import { CompactionId, compactCheckpointSource, toolPairingBalancedAfter, toolPairingBalancedBefore } from "@deepseek-ai/dsh-compaction";
+import { createUserMessage } from "@deepseek-ai/dsh-llm";
 
 // src/session-events.ts
 function sessionEventsOf(session) {
@@ -2653,78 +2686,6 @@ function eventAtOf(session, seq) {
   if (typeof eventAt === "function") return eventAt.call(session, seq);
   return session.events[seq];
 }
-
-// src/tool-pairing.ts
-var balanceCacheBySession = /* @__PURE__ */ new WeakMap();
-function eventDelta(event) {
-  if (event.type === "tool/result") return -1;
-  if (event.type === "assistant/message") {
-    const content = event.data.message?.content;
-    if (!Array.isArray(content)) return 0;
-    let calls = 0;
-    for (const block of content) {
-      if (block !== null && typeof block === "object" && block.type === "tool-call") calls += 1;
-    }
-    return calls;
-  }
-  return 0;
-}
-function eventForSeq(session, seq) {
-  const event = eventAtOf(session, seq);
-  if (event === void 0 || event.seq !== seq) {
-    throw new Error(`tool-pairing balance: surface seq ${seq} has no matching session event (corrupt surface)`);
-  }
-  return event;
-}
-function extendCache(session, cache2, seqs) {
-  const processed = cache2.cutBalanced.length - 1;
-  const tail = seqs.slice(processed);
-  const pendingCuts = [];
-  let inProgressToolCalls = cache2.inProgressToolCalls;
-  for (const seq of tail) {
-    inProgressToolCalls += eventDelta(eventForSeq(session, seq));
-    if (inProgressToolCalls < 0) {
-      throw new Error(`tool-pairing balance: tool/result at surface seq ${seq} has no matching tool-call (corrupt surface)`);
-    }
-    pendingCuts.push(inProgressToolCalls === 0);
-  }
-  tail.forEach((seq, offset) => cache2.indexBySeq.set(seq, processed + offset));
-  cache2.cutBalanced = cache2.cutBalanced.concat(pendingCuts);
-  cache2.inProgressToolCalls = inProgressToolCalls;
-  return cache2;
-}
-function balanceCache(session) {
-  const seqs = session.surface.nodes;
-  const generation = session.surface.replaceGeneration;
-  const cached = balanceCacheBySession.get(session);
-  if (cached === void 0 || cached.generation !== generation || cached.cutBalanced.length - 1 > seqs.length) {
-    const rebuilt = extendCache(session, {
-      generation,
-      cutBalanced: [true],
-      indexBySeq: /* @__PURE__ */ new Map(),
-      inProgressToolCalls: 0
-    }, seqs);
-    balanceCacheBySession.set(session, rebuilt);
-    return rebuilt;
-  }
-  if (cached.cutBalanced.length - 1 < seqs.length) return extendCache(session, cached, seqs);
-  return cached;
-}
-function cutBalance(cache2, seq, offset) {
-  const index = cache2.indexBySeq.get(seq);
-  const balanced = index === void 0 ? void 0 : cache2.cutBalanced[index + offset];
-  if (balanced === void 0) throw new Error(`tool-pairing balance: surface seq ${seq} not found`);
-  return balanced;
-}
-function toolPairingBalancedBefore(session, seq) {
-  return cutBalance(balanceCache(session), seq, 0);
-}
-function toolPairingBalancedAfter(session, seq) {
-  return cutBalance(balanceCache(session), seq, 1);
-}
-
-// src/region.ts
-import { createAssistantMessage, createUserMessage } from "@deepseek-ai/dsh-llm";
 
 // src/messages.ts
 function extractText(content) {
@@ -2855,6 +2816,56 @@ function extractEventText(event) {
       return "";
   }
 }
+function isCheckpointNode(event) {
+  if (event.type !== "user/message") return false;
+  const source = event.data.source;
+  return source?.plugin === "compact";
+}
+var METADATA_PLUGINS = /* @__PURE__ */ new Set([
+  "acp-nudge",
+  // nudge echo (src/nudge.ts)
+  "billion-context-dsh"
+  // compress-pair replacement stub (src/region.ts)
+]);
+var REAL_CONTENT_PLUGINS = /* @__PURE__ */ new Set([
+  "@deepseek-ai/dsh-system-prompt",
+  "user-approval",
+  "tools-ptc"
+]);
+var HOST_INSTRUCTION_KINDS = /* @__PURE__ */ new Set([
+  "agent-instructions",
+  // AGENTS.md injection (hook shape: {kind:'agent-instructions', form:'instructions'})
+  "skill-catalog"
+  // skill catalog (form:'catalog')
+]);
+function isAgentInstructionsRow(event) {
+  if (event.type !== "user/message") return false;
+  const source = event.data.source;
+  if (!source) return false;
+  return source.kind === "agent-instructions" || source.kind === "plugin" && source.plugin === "agent-instructions";
+}
+function classifySurfaceEvent(event) {
+  if (isCheckpointNode(event)) return "checkpoint";
+  if (event.type !== "user/message") return "real";
+  const source = event.data.source;
+  if (!source) return "real";
+  const kind = source.kind;
+  if (kind === "user") return "real";
+  if (kind === "plugin") {
+    if (source.plugin !== void 0 && METADATA_PLUGINS.has(source.plugin)) return "metadata";
+    if (source.plugin !== void 0 && REAL_CONTENT_PLUGINS.has(source.plugin)) return "real";
+    return "instruction";
+  }
+  if (kind !== void 0 && HOST_INSTRUCTION_KINDS.has(kind)) return "instruction";
+  return "real";
+}
+function isRealUserTurn(event) {
+  if (event.type !== "user/message") return false;
+  if (classifySurfaceEvent(event) !== "real") return false;
+  const source = event.data.source;
+  if (source?.plugin !== void 0 && REAL_CONTENT_PLUGINS.has(source.plugin)) return false;
+  return source?.kind !== "subagent-report" && source?.kind !== "subagent-settled";
+}
 
 // src/host-tokens.ts
 import { deriveEventMessage } from "@deepseek-ai/dsh-session";
@@ -2934,6 +2945,55 @@ function shadowedTokensViaMeter(session, seqs, ctx) {
   return shadowedHostTokens(session, seqs);
 }
 
+// src/block-ledger.ts
+var ACP_BLOCK_LEDGER_MARKER = "$dshAcpBlockLedger";
+var ACP_BLOCK_LEDGER_VERSION = 1;
+function isStringArray(value) {
+  return Array.isArray(value) && value.every((item) => typeof item === "string");
+}
+function encodeAcpBlockLedger(payload) {
+  const obj = { [ACP_BLOCK_LEDGER_MARKER]: ACP_BLOCK_LEDGER_VERSION };
+  if (payload.tier !== void 0) obj.tier = payload.tier;
+  if (payload.kernelBlockId !== void 0) obj.kernelBlockId = payload.kernelBlockId;
+  if (payload.topic !== void 0) obj.topic = payload.topic;
+  if (payload.parentBlockIds !== void 0 && payload.parentBlockIds.length > 0) {
+    obj.parentBlockIds = [...payload.parentBlockIds];
+  }
+  if (payload.directMessageIds !== void 0) obj.directMessageIds = [...payload.directMessageIds];
+  if (payload.effectiveMessageIds !== void 0) obj.effectiveMessageIds = [...payload.effectiveMessageIds];
+  return [{ type: "text", text: JSON.stringify(obj) }];
+}
+function decodeAcpBlockLedger(rawOutput) {
+  try {
+    if (!Array.isArray(rawOutput)) return {};
+    for (const block of rawOutput) {
+      if (block === null || typeof block !== "object") continue;
+      const candidate = block;
+      if (candidate.type !== "text" || typeof candidate.text !== "string") continue;
+      let parsed;
+      try {
+        parsed = JSON.parse(candidate.text);
+      } catch {
+        continue;
+      }
+      if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) continue;
+      const record = parsed;
+      if (record[ACP_BLOCK_LEDGER_MARKER] !== ACP_BLOCK_LEDGER_VERSION) continue;
+      const result = {};
+      if (record.tier === 1 || record.tier === 2 || record.tier === 3) result.tier = record.tier;
+      if (typeof record.kernelBlockId === "string") result.kernelBlockId = record.kernelBlockId;
+      if (typeof record.topic === "string") result.topic = record.topic;
+      if (isStringArray(record.parentBlockIds)) result.parentBlockIds = [...record.parentBlockIds];
+      if (isStringArray(record.directMessageIds)) result.directMessageIds = [...record.directMessageIds];
+      if (isStringArray(record.effectiveMessageIds)) result.effectiveMessageIds = [...record.effectiveMessageIds];
+      return result;
+    }
+    return {};
+  } catch {
+    return {};
+  }
+}
+
 // src/region.ts
 function findOpenTurn(events) {
   let open = null;
@@ -2992,7 +3052,10 @@ function recoverStaleRange(session, start, end) {
     return { kind: "unresolvable", failedEdge };
   }
   const liveInside = session.surface.nodes.filter((seq) => seq >= start && seq <= end).sort((a, b) => a - b);
-  const plain = liveInside.filter((seq) => !isCheckpointNode(eventAtOf(session, seq)));
+  const plain = liveInside.filter((seq) => {
+    const event = eventAtOf(session, seq);
+    return !isCheckpointNode(event) && !isSystemNode(event);
+  });
   if (plain.length === 0) {
     const coveringBlockIds = rebuildBlockLedger(sessionEventsOf(session)).filter((entry) => entry.shadowedSeqs.some((seq) => seq >= start && seq <= end)).map((entry) => entry.blockId);
     return { kind: "already-compressed", coveringBlockIds };
@@ -3034,8 +3097,14 @@ function resolveSurfaceRange(session, start, end) {
   if (start > end) {
     throw new Error(`billion-context-dsh: reversed range ${start}..${end}`);
   }
-  const cleanBefore = (index) => toolPairingBalancedBefore(session, nodes[index]) && hasPlainRef(session, nodes[index]);
-  const cleanAfter = (index) => toolPairingBalancedAfter(session, nodes[index]) && hasPlainRef(session, nodes[index]);
+  const cleanBefore = (index) => {
+    const event = eventAtOf(session, nodes[index]);
+    return event !== void 0 && !isSystemNode(event) && toolPairingBalancedBefore(session, nodes[index]) && hasPlainRef(session, nodes[index]);
+  };
+  const cleanAfter = (index) => {
+    const event = eventAtOf(session, nodes[index]);
+    return event !== void 0 && !isSystemNode(event) && toolPairingBalancedAfter(session, nodes[index]) && hasPlainRef(session, nodes[index]);
+  };
   let startIdx = requestedStartIdx;
   let endIdx = requestedEndIdx;
   while (startIdx <= endIdx && !cleanBefore(startIdx)) {
@@ -3092,6 +3161,14 @@ function runCompactionTransaction(session, input) {
   }
   try {
     seqs.push(session.append("compaction/start", { compactionId, turn }).seq);
+    const ledgerPayload = {
+      tier: input.tier ?? 1,
+      ...input.kernelBlockId === void 0 ? {} : { kernelBlockId: input.kernelBlockId },
+      ...input.topic === void 0 ? {} : { topic: input.topic },
+      ...input.parentBlockIds === void 0 || input.parentBlockIds.length === 0 ? {} : { parentBlockIds: [...input.parentBlockIds] },
+      ...input.directMessageIds === void 0 ? {} : { directMessageIds: [...input.directMessageIds] },
+      ...input.effectiveMessageIds === void 0 ? {} : { effectiveMessageIds: [...input.effectiveMessageIds] }
+    };
     seqs.push(session.append("compaction/summary", {
       compactionId,
       summary: input.summary,
@@ -3100,19 +3177,14 @@ function runCompactionTransaction(session, input) {
       shadowedTokenCount: input.shadowedTokenCount,
       provider: input.provider,
       model: input.model,
-      tier: input.tier ?? 1,
-      ...input.kernelBlockId === void 0 ? {} : { kernelBlockId: input.kernelBlockId },
-      ...input.topic === void 0 ? {} : { topic: input.topic },
-      ...input.parentBlockIds === void 0 || input.parentBlockIds.length === 0 ? {} : { parentBlockIds: [...input.parentBlockIds] },
-      ...input.directMessageIds === void 0 ? {} : { directMessageIds: [...input.directMessageIds] },
-      ...input.effectiveMessageIds === void 0 ? {} : { effectiveMessageIds: [...input.effectiveMessageIds] }
+      rawOutput: encodeAcpBlockLedger(ledgerPayload)
     }).seq);
     const message = createUserMessage({
       content: input.summary,
       source: compactCheckpointSource(compactionId)
     });
     seqs.push(session.append("user/message", message, {
-      surfaceOp: { op: "replace", start: input.start, end: input.end },
+      surfaceOp: { op: "replace", startSeq: input.start, endSeq: input.end },
       sourceEventSeqs: [...input.shadowedSeqs]
     }).seq);
     seqs.push(session.append("compaction/end", { compactionId, turn }).seq);
@@ -3126,15 +3198,21 @@ function runCompactionTransaction(session, input) {
   }
   return { compactionId, seqs };
 }
-function summarySeqOfCompaction(events, compactionId) {
+function summarySeqIndex(events) {
+  const index = /* @__PURE__ */ new Map();
   for (const event of events) {
     if (event.type !== "user/message") continue;
     const source = event.data.source;
-    if (source?.plugin === "compact" && source.compactionId === compactionId) return event.seq;
+    const compactionId = source?.plugin === "compact" ? source.compactionId : void 0;
+    if (compactionId !== void 0 && !index.has(compactionId)) index.set(compactionId, event.seq);
   }
-  return null;
+  return index;
 }
+var blockLedgerCache = /* @__PURE__ */ new WeakMap();
 function rebuildBlockLedger(events) {
+  const cached = blockLedgerCache.get(events);
+  if (cached !== void 0 && cached.len === events.length) return cached.ledger;
+  const summarySeqs = summarySeqIndex(events);
   const ledger = [];
   for (const event of events) {
     if (event.type !== "compaction/summary") continue;
@@ -3147,28 +3225,32 @@ function rebuildBlockLedger(events) {
         if (original !== void 0) shadowedTokenCount += defaultCountTokens(extractEventText(original));
       }
     }
-    const tier = data.tier === 2 || data.tier === 3 ? data.tier : 1;
-    const parentBlockIds = Array.isArray(data.parentBlockIds) ? [...data.parentBlockIds] : [];
-    const directMessageIds = Array.isArray(data.directMessageIds) ? [...data.directMessageIds] : void 0;
-    const effectiveMessageIds = Array.isArray(data.effectiveMessageIds) ? [...data.effectiveMessageIds] : void 0;
-    const summarySeq = summarySeqOfCompaction(events, data.compactionId);
+    const embedded = decodeAcpBlockLedger(data.rawOutput);
+    const tier = embedded.tier ?? (data.tier === 2 || data.tier === 3 ? data.tier : 1);
+    const parentBlockIds = embedded.parentBlockIds ? [...embedded.parentBlockIds] : Array.isArray(data.parentBlockIds) ? [...data.parentBlockIds] : [];
+    const directMessageIds = embedded.directMessageIds ? [...embedded.directMessageIds] : Array.isArray(data.directMessageIds) ? [...data.directMessageIds] : void 0;
+    const effectiveMessageIds = embedded.effectiveMessageIds ? [...embedded.effectiveMessageIds] : Array.isArray(data.effectiveMessageIds) ? [...data.effectiveMessageIds] : void 0;
+    const topic = embedded.topic ?? (typeof data.topic === "string" ? data.topic : void 0);
+    const kernelBlockId = embedded.kernelBlockId ?? (typeof data.kernelBlockId === "string" ? data.kernelBlockId : void 0);
+    const summarySeq = summarySeqs.get(data.compactionId) ?? null;
     ledger.push({
       blockId: data.compactionId,
       summary: extractText(data.summary),
-      ...typeof data.topic === "string" ? { topic: data.topic } : {},
+      ...topic === void 0 ? {} : { topic },
       shadowedSeqs: [...data.shadowedSeqs],
       shadowedTokenCount,
       start: data.shadowedRange.start,
       end: data.shadowedRange.end,
       tier,
       parentBlockIds,
-      ...typeof data.kernelBlockId === "string" ? { kernelBlockId: data.kernelBlockId } : {},
+      ...kernelBlockId === void 0 ? {} : { kernelBlockId },
       ...summarySeq === null ? {} : { summarySeq },
       ...directMessageIds === void 0 ? {} : { directMessageIds },
       ...effectiveMessageIds === void 0 ? {} : { effectiveMessageIds },
       createdAt: event.time
     });
   }
+  blockLedgerCache.set(events, { len: events.length, ledger });
   return ledger;
 }
 function isToolEvent(event) {
@@ -3177,10 +3259,8 @@ function isToolEvent(event) {
   const content = event.data.message?.content;
   return Array.isArray(content) && content.some((block) => block?.type === "tool-call");
 }
-function isCheckpointNode(event) {
-  if (event.type !== "user/message") return false;
-  const source = event.data.source;
-  return source?.plugin === "compact";
+function isSystemNode(event) {
+  return event.type === "system/message";
 }
 function toolCallIdsOfEvent(event) {
   if (event.type !== "assistant/message") return [];
@@ -3194,17 +3274,8 @@ function toolCallIdsOfEvent(event) {
   }
   return ids;
 }
-function assistantProviderModel(event) {
-  if (event.type === "assistant/message") {
-    const message = event.data.message;
-    return {
-      provider: typeof message?.source?.provider === "string" ? message.source.provider : "billion-context-dsh",
-      model: typeof message?.source?.model === "string" ? message.source.model : "surface-prune"
-    };
-  }
-  return { provider: "billion-context-dsh", model: "surface-prune" };
-}
-function hideSurfaceSeqs(session, seqs, provider, model, text, priceEvent = hostPriceEvent) {
+var PRUNE_NOTE = "(removed by context management)";
+function hideSurfaceSeqs(session, seqs, text, priceEvent = hostPriceEvent) {
   if (seqs.length === 0) return;
   const start = seqs[0];
   const end = seqs[seqs.length - 1];
@@ -3218,22 +3289,12 @@ function hideSurfaceSeqs(session, seqs, provider, model, text, priceEvent = host
     shadowedSeqs: [...seqs],
     shadowedTokenCount
   });
-  if (text !== void 0) {
-    session.append("user/message", createUserMessage({
-      content: [{ type: "text", text }],
-      source: { kind: "plugin", plugin: "billion-context-dsh" }
-    }), {
-      surfaceOp: { op: "replace", start, end },
-      sourceEventSeqs: [...seqs]
-    });
-    return;
-  }
-  session.append("assistant/message", {
-    turn: findOpenTurn(sessionEventsOf(session)) ?? 0,
-    step: 0,
-    message: createAssistantMessage({ content: [], source: { provider, model } })
-  }, {
-    surfaceOp: { op: "replace", start, end },
+  const body = text !== void 0 && text.trim().length > 0 ? text : PRUNE_NOTE;
+  session.append("user/message", createUserMessage({
+    content: [{ type: "text", text: body }],
+    source: { kind: "plugin", plugin: "billion-context-dsh" }
+  }), {
+    surfaceOp: { op: "replace", startSeq: start, endSeq: end },
     sourceEventSeqs: [...seqs]
   });
 }
@@ -3264,10 +3325,9 @@ function hideCompressToolPair(session, callId, resultSeq) {
   const startIdx = nodes.indexOf(callSeq);
   const endIdx = nodes.indexOf(resolvedResultSeq);
   if (startIdx < 0 || endIdx < 0 || endIdx - startIdx !== 1) return false;
-  const { provider, model } = assistantProviderModel(events[callSeq]);
   const resultEvent = events[resolvedResultSeq];
   const resultText = resultEvent === void 0 ? "" : extractEventText(resultEvent);
-  hideSurfaceSeqs(session, [callSeq, resolvedResultSeq], provider, model, resultText.trim().length > 0 ? resultText : void 0);
+  hideSurfaceSeqs(session, [callSeq, resolvedResultSeq], resultText);
   return true;
 }
 function stripOrphanedSurfaceToolMessages(session, inFlightCallIds = /* @__PURE__ */ new Set()) {
@@ -3335,10 +3395,8 @@ function stripOrphanedSurfaceToolMessages(session, inFlightCallIds = /* @__PURE_
   const hidden = [...hiddenSet].sort((a, b) => a - b);
   let count = 0;
   for (const seq of hidden) {
-    const event = eventAtOf(session, seq);
-    if (event === void 0) continue;
-    const { provider, model } = assistantProviderModel(event);
-    hideSurfaceSeqs(session, [seq], provider, model);
+    if (eventAtOf(session, seq) === void 0) continue;
+    hideSurfaceSeqs(session, [seq]);
     count += 1;
   }
   return count;
@@ -3366,6 +3424,32 @@ function deferCompressPairHide(session, callId, resultSeq, onError) {
     }
   });
 }
+function newestInstructionSeqsOf(session) {
+  const newest = /* @__PURE__ */ new Map();
+  const events = sessionEventsOf(session);
+  for (let seq = 0; seq < events.length; seq += 1) {
+    const event = events[seq];
+    if (event === void 0 || !isAgentInstructionsRow(event)) continue;
+    const source = event.data.source;
+    const changes = Array.isArray(source?.changes) ? source.changes : [];
+    const scopes = changes.map((change) => typeof change?.scope === "string" ? change.scope : "").filter((scope) => scope.length > 0);
+    if (scopes.length === 0) {
+      continue;
+    }
+    for (const scope of scopes) newest.set(scope, seq);
+  }
+  return new Set(newest.values());
+}
+function guardedSurfaceSeqsOf(session) {
+  const guarded = /* @__PURE__ */ new Set();
+  const newestInstructions = newestInstructionSeqsOf(session);
+  for (const seq of session.surface.nodes) {
+    const event = eventAtOf(session, seq);
+    if (event === void 0) continue;
+    if (isAgentInstructionsRow(event) && newestInstructions.has(seq)) guarded.add(seq);
+  }
+  return guarded;
+}
 function buildCompressibleSeqRanges(session, opts = {}) {
   stripOrphanedSurfaceToolMessages(session);
   const nodes = session.surface.nodes;
@@ -3376,11 +3460,12 @@ function buildCompressibleSeqRanges(session, opts = {}) {
   }
   for (let index = nodes.length - 1; index >= 0; index -= 1) {
     const event = eventAtOf(session, nodes[index]);
-    if (event?.type === "user/message" && !isCheckpointNode(event)) {
+    if (event !== void 0 && isRealUserTurn(event)) {
       protectedSeqs.add(nodes[index]);
       break;
     }
   }
+  for (const seq of newestInstructionSeqsOf(session)) protectedSeqs.add(seq);
   const raw = [];
   let cur = null;
   const flush = () => {
@@ -3389,7 +3474,11 @@ function buildCompressibleSeqRanges(session, opts = {}) {
   };
   for (const seq of nodes) {
     const event = eventAtOf(session, seq);
-    if (event === void 0 || protectedSeqs.has(seq) || isCheckpointNode(event)) {
+    if (event === void 0 || protectedSeqs.has(seq) || isCheckpointNode(event) || isSystemNode(event)) {
+      flush();
+      continue;
+    }
+    if (classifySurfaceEvent(event) === "instruction") {
       flush();
       continue;
     }
@@ -3578,8 +3667,29 @@ function nextBlockIdAfter(events) {
   }
   return max + 1;
 }
+function nextRunIdAfter(blocks) {
+  let max = 0;
+  for (const block of blocks) {
+    const num = Number(block.runId.slice(1));
+    if (Number.isInteger(num)) max = Math.max(max, num);
+  }
+  return max + 1;
+}
 var AcpStateStore = class {
-  states = /* @__PURE__ */ new Map();
+  /**
+   * Live kernel states, capped by an LRU policy (issue #113): once the cap is
+   * reached the coldest session's state is dropped, and its next access
+   * rehydrates through stateFor's log-rebuild path below. Rehydration is
+   * deterministic — bN ids are recorded in the durable event or synthesised
+   * in ledger order, and run ids continue after the rehydrated max — so block
+   * identity survives eviction exactly as it survives a restart. Kernel
+   * fields that reset on eviction (tokenSnapshot, nudge cadence, stats
+   * counters) all self-heal on the session's next turn.
+   */
+  states;
+  constructor(limit = DEFAULT_SESSION_CACHE_LIMIT) {
+    this.states = new LruMap(limit);
+  }
   /** Kernel state for one session, initialised on first access. */
   stateFor(session) {
     const id = session.id;
@@ -3590,6 +3700,7 @@ var AcpStateStore = class {
     if (events.some((event) => event.type === "compaction/summary")) {
       state.blocks = rebuildKernelBlocks(events);
       state.nextBlockId = nextBlockIdAfter(events);
+      state.nextRunId = nextRunIdAfter(state.blocks);
     }
     this.states.set(id, state);
     return state;
@@ -3796,22 +3907,63 @@ function rangeTable(session, prompts = DEFAULT_RESOLVED) {
 function measuredTokenCount(agent, coreMessages) {
   return resolveTokenCount(agent, coreMessages);
 }
-function buildNudge(agent, env, lastNudgeTurn) {
+function computeSurfaceBreakdown(state, messages, total, growth) {
+  let system = 0;
+  let tool = 0;
+  let code = 0;
+  let text = 0;
+  for (const message of messages) {
+    const tokens = defaultCountTokens(message.text ?? "");
+    if (message.contentType === "tool-call" || message.contentType === "tool-result") {
+      tool += tokens;
+    } else if (message.role === "system") {
+      system += tokens;
+    } else if ((message.text ?? "").includes("```")) {
+      code += tokens;
+    } else {
+      text += tokens;
+    }
+  }
+  let summaries = 0;
+  for (const block of state.blocks) {
+    if (block.active) summaries += defaultCountTokens(block.summary);
+  }
+  return { system, tool, summaries, code, text, total, growth };
+}
+var EMERGENCY_NUDGE_MAX_PER_TURN = 3;
+function buildNudge(agent, env, lastNudgeTurn, emergencyNudges, onEmergencyCapHit) {
   const session = agent.session;
   const state = env.store.stateFor(session);
   const coreMessages = allLogMessages(session);
-  const surfaceMessages = eventsToCoreMessages(surfaceEventsOf(session));
+  const surfaceEvents = surfaceEventsOf(session);
+  const surfaceMessages = eventsToCoreMessages(surfaceEvents);
   const tokenCount = measuredTokenCount(agent, surfaceMessages);
   const config = kernelConfigFor(env);
   const turn = env.kernel.processTurn({ messages: coreMessages, state, config, tokenCount });
   env.store.set(session, turn.state);
   const nudge = turn.nudge;
   if (nudge === void 0 || !nudge.shouldInject) return null;
+  const statusMessages = eventsToCoreMessages(
+    surfaceEvents.filter((event) => isCheckpointNode(event) === false)
+  );
+  nudge.contextBreakdown = computeSurfaceBreakdown(turn.state, statusMessages, tokenCount, nudge.contextBreakdown?.growth ?? 0);
   const emergency = nudge.breakdown?.emergencyOverride === 1;
   const turnNumber = findOpenTurn(sessionEventsOf(session)) ?? 0;
-  const alreadyShown = !emergency && lastNudgeTurn.get(session.id) === turnNumber;
-  if (alreadyShown) return null;
-  lastNudgeTurn.set(session.id, turnNumber);
+  if (!emergency) {
+    if (lastNudgeTurn.get(session.id) === turnNumber) return null;
+    lastNudgeTurn.set(session.id, turnNumber);
+  } else {
+    const record = emergencyNudges.get(session.id);
+    if (record !== void 0 && record.turn === turnNumber) {
+      if (record.count >= EMERGENCY_NUDGE_MAX_PER_TURN) {
+        onEmergencyCapHit?.();
+        return null;
+      }
+      record.count += 1;
+    } else {
+      emergencyNudges.set(session.id, { turn: turnNumber, count: 1 });
+    }
+  }
   const text = buildNudgeText(nudge, emergency, session, env.prompts);
   const message = createUserMessage2({
     content: [{ type: "text", text }],
@@ -3923,6 +4075,64 @@ function renderNudgeFromTemplates(nudge, emergency, session, prompts) {
   }
   if (prompts.nudge.tip !== "") parts.push("", prompts.nudge.tip);
   return parts.join("\n");
+}
+
+// src/window.ts
+var DEFAULT_CONTEXT_WINDOW = 128e3;
+function windowSourceLabel(window) {
+  if (window.source === "explicit") return "configured";
+  if (window.source === "projection") {
+    return `session projection current route (auto-refreshes on model switch)`;
+  }
+  if (window.source === "auto") {
+    return `auto-detected from ${window.provider ?? "?"}/${window.model ?? "?"}`;
+  }
+  if (window.probeFailed === true) return "default (auto-detection failed \u2014 restart to re-probe)";
+  return "default (auto-detection unavailable)";
+}
+function projectedContextWindow(agent) {
+  const projections = agent.ctx?.get?.("sessionProjections");
+  const window = projections?.snapshot?.(agent.session)?.values?.contextPressure?.contextWindow;
+  if (typeof window === "number" && Number.isInteger(window) && window > 0) return window;
+  return null;
+}
+function liveRoute(agent) {
+  let rc;
+  try {
+    rc = agent.session.requestContext();
+  } catch {
+    return null;
+  }
+  if (rc === void 0 || rc === null) return null;
+  const { provider, model } = rc;
+  if (typeof provider !== "string" || provider === "") return null;
+  if (typeof model !== "string" || model === "") return null;
+  return { provider, model };
+}
+function routeFor(agent) {
+  const live = liveRoute(agent);
+  return {
+    provider: live?.provider ?? agent.options.provider ?? "",
+    model: live?.model ?? agent.options.model ?? ""
+  };
+}
+async function probeModelWindow(agent, provider, model) {
+  const llm = agent.ctx?.get?.("llm");
+  if (llm?.resolveModelInfo === void 0) return { contextWindow: null, outputReservation: null };
+  try {
+    const info = await llm.resolveModelInfo(provider, model);
+    const window = info?.context?.contextWindow;
+    const cap = info?.defaultMaxTokens;
+    return {
+      contextWindow: typeof window === "number" && Number.isInteger(window) && window > 0 ? window : null,
+      outputReservation: typeof cap === "number" && Number.isInteger(cap) && cap > 0 ? cap : null
+    };
+  } catch {
+    return { contextWindow: null, outputReservation: null };
+  }
+}
+async function detectContextWindow(agent, provider, model) {
+  return (await probeModelWindow(agent, provider, model)).contextWindow;
 }
 
 // src/tools.ts
@@ -4072,6 +4282,21 @@ function validateContentItems(content) {
   });
   if (violations.length > 0) throw new ToolArgsError(violations);
 }
+function guardedRowsInSpan(guarded, shadowed) {
+  const inSpan = new Set(shadowed);
+  return [...guarded].filter((seq) => inSpan.has(seq)).sort((a, b) => a - b);
+}
+function protectedRowRejectionNote(start, end, hits, shadowed) {
+  const preview = hits.slice(0, 4).join(", ");
+  const more = hits.length > 4 ? ` +${hits.length - 4} more` : "";
+  const first = shadowed.indexOf(hits[0]);
+  const last = shadowed.indexOf(hits[hits.length - 1]);
+  const before = first > 0 ? shadowed.slice(0, first) : [];
+  const after = last >= 0 && last < shadowed.length - 1 ? shadowed.slice(last + 1) : [];
+  const slices = [before, after].filter((slice) => slice.length > 0).map((slice) => `${slice[0]}..${slice[slice.length - 1]}`);
+  const recovery = slices.length === 0 ? "no part of this span is compressible while those rows are current \u2014 pick an OLDER span instead (acp_status lists the live ranges)" : `the compressible part of this span is seq ${slices.join(" and ")} \u2014 submit them as separate content entries (or two compress calls), each with its own summary`;
+  return `  seqs ${start}..${end} rejected \u2014 the span covers ${hits.length} CURRENT injected instruction row(s) (seq ${preview}${more}); the host re-injects the newest AGENTS.md copy the moment it leaves the surface, so compressing it reclaims nothing \u2014 ${recovery} (older/stale copies of the same file are fine to compress)`;
+}
 async function handleCompress(env, args, exec) {
   const agent = requireAgent(exec);
   const session = agent.session;
@@ -4096,6 +4321,8 @@ async function handleCompress(env, args, exec) {
   validateContentItems(args.content);
   const ranges = [];
   const alreadyCompressedNotes = [];
+  const rejectedNotes = [];
+  const guardedSeqs = guardedSurfaceSeqsOf(session);
   for (const range of args.content) {
     const startSeq = parseBoundary2(range.startSeq, byRef);
     const endSeq = parseBoundary2(range.endSeq, byRef);
@@ -4112,6 +4339,12 @@ async function handleCompress(env, args, exec) {
         continue;
       }
       throw error;
+    }
+    const shadowedSpan = shadowedSeqsOf(session, resolved.start, resolved.end);
+    const instructionHits = guardedRowsInSpan(guardedSeqs, shadowedSpan);
+    if (instructionHits.length > 0) {
+      rejectedNotes.push(protectedRowRejectionNote(resolved.start, resolved.end, instructionHits, shadowedSpan));
+      continue;
     }
     const startBlockRef = blockRefForSummarySeq(session, resolved.start);
     const endBlockRef = blockRefForSummarySeq(session, resolved.end);
@@ -4133,9 +4366,11 @@ async function handleCompress(env, args, exec) {
     });
   }
   if (ranges.length === 0) {
-    const text = ["Compressed 0 block(s), ~0 tokens reclaimed.", ...alreadyCompressedNotes];
+    const text = ["Compressed 0 block(s), ~0 tokens reclaimed.", ...alreadyCompressedNotes, ...rejectedNotes];
     if (alreadyCompressedNotes.length > 0) {
       text.push("  (all requested ranges were already compressed \u2014 decompress a block to recover its originals)");
+    } else if (rejectedNotes.length > 0) {
+      text.push("  (nothing compressed \u2014 every range covered a current injected instruction row; see the rejections above)");
     }
     return { text: text.join("\n") };
   }
@@ -4188,14 +4423,15 @@ async function handleCompress(env, args, exec) {
     const shadowedTokens = shadowedTokensViaMeter(session, shadowed, agent.ctx);
     const tier = block.tier === 2 || block.tier === 3 ? block.tier : 1;
     const parentBlockIds = compactionIdsOfKernelBlocks(session, block.directBlockIds);
+    const { provider, model } = routeFor(agent);
     const { compactionId } = runCompactionTransaction(session, {
       start,
       end,
       shadowedSeqs: shadowed,
       summary: [{ type: "text", text: range.summary }],
       shadowedTokenCount: shadowedTokens,
-      provider: agent.options.provider ?? "",
-      model: agent.options.model ?? "",
+      provider,
+      model,
       tier,
       kernelBlockId: block.blockId,
       ...range.topic === void 0 ? {} : { topic: range.topic },
@@ -4214,9 +4450,15 @@ async function handleCompress(env, args, exec) {
     );
   }
   const summaryLine = `Compressed ${applied.result.blocksCreated} block(s), ~${applied.result.tokensCompressed} tokens reclaimed.`;
-  const totalSkipped = skippedRanges + alreadyCompressedNotes.length;
+  const totalSkipped = skippedRanges + alreadyCompressedNotes.length + rejectedNotes.length;
   const failedLines = applied.result.errors.map((error) => `  ${error}`);
-  const warningLines = [...freeWarnings.map((warning) => `  ${warning}`), ...failedLines, ...alreadyCompressedNotes, ...lines];
+  const warningLines = [
+    ...freeWarnings.map((warning) => `  ${warning}`),
+    ...failedLines,
+    ...alreadyCompressedNotes,
+    ...rejectedNotes,
+    ...lines
+  ];
   const footer = totalSkipped > 0 ? `  (${totalSkipped} range(s) skipped or failed \u2014 see above)` : "";
   return { text: `${summaryLine}
 ${[...warningLines, footer].filter((line) => line !== "").join("\n")}` };
@@ -4272,8 +4514,12 @@ function roleOfEvent(event) {
       return null;
   }
 }
+var searchDocsCache = /* @__PURE__ */ new WeakMap();
 function buildSearchDocs(session) {
-  const ledger = rebuildBlockLedger(sessionEventsOf(session));
+  const events = sessionEventsOf(session);
+  const cached = searchDocsCache.get(events);
+  if (cached !== void 0) return cached;
+  const ledger = rebuildBlockLedger(events);
   const docs = [];
   const claimed = /* @__PURE__ */ new Set();
   for (const block of ledger) {
@@ -4306,6 +4552,7 @@ function buildSearchDocs(session) {
       });
     }
   }
+  searchDocsCache.set(events, docs);
   return docs;
 }
 function handleSearch(_env, rawArgs, exec) {
@@ -4351,11 +4598,6 @@ var statusParameters = {
     description: "Cap on rows or blocks shown (default 30)."
   }
 };
-function isCheckpointEvent(event) {
-  if (event.type !== "user/message") return false;
-  const source = event.data.source;
-  return source?.plugin === "compact";
-}
 async function handleStatus(env, rawArgs, exec) {
   const args = unwrapEnvelope(rawArgs);
   const agent = requireAgent(exec);
@@ -4370,7 +4612,7 @@ async function handleStatus(env, rawArgs, exec) {
   const config = kernelConfigFor({ ...env, modelContextLimit: window.limit });
   const turn = env.kernel.processTurn({ messages: coreMessages, state, config, tokenCount });
   const statusMessages = eventsToCoreMessages(
-    surface.filter((event) => !isCheckpointEvent(event)),
+    surface.filter((event) => isCheckpointNode(event) === false),
     toolNames
   );
   const report = buildStatusReport(turn.state, statusMessages, defaultCountTokens, args);
@@ -4434,152 +4676,6 @@ function makeTools(env) {
 }
 
 // src/commands.ts
-import { SettingsConflictError } from "@deepseek-ai/dsh-settings";
-
-// src/settings.ts
-import z from "@deepseek-ai/schemastery";
-import {
-  settingsNamespace
-} from "@deepseek-ai/dsh-settings";
-var ACP_SETTINGS_NAMESPACE = settingsNamespace("compaction-acp");
-var SETTINGS_KEYS = [
-  "modelContextLimit",
-  "autoModelContextLimit",
-  "nudgeMinContextLimitPct",
-  "nudgeMaxContextLimitPct",
-  "nudgeEmergencyThresholdPct",
-  "autoNudge"
-];
-var SETTING_DEFAULTS = {
-  autoModelContextLimit: true,
-  nudgeMaxContextLimitPct: 0.7,
-  nudgeEmergencyThresholdPct: 0.85,
-  autoNudge: true
-};
-function filterSettingsEntry(entry) {
-  return {
-    ...entry.modelContextLimit !== void 0 ? { modelContextLimit: entry.modelContextLimit } : {},
-    ...entry.autoModelContextLimit !== void 0 ? { autoModelContextLimit: entry.autoModelContextLimit } : {},
-    ...entry.nudgeMinContextLimitPct !== void 0 ? { nudgeMinContextLimitPct: entry.nudgeMinContextLimitPct } : {},
-    ...entry.nudgeMaxContextLimitPct !== void 0 ? { nudgeMaxContextLimitPct: entry.nudgeMaxContextLimitPct } : {},
-    ...entry.nudgeEmergencyThresholdPct !== void 0 ? { nudgeEmergencyThresholdPct: entry.nudgeEmergencyThresholdPct } : {},
-    ...entry.autoNudge !== void 0 ? { autoNudge: entry.autoNudge } : {}
-  };
-}
-function resolveAcpSettings(input) {
-  return {
-    modelContextLimit: input.modelContextLimit,
-    autoModelContextLimit: input.autoModelContextLimit ?? SETTING_DEFAULTS.autoModelContextLimit,
-    nudgeMinContextLimitPct: input.nudgeMinContextLimitPct,
-    nudgeMaxContextLimitPct: input.nudgeMaxContextLimitPct ?? SETTING_DEFAULTS.nudgeMaxContextLimitPct,
-    nudgeEmergencyThresholdPct: input.nudgeEmergencyThresholdPct ?? SETTING_DEFAULTS.nudgeEmergencyThresholdPct,
-    autoNudge: input.autoNudge ?? SETTING_DEFAULTS.autoNudge
-  };
-}
-var AcpSettingsSchema = z.object({
-  modelContextLimit: z.number().step(1).min(1),
-  autoModelContextLimit: z.boolean().default(SETTING_DEFAULTS.autoModelContextLimit),
-  nudgeMinContextLimitPct: z.number().min(0).max(1),
-  nudgeMaxContextLimitPct: z.number().min(0).max(1).default(SETTING_DEFAULTS.nudgeMaxContextLimitPct),
-  nudgeEmergencyThresholdPct: z.number().min(0).max(1).default(SETTING_DEFAULTS.nudgeEmergencyThresholdPct),
-  autoNudge: z.boolean().default(SETTING_DEFAULTS.autoNudge)
-});
-function describeSettingsChange(prev, next) {
-  const warnings = [];
-  if (next.nudgeMinContextLimitPct !== void 0 && next.nudgeMinContextLimitPct >= next.nudgeMaxContextLimitPct) {
-    warnings.push(
-      `nudgeMinContextLimitPct (${next.nudgeMinContextLimitPct}) >= nudgeMaxContextLimitPct (${next.nudgeMaxContextLimitPct}) \u2014 the lower bound never engages`
-    );
-  }
-  if (next.nudgeMaxContextLimitPct >= next.nudgeEmergencyThresholdPct) {
-    warnings.push(
-      `nudgeMaxContextLimitPct (${next.nudgeMaxContextLimitPct}) >= nudgeEmergencyThresholdPct (${next.nudgeEmergencyThresholdPct}) \u2014 the emergency tier loses its headroom`
-    );
-  }
-  return {
-    clearWindowCache: prev.modelContextLimit !== next.modelContextLimit || prev.autoModelContextLimit !== next.autoModelContextLimit,
-    clearNudgeDedup: prev.autoNudge === false && next.autoNudge === true,
-    warnings
-  };
-}
-function parseSettingValue(raw) {
-  const text = raw.trim();
-  if (text === "true") return { ok: true, value: true };
-  if (text === "false") return { ok: true, value: false };
-  const num = Number(text);
-  if (text !== "" && Number.isFinite(num)) return { ok: true, value: num };
-  if (text === "null") return { ok: true, value: null };
-  return {
-    ok: false,
-    reason: `"${text}" is not a valid value \u2014 use a number (0.65), true/false, or null to reset the key`
-  };
-}
-function requireService(getService) {
-  const service = getService();
-  if (service === void 0) {
-    throw new Error("runtime settings are not available in this process");
-  }
-  return service;
-}
-function makeSettingsCommandSurface(getService, getSnapshot) {
-  return {
-    get available() {
-      return getService() !== void 0;
-    },
-    snapshot: getSnapshot,
-    describe() {
-      const service = getService();
-      if (service === void 0) return void 0;
-      return service.describe().find((descriptor) => descriptor.ns === ACP_SETTINGS_NAMESPACE);
-    },
-    async update(patch) {
-      await requireService(getService).update(ACP_SETTINGS_NAMESPACE, patch);
-    },
-    async replaceSection(section) {
-      await requireService(getService).replace(ACP_SETTINGS_NAMESPACE, section);
-    }
-  };
-}
-
-// src/window.ts
-var DEFAULT_CONTEXT_WINDOW = 128e3;
-function windowSourceLabel(window) {
-  if (window.source === "explicit") return "configured";
-  if (window.source === "projection") {
-    return `session projection current route (auto-refreshes on model switch)`;
-  }
-  if (window.source === "auto") {
-    return `auto-detected from ${window.provider ?? "?"}/${window.model ?? "?"}`;
-  }
-  if (window.probeFailed === true) return "default (auto-detection failed \u2014 see /acp config)";
-  return "default (auto-detection unavailable)";
-}
-function projectedContextWindow(agent) {
-  const projections = agent.ctx?.get?.("sessionProjections");
-  const window = projections?.snapshot?.(agent.session)?.values?.contextPressure?.contextWindow;
-  if (typeof window === "number" && Number.isInteger(window) && window > 0) return window;
-  return null;
-}
-async function probeModelWindow(agent, provider, model) {
-  const llm = agent.ctx?.get?.("llm");
-  if (llm?.resolveModelInfo === void 0) return { contextWindow: null, outputReservation: null };
-  try {
-    const info = await llm.resolveModelInfo(provider, model);
-    const window = info?.context?.contextWindow;
-    const cap = info?.defaultMaxTokens;
-    return {
-      contextWindow: typeof window === "number" && Number.isInteger(window) && window > 0 ? window : null,
-      outputReservation: typeof cap === "number" && Number.isInteger(cap) && cap > 0 ? cap : null
-    };
-  } catch {
-    return { contextWindow: null, outputReservation: null };
-  }
-}
-async function detectContextWindow(agent, provider, model) {
-  return (await probeModelWindow(agent, provider, model)).contextWindow;
-}
-
-// src/commands.ts
 async function statusText(env, agent) {
   const session = agent.session;
   const ledger = rebuildBlockLedger(sessionEventsOf(session));
@@ -4598,7 +4694,7 @@ async function statusText(env, agent) {
     windowLine
   ];
   if (window.probeFailed === true) {
-    lines.push(`  \u26A0 window auto-detection failed \u2014 using the ${limit} fallback (change modelContextLimit or autoModelContextLimit via /acp config \u2014 or restart \u2014 to re-probe)`);
+    lines.push(`  \u26A0 window auto-detection failed \u2014 using the ${limit} fallback (restart to re-probe, or set modelContextLimit explicitly)`);
   }
   const state = structuredClone(env.store.stateFor(session));
   const config = kernelConfigFor({ ...env, modelContextLimit: limit });
@@ -4635,15 +4731,20 @@ function compressText(env, agent, args) {
     return "/acp compress: the range touches a compressed block summary node \u2014 distill it with the compress tool (seq-based batch), not /acp compress";
   }
   const shadowed = shadowedSeqsOf(session, start, end);
+  const instructionHits = guardedRowsInSpan(guardedSurfaceSeqsOf(session), shadowed);
+  if (instructionHits.length > 0) {
+    return protectedRowRejectionNote(start, end, instructionHits, shadowed);
+  }
   const shadowedTokens = shadowedTokensViaMeter(session, shadowed, agent.ctx);
+  const { provider, model } = routeFor(agent);
   const { compactionId } = runCompactionTransaction(session, {
     start,
     end,
     shadowedSeqs: shadowed,
     summary: [{ type: "text", text: summary }],
     shadowedTokenCount: shadowedTokens,
-    provider: agent.options.provider ?? "",
-    model: agent.options.model ?? ""
+    provider,
+    model
   });
   return `Compressed seqs ${start}..${end} (${shadowed.length} messages) as block ${compactionId.slice(0, 8)}`;
 }
@@ -4662,14 +4763,11 @@ ${parts.join("\n\n") || "(no recoverable content)"}`;
 function acpCommand(env) {
   return {
     name: "acp",
-    description: "Active Context Pruning \u2014 model-driven context compression. Usage: /acp status | /acp compress <startSeq> <endSeq> <summary> | /acp decompress <blockId> | /acp config [list|set <key> <value>|reset <key>|all]",
+    description: "Active Context Pruning \u2014 model-driven context compression. Usage: /acp status | /acp compress <startSeq> <endSeq> <summary> | /acp decompress <blockId>",
     handler: async (invocation) => {
       const raw = invocation.rawInput.trim();
       if (raw === "" || raw === "status") {
         return { kind: "success", text: await statusText(env, invocation.agent) };
-      }
-      if (raw === "config" || raw.startsWith("config ")) {
-        return { kind: "success", text: await configText(env, raw.slice("config".length).trim()) };
       }
       if (raw.startsWith("compress")) {
         return { kind: "success", text: compressText(env, invocation.agent, raw.slice("compress".length).trim().split(/\s+/)) };
@@ -4677,101 +4775,9 @@ function acpCommand(env) {
       if (raw.startsWith("decompress")) {
         return { kind: "success", text: decompressText(env, invocation.agent, raw.slice("decompress".length).trim().split(/\s+/)) };
       }
-      return { kind: "error", text: `unknown /acp subcommand "${raw.split(/\s+/)[0]}" \u2014 use status | compress | decompress | config` };
+      return { kind: "error", text: `unknown /acp subcommand "${raw.split(/\s+/)[0]}" \u2014 use status | compress | decompress` };
     }
   };
-}
-function isRecord(value) {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-function isSettingsKey(key) {
-  return SETTINGS_KEYS.includes(key);
-}
-function formatSettingsValue(key, value) {
-  if (value === void 0) {
-    if (key === "modelContextLimit") return "auto";
-    if (key === "nudgeMinContextLimitPct") return "0.45 (kernel)";
-    return "\u2014";
-  }
-  return String(value);
-}
-function configListText(surface) {
-  if (surface === void 0) return "runtime settings are not wired in this engine build";
-  const snapshot = surface.snapshot();
-  const descriptor = surface.describe();
-  const lines = [
-    'ACP runtime settings \u2014 namespace "compaction-acp"',
-    "  key                         value        source"
-  ];
-  for (const key of SETTINGS_KEYS) {
-    const userSection = isRecord(descriptor?.user) ? descriptor.user : {};
-    const baseSection = isRecord(descriptor?.base) ? descriptor.base : {};
-    const source = key in userSection ? "user" : key in baseSection ? "base" : "default";
-    lines.push(`  ${key.padEnd(27)} ${formatSettingsValue(key, snapshot[key]).padEnd(12)} ${source}`);
-  }
-  lines.push("", "  changes apply to running sessions immediately (no restart)");
-  lines.push("  coreOverrides (composition layer) merge LAST and beat these values on same-name keys");
-  lines.push("  /acp config reset <key> returns the key to the composition row / engine default");
-  return lines.join("\n");
-}
-async function configSetText(surface, key, rawValue) {
-  if (!isSettingsKey(key)) {
-    return `unknown key "${key}" \u2014 keys: ${SETTINGS_KEYS.join(", ")}`;
-  }
-  if (surface === void 0) return "runtime settings are not wired in this engine build";
-  if (!surface.available) {
-    return "no settings provider in this process \u2014 edit the compaction-acp row in cordis.patch.yml instead (a restart applies it)";
-  }
-  const parsed = parseSettingValue(rawValue);
-  if (!parsed.ok) return parsed.reason;
-  if (parsed.value === null) {
-    return configResetText(surface, key);
-  }
-  const patch = key === "autoNudge" || key === "autoModelContextLimit" ? { [key]: parsed.value } : { [key]: parsed.value };
-  try {
-    await surface.update(patch);
-  } catch (error) {
-    if (error instanceof SettingsConflictError) {
-      return "conflict: another writer changed this setting at the same time \u2014 run /acp config again";
-    }
-    return `rejected: ${String(error)}`;
-  }
-  const windowNote = key === "modelContextLimit" || key === "autoModelContextLimit" ? "\n  window cache cleared \u2014 the next step re-resolves the context window" : "";
-  return `\u2713 ${key} = ${String(parsed.value)} \u2014 applied to running sessions${windowNote}`;
-}
-async function configResetText(surface, target) {
-  if (surface === void 0) return "runtime settings are not wired in this engine build";
-  if (!surface.available) {
-    return "no settings provider in this process \u2014 edit the compaction-acp row in cordis.patch.yml instead (a restart applies it)";
-  }
-  if (target === "all") {
-    await surface.replaceSection({});
-    return "\u2713 all runtime settings reset \u2014 values now come from the composition row / engine defaults";
-  }
-  if (!isSettingsKey(target)) {
-    return `unknown key "${target}" \u2014 keys: ${SETTINGS_KEYS.join(", ")}`;
-  }
-  const descriptor = surface.describe();
-  const userSection = isRecord(descriptor?.user) ? { ...descriptor.user } : {};
-  delete userSection[target];
-  await surface.replaceSection(userSection);
-  const baseSection = isRecord(descriptor?.base) ? descriptor.base : {};
-  const baseValue = baseSection[target];
-  return `\u2713 ${target} reset \u2014 it now reads ${baseValue === void 0 ? "the engine default" : `the composition value ${String(baseValue)}`}`;
-}
-async function configText(env, rest) {
-  const surface = env.settingsCommand;
-  const args = rest.split(/\s+/).filter((part) => part.length > 0);
-  const verb = args[0] ?? "list";
-  if (verb === "list") return configListText(surface);
-  if (verb === "set") {
-    if (args.length < 3) return "usage: /acp config set <key> <value> (e.g. /acp config set nudgeMaxContextLimitPct 0.72)";
-    return configSetText(surface, args[1], args.slice(2).join(" "));
-  }
-  if (verb === "reset") {
-    return configResetText(surface, args[1] ?? "all");
-  }
-  return `unknown /acp config verb "${verb}" \u2014 use list | set <key> <value> | reset <key>|all`;
 }
 
 // src/system-prompt.ts
@@ -4814,17 +4820,13 @@ var AcpCompactionEngine = class extends CompactionEngine {
    * revive lost-config bugs with every unit test green.
    */
   env;
-  lastNudgeTurn = /* @__PURE__ */ new Map();
+  lastNudgeTurn = new LruMap(DEFAULT_SESSION_CACHE_LIMIT);
+  /** Per-session emergency-nudge injection budget for the current user turn (issue #108). */
+  emergencyNudges = /* @__PURE__ */ new Map();
   /** Successful compress call ids awaiting their tool/result so the pair can be hidden. */
   compressCallIdsToHide = /* @__PURE__ */ new Set();
   /** Per provider/model route the resolved window (probe failures cached too). */
   windowCache = /* @__PURE__ */ new Map();
-  /** Live settings snapshot thunk (composition → user settings layer); swapped by installSettingsSection. */
-  readSettingsSource = () => resolveAcpSettings({});
-  /** The settings service, captured lazily for /acp config (undefined in provider-less processes). */
-  settingsService;
-  /** /acp config read/write surface. */
-  settingsCommand;
   /** Per route the adapter's per-request output cap (the output reservation); null = undisclosed. */
   outputReservationCache = /* @__PURE__ */ new Map();
   constructor(ctx, config = {}) {
@@ -4833,58 +4835,20 @@ var AcpCompactionEngine = class extends CompactionEngine {
     this.prompts = resolvePrompts(config.prompts);
     const ports = this.config.countTokens !== void 0 ? { countTokens: this.config.countTokens } : {};
     this.kernel = createCore(ports);
+    setDocCacheCap(128 * 1024 * 1024);
     this.store = new AcpStateStore();
-    let current = resolveAcpSettings(filterSettingsEntry(this.config));
-    this.readSettingsSource = () => current;
-    const engine = this;
-    const applySettings = () => {
-      const next = this.readSettingsSource();
-      const prev = current;
-      current = next;
-      try {
-        engine.onSettingsChanged(prev, next);
-      } catch (error) {
-        this.ctx.logger.warn(`billion-context-dsh: applying settings change failed: ${String(error)}`);
-      }
-    };
-    this.settingsCommand = makeSettingsCommandSurface(() => this.settingsService, () => current);
-    if (this.config.settingsEnabled !== false) {
-      installSettingsSection(ctx, ACP_SETTINGS_NAMESPACE, AcpSettingsSchema, current, {
-        // The helper swaps the source thunk when the provider mounts and
-        // restores the composition entry when it detaches.
-        setSource: (source) => {
-          this.readSettingsSource = source;
-        },
-        onChange: applySettings
-      });
-      ctx.inject(["settings"], (sctx) => {
-        this.settingsService = sctx.settings;
-      });
-    }
     const env = {
       kernel: this.kernel,
       store: this.store,
-      // The settings-exposed knobs read LIVE from the settings source, so a
-      // settings.yaml edit (or /acp config set) hot-applies to every
-      // subsequent call — consumers never see stale numbers. (ToolEnvironment
-      // fields are readonly properties; getters satisfy them.)
-      get modelContextLimit() {
-        return engine.readSettingsSource().modelContextLimit ?? DEFAULT_CONTEXT_WINDOW;
-      },
-      get nudgeMinContextLimitPct() {
-        return engine.readSettingsSource().nudgeMinContextLimitPct;
-      },
-      get nudgeMaxContextLimitPct() {
-        return engine.readSettingsSource().nudgeMaxContextLimitPct;
-      },
-      get nudgeEmergencyThresholdPct() {
-        return engine.readSettingsSource().nudgeEmergencyThresholdPct;
-      },
+      // Initial value before any probe; windowFor() replaces it per pre-step.
+      modelContextLimit: this.config.modelContextLimit ?? DEFAULT_CONTEXT_WINDOW,
+      nudgeMinContextLimitPct: this.config.nudgeMinContextLimitPct,
+      nudgeMaxContextLimitPct: this.config.nudgeMaxContextLimitPct,
+      nudgeEmergencyThresholdPct: this.config.nudgeEmergencyThresholdPct,
       coreOverrides: this.config.coreOverrides,
       windowFor: (agent) => this.windowFor(agent),
       prompts: this.prompts,
-      compressCallIdsToHide: this.compressCallIdsToHide,
-      settingsCommand: this.settingsCommand
+      compressCallIdsToHide: this.compressCallIdsToHide
     };
     this.env = env;
     const tools = ctx.get("tools");
@@ -4932,11 +4896,21 @@ var AcpCompactionEngine = class extends CompactionEngine {
     });
     ctx.on("agent/pre-step", async (payload, next) => {
       stripOrphanedSurfaceToolMessages(payload.agent.session);
-      if (!engine.readSettingsSource().autoNudge) return next();
+      if (!this.config.autoNudge) return next();
       const decision = await next();
       if (decision.kind === "reject") return decision;
       const window = await this.windowFor(payload.agent);
-      const outcome = buildNudge(payload.agent, { ...env, modelContextLimit: window.limit }, this.lastNudgeTurn);
+      const outcome = buildNudge(
+        payload.agent,
+        { ...env, modelContextLimit: window.limit },
+        this.lastNudgeTurn,
+        this.emergencyNudges,
+        () => {
+          ctx.logger.warn(
+            `billion-context-dsh: emergency nudge suppressed \u2014 per-turn budget of ${EMERGENCY_NUDGE_MAX_PER_TURN} spent (session ${payload.agent.session.id}); pressure is still above the emergency threshold`
+          );
+        }
+      );
       if (outcome === null) return decision;
       return { kind: "enter", messages: [...decision.messages, outcome.message] };
     });
@@ -4985,12 +4959,10 @@ var AcpCompactionEngine = class extends CompactionEngine {
    * fallback.
    */
   async windowFor(agent) {
-    const live = this.readSettingsSource();
-    if (live.modelContextLimit !== void 0) {
-      return { limit: live.modelContextLimit, source: "explicit" };
+    if (this.config.modelContextLimit !== void 0) {
+      return { limit: this.config.modelContextLimit, source: "explicit" };
     }
-    const provider = agent.options.provider ?? "";
-    const model = agent.options.model ?? "";
+    const { provider, model } = routeFor(agent);
     const key = `${provider}\0${model}`;
     if (this.config.autoModelContextLimit) {
       const projected = projectedContextWindow(agent);
@@ -5003,14 +4975,14 @@ var AcpCompactionEngine = class extends CompactionEngine {
     if (cached !== void 0) return cached;
     let window;
     let cap = null;
-    if (!live.autoModelContextLimit) {
+    if (!this.config.autoModelContextLimit) {
       window = { limit: DEFAULT_CONTEXT_WINDOW, source: "default", provider, model };
     } else {
       const probe = await probeModelWindow(agent, provider, model);
       cap = probe.outputReservation;
       if (probe.contextWindow === null) {
         this.ctx.logger.warn(
-          `billion-context-dsh: context-window auto-detection failed for ${provider}/${model} \u2014 using the ${DEFAULT_CONTEXT_WINDOW} fallback (change modelContextLimit or autoModelContextLimit via /acp config \u2014 or restart \u2014 to re-probe)`
+          `billion-context-dsh: context-window auto-detection failed for ${provider}/${model} \u2014 using the ${DEFAULT_CONTEXT_WINDOW} fallback (restart to re-probe, or set modelContextLimit explicitly)`
         );
         window = { limit: DEFAULT_CONTEXT_WINDOW, source: "default", provider, model, probeFailed: true };
         cap = null;
@@ -5021,23 +4993,6 @@ var AcpCompactionEngine = class extends CompactionEngine {
     window = this.applyReservation(window, cap);
     this.windowCache.set(key, window);
     return window;
-  }
-  /**
-   * Diff handler for runtime settings changes: drop the window cache when a
-   * window-related key changed (probe FAILURES are cached too — clearing is
-   * what lets the next pre-step re-probe after a fix), clear the per-turn
-   * nudge dedup when nudges come back on, and warn on order anomalies
-   * (accepted, never rejected — rejecting a write cannot fix an externally
-   * edited settings.yaml, and an invalid stored section would fail the next
-   * boot loud anyway).
-   */
-  onSettingsChanged(prev, next) {
-    const effect = describeSettingsChange(prev, next);
-    for (const warning of effect.warnings) {
-      this.ctx.logger.warn(`billion-context-dsh: ${warning}`);
-    }
-    if (effect.clearWindowCache) this.windowCache.clear();
-    if (effect.clearNudgeDedup) this.lastNudgeTurn.clear();
   }
   /**
    * The adapter's per-request output cap for a route, from one
@@ -5089,18 +5044,15 @@ var AcpCompactionEngine = class extends CompactionEngine {
 };
 var index_default = AcpCompactionEngine;
 export {
-  ACP_SETTINGS_NAMESPACE,
   ACP_SYSTEM_PROMPT,
   ACP_SYSTEM_PROMPT_ORDER,
   AcpCompactionEngine,
-  AcpSettingsSchema,
   AcpStateStore,
   AlreadyCompressedRangeError,
   DEFAULT_CONTEXT_WINDOW,
   DEFAULT_PROMPTS,
   DEFAULT_RESOLVED,
-  SETTINGS_KEYS,
-  SETTING_DEFAULTS,
+  EMERGENCY_NUDGE_MAX_PER_TURN,
   acpCommand,
   assertNoActiveCompaction,
   blockRefForSummarySeq,
@@ -5108,25 +5060,20 @@ export {
   buildNudge,
   compactionIdsOfKernelBlocks,
   index_default as default,
-  describeSettingsChange,
   detectContextWindow,
   eventsToCoreMessages,
   expandShadowedSeqs,
   extractEventText,
-  filterSettingsEntry,
   findOpenTurn,
   hideCompressToolPair,
   kernelConfigFor,
-  makeSettingsCommandSurface,
   makeTools,
-  parseSettingValue,
   projectEvent,
   projectedContextWindow,
   rebuildBlockLedger,
   renderSystemPrompt,
   renderTemplate,
   resolveAcpConfig,
-  resolveAcpSettings,
   resolvePrompts,
   resolveSurfaceRange,
   resolveTokenCount,
