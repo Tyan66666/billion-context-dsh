@@ -5,7 +5,7 @@
  * targets ranges by surface seq rather than by <acp> tags).
  * @module billion-context-dsh/nudge
  */
-import { type CompressionCore, type CoreMessage, type NudgeDecision } from 'acp-kernel';
+import { type CompressionCore, type CompressionState, type ContextBreakdown, type CoreMessage, type NudgeDecision } from 'acp-kernel';
 import { type UserMessage } from '@deepseek-ai/dsh-llm';
 import type { Agent } from '@deepseek-ai/dsh-agent';
 import { AcpStateStore } from './state.ts';
@@ -45,6 +45,32 @@ export declare function resolveTokenCount(agent: Agent, coreMessages: CoreMessag
  * use kernel compressibleRanges once the drift is fixed upstream.
  */
 export declare function rangeTable(session: import('@deepseek-ai/dsh-session').Session, prompts?: ResolvedPrompts): string;
+/**
+ * Compute a SURFACE-ONLY context breakdown for display, aligned with
+ * `acp_status` (kernel `buildStatusReport`/`renderOverview`).
+ *
+ * The kernel's own `computeContextBreakdown` (which the nudge text renders)
+ * walks the message array it is fed — and `buildNudge` feeds it the FULL log
+ * (`allLogMessages`, needed so T2/T3 distillation can anchor every block). So
+ * a session with compressed blocks reports HISTORICAL totals there: every
+ * original tool/text message already absorbed into a block is counted again,
+ * e.g. `85.2K tool` for ~8.5K of live tool context. `acp_status` instead feeds
+ * `buildStatusReport` the VISIBLE surface + active-block summaries, so its
+ * breakdown reads the true current context. This function reproduces that
+ * visible-surface reality for the nudge line so the two tools agree.
+ *
+ * Classification replicates kernel `computeContextBreakdown` (tool-call/
+ * tool-result → tool, `system` role → system, `` code `` fence in text →
+ * code, else text) EXCEPT summaries: kernel detects summaries by a
+ * `[Compressed conversation section]` text prefix, which never matches a DSH
+ * checkpoint node (our summary is the plain summary + `compactCheckpointSource`
+ * source marker). We instead count active-block summaries directly from kernel
+ * state (same source `buildStatusReport` uses), and the caller must exclude
+ * checkpoint summary nodes from `messages` (they are not in any block's
+ * `effectiveMessageIds` and would double-count — mirror of `/acp` status's
+ * `isCheckpointEvent` exclusion).
+ */
+export declare function computeSurfaceBreakdown(state: CompressionState, messages: readonly CoreMessage[], total: number, growth: number): ContextBreakdown;
 /**
  * Max emergency nudge injections within a single user turn. Bounds the
  * positive-feedback loop where an unrelieved ≥emergency-threshold pressure

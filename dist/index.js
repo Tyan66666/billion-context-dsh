@@ -3766,18 +3766,51 @@ function rangeTable(session, prompts = DEFAULT_RESOLVED) {
 function measuredTokenCount(agent, coreMessages) {
   return resolveTokenCount(agent, coreMessages);
 }
+function isCheckpointEvent(event) {
+  if (event.type !== "user/message") return false;
+  const source = event.data.source;
+  return source?.plugin === "compact";
+}
+function computeSurfaceBreakdown(state, messages, total, growth) {
+  let system = 0;
+  let tool = 0;
+  let code = 0;
+  let text = 0;
+  for (const message of messages) {
+    const tokens = defaultCountTokens(message.text ?? "");
+    if (message.contentType === "tool-call" || message.contentType === "tool-result") {
+      tool += tokens;
+    } else if (message.role === "system") {
+      system += tokens;
+    } else if ((message.text ?? "").includes("```")) {
+      code += tokens;
+    } else {
+      text += tokens;
+    }
+  }
+  let summaries = 0;
+  for (const block of state.blocks) {
+    if (block.active) summaries += defaultCountTokens(block.summary);
+  }
+  return { system, tool, summaries, code, text, total, growth };
+}
 var EMERGENCY_NUDGE_MAX_PER_TURN = 3;
 function buildNudge(agent, env, lastNudgeTurn, emergencyNudges, onEmergencyCapHit) {
   const session = agent.session;
   const state = env.store.stateFor(session);
   const coreMessages = allLogMessages(session);
-  const surfaceMessages = eventsToCoreMessages(surfaceEventsOf(session));
+  const surfaceEvents = surfaceEventsOf(session);
+  const surfaceMessages = eventsToCoreMessages(surfaceEvents);
   const tokenCount = measuredTokenCount(agent, surfaceMessages);
   const config = kernelConfigFor(env);
   const turn = env.kernel.processTurn({ messages: coreMessages, state, config, tokenCount });
   env.store.set(session, turn.state);
   const nudge = turn.nudge;
   if (nudge === void 0 || !nudge.shouldInject) return null;
+  const statusMessages = eventsToCoreMessages(
+    surfaceEvents.filter((event) => isCheckpointEvent(event) === false)
+  );
+  nudge.contextBreakdown = computeSurfaceBreakdown(turn.state, statusMessages, tokenCount, nudge.contextBreakdown?.growth ?? 0);
   const emergency = nudge.breakdown?.emergencyOverride === 1;
   const turnNumber = findOpenTurn(sessionEventsOf(session)) ?? 0;
   if (!emergency) {
@@ -4334,7 +4367,7 @@ var statusParameters = {
     description: "Cap on rows or blocks shown (default 30)."
   }
 };
-function isCheckpointEvent(event) {
+function isCheckpointEvent2(event) {
   if (event.type !== "user/message") return false;
   const source = event.data.source;
   return source?.plugin === "compact";
@@ -4353,7 +4386,7 @@ async function handleStatus(env, rawArgs, exec) {
   const config = kernelConfigFor({ ...env, modelContextLimit: window.limit });
   const turn = env.kernel.processTurn({ messages: coreMessages, state, config, tokenCount });
   const statusMessages = eventsToCoreMessages(
-    surface.filter((event) => !isCheckpointEvent(event)),
+    surface.filter((event) => !isCheckpointEvent2(event)),
     toolNames
   );
   const report = buildStatusReport(turn.state, statusMessages, defaultCountTokens, args);
