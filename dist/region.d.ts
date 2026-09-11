@@ -318,4 +318,56 @@ export declare function summarySeqOfKernelBlock(session: Session, kernelBlockId:
  * seqs. Cycle-safe (a block can never be its own ancestor).
  */
 export declare function expandShadowedSeqs(session: Session, blockId: string): number[];
+/**
+ * Default decompress page size (#112): a block shadowing hundreds of
+ * messages used to be returned whole in ONE tool result — big enough to
+ * flood the context window or get silently trimmed by the host's
+ * tool-result pruner before the model ever saw the tail. One page per call
+ * keeps every recovery usable; `offset` walks the rest.
+ *
+ * A page is bounded by BOTH this message count and a rendered-character
+ * budget ({@link DEFAULT_DECOMPRESS_PAGE_CHARS}). Count alone was not enough:
+ * the host's `dsh-compaction-tool-result-pruner` (docs/dsh-porting-analysis.md)
+ * trims by CHARACTERS (thresholdChars 8192), so a wide page of long messages
+ * still crossed that line and had its middle dropped. The char bound keeps an
+ * ordinary page under the pruner threshold so it comes back intact; the
+ * message count doubles as a hard ceiling so a pathological `limit` can't
+ * re-open the whole-block flooding half of #112.
+ */
+export declare const DEFAULT_DECOMPRESS_PAGE = 100;
+/**
+ * Rendered-character budget per decompress page (#112). Kept below the host's
+ * tool-result pruner threshold (8192, docs/dsh-porting-analysis.md) with
+ * headroom for the block header, the `[seq N]` prefixes, and the continue hint,
+ * so a normal page survives intact instead of middle-trimmed. Deliberately NOT
+ * tied to acp-kernel's `config.truncate.threshold`: that knob truncates a single
+ * oversized tool output during compression, whereas the host pruner trims our
+ * whole decompress result — different mechanisms, different thresholds.
+ */
+export declare const DEFAULT_DECOMPRESS_PAGE_CHARS = 7000;
+export interface DecompressPage {
+    /** Requested offset floored to >= 0; reported as-is when it lands past the end. */
+    offset: number;
+    /** Limit actually applied (clamped to [1, DEFAULT_DECOMPRESS_PAGE]). */
+    limit: number;
+    /** Total shadowed messages in the block (tier-expanded). */
+    total: number;
+    /** This page's shadowed seqs, in expansion order. */
+    seqs: number[];
+    /** True when no further page follows this one. */
+    exhausted: boolean;
+}
+/**
+ * Slice a block's expanded shadowed-seq list into one page. A page holds at most
+ * `limit` messages AND at most `charBudget` rendered characters, where
+ * `renderLen(seq)` reports each message's on-the-wire length (0 when it carries
+ * no text). Seqs whose original carries no text still occupy a slot, so `offset`
+ * stays a stable continuation index across calls while the log is frozen.
+ * Out-of-range / negative / non-finite values clamp instead of failing (optional
+ * convenience params, not semantic boundaries); non-numeric input falls back to
+ * the default rather than leaking NaN into the result. The first message of the
+ * page is always included even if it alone exceeds the budget, so a walk always
+ * makes progress past a single giant message.
+ */
+export declare function sliceDecompressPage(expanded: number[], offset: number, limit: number, charBudget: number, renderLen: (seq: number) => number): DecompressPage;
 export {};

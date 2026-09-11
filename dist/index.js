@@ -3607,6 +3607,26 @@ function expandShadowedSeqs(session, blockId) {
   visit(root);
   return out;
 }
+var DEFAULT_DECOMPRESS_PAGE = 100;
+var DEFAULT_DECOMPRESS_PAGE_CHARS = 7e3;
+function sliceDecompressPage(expanded, offset, limit, charBudget, renderLen) {
+  const offN = typeof offset === "number" ? offset : Number(offset);
+  const safeOffset = Number.isFinite(offN) && offN > 0 ? Math.floor(offN) : 0;
+  const limN = typeof limit === "number" ? limit : Number(limit);
+  const safeLimit = Number.isFinite(limN) && limN >= 1 ? Math.min(Math.floor(limN), DEFAULT_DECOMPRESS_PAGE) : DEFAULT_DECOMPRESS_PAGE;
+  const start = Math.min(safeOffset, expanded.length);
+  const endCap = Math.min(start + safeLimit, expanded.length);
+  let end = start;
+  let acc = 0;
+  for (let i = start; i < endCap; i += 1) {
+    const seq = expanded[i];
+    const len = renderLen(seq);
+    if (i > start && acc + len > charBudget) break;
+    acc += len;
+    end = i + 1;
+  }
+  return { offset: safeOffset, limit: safeLimit, total: expanded.length, seqs: expanded.slice(start, end), exhausted: end >= expanded.length };
+}
 
 // src/state.ts
 function rebuildKernelBlocks(events) {
@@ -3829,7 +3849,7 @@ var DEFAULT_PROMPTS = {
   },
   tools: {
     compress: "Replace older conversation ranges with dense summaries you write. Each message seq is a surface reference. Single range: compress({ content: [{ startSeq, endSeq, summary }] }). Batch multiple unrelated ranges in one call (each content entry becomes its own block); keep ranges disjoint. Never compress content the current step is actively using. Compress boundaries are SURFACE SEQS (acp_status Surface: row, latest nudge table) \u2014 NOT the block refs (bN, e.g. b1) that acp_status COMPRESSED BLOCKS shows, which are for decompress only. Drilldown mN refs (e.g. m00306) are ALSO accepted as startSeq/endSeq \u2014 they are auto-mapped to the live surface seq; an unknown mN (never assigned on the current surface) fails with guidance. Seq refs must come from the CURRENT surface (acp_status or the latest nudge): a span whose edges were shadowed by an earlier compress is auto-remapped to its still-live content, a fully compressed span is reported as already compressed, and invented/other-session seqs fail with guidance. Good compression moments: stage or subtask completion whose details you have fully consumed and will not re-check, strategy switches, intermediate milestones, and wrapping up failed exploration \u2014 when the details are consumed and no longer critical for the task ahead. Before compressing, ask: will I need to re-verify any detail from this range in this task? If yes, keep it live. When you write a summary, turn dead-end exploration into a conclusion (what was tried, why it failed, the next step) \u2014 not a blow-by-blow; and keep the summary the ONLY record: self-contained, so a later reader (or you, after decompress) can continue without the original.",
-    decompress: "Recover the original content of a compressed block by its blockId \u2014 the kernel block ref `bN` shown by acp_status (e.g. b1), or a compaction id from search_context (read-only; does not unshadow the range).",
+    decompress: "Recover the original content of a compressed block by its blockId \u2014 the kernel block ref `bN` shown by acp_status (e.g. b1), or a compaction id from search_context (read-only; does not unshadow the range). Large blocks are paged so each page stays under the host tool-result trim budget (up to 100 messages per call): pass offset/limit to walk them and follow the continue hint in the result.",
     searchContext: "Search inside compressed blocks (summaries and original content) for information the model no longer sees in context. When a summary lacks a detail you need (exact values, error strings, decisions, verbatim code), SEARCH the compressed blocks FIRST \u2014 never guess or reconstruct from memory: search_context(query) locates the right block, then decompress only that block to recover the original.",
     acpStatus: 'Context status: overview of the current context \u2014 CONTEXT BREAKDOWN (tool/text/summaries token shares of the visible total), COMPRESSED BLOCKS ledger, and the nudge decision. No args = overview. Percentages are shares of the visible content, not the context window. Note: the block refs in COMPRESSED BLOCKS (bN, e.g. b1) are for decompress; compress uses the Surface: seq range, not bN. Drilldown: pass scope:"compressed" for a per-block list, or scope:"uncompressed" with view:"messages" (every visible message) / view:"ranges" (merged ranges); tool filters to one tool name, sort reorders (size/time/tool; age for compressed), limit caps rows (default 30). Drilldown row refs are kernel ids (mN) \u2014 feed them straight to compress as startSeq/endSeq (auto-mapped to the live surface seq); bN is for decompress, Surface: seqs also work in compress.'
   },
@@ -3858,7 +3878,7 @@ WHEN NOT TO COMPRESS:
 
 Compression tools (refs are SURFACE SEQS, not ids):
 - compress: replace one or more seq ranges, each with your own dense summary. Single range: compress({ content: [{ startSeq, endSeq, summary }] }). Batch multiple unrelated segments in one call (each entry becomes its own block): compress({ content: [{ startSeq: 1, endSeq: 5, summary: '...' }, { startSeq: 12, endSeq: 18, summary: '...' }] }). Keep ranges disjoint \u2014 overlapping entries in one batch are skipped. Edges are auto-balanced to tool-call/result boundaries; a trailing #callId fragment in a seq is ignored. Seq refs must be on the current surface: seqs from older nudges or earlier compresses go stale as the surface moves, so a stale span is auto-remapped to its still-live remainder (the result reports the adjusted span), a fully compressed span is reported as already compressed, and invented/other-session seqs fail with guidance. The block refs (bN, e.g. b1) in acp_status COMPRESSED BLOCKS are for decompress, NOT compress boundaries.
-- decompress: recover a compressed block's original content, read-only. decompress({ blockId }) \u2014 accept the bN ref shown by acp_status (e.g. b1) or a compaction id.
+- decompress: recover a compressed block's original content, read-only. decompress({ blockId }) \u2014 accept the bN ref shown by acp_status (e.g. b1) or a compaction id. Large blocks page (each page sized to stay under the host tool-result trim budget, up to 100 messages): pass offset/limit and follow the continue hint in the result.
 - search_context: when a summary lacks the details you need (exact values, error strings, decisions, verbatim code), SEARCH the compressed blocks FIRST \u2014 never guess or reconstruct from memory; search_context(query) locates the right block, decompress only that block.
 - acp_status: current context usage and the live compressible-range list. Run it right before compressing \u2014 the only seqs that never go stale are the ones you just read. Drilldown (scope/view/tool/sort/limit) lists per-message or per-block sizes; drilldown rows are kernel ids (mN) \u2014 compress accepts them directly (auto-mapped to the live surface seq).
 
@@ -4464,7 +4484,9 @@ async function handleCompress(env, args, exec) {
 ${[...warningLines, footer].filter((line) => line !== "").join("\n")}` };
 }
 var decompressParameters = {
-  blockId: { type: "string", required: true, description: "Block id: the kernel block ref `bN` shown by acp_status (e.g. b1), or a compaction id / prefix from search_context." }
+  blockId: { type: "string", required: true, description: "Block id: the kernel block ref `bN` shown by acp_status (e.g. b1), or a compaction id / prefix from search_context." },
+  offset: { type: "integer", description: "Start position in the block's message list (default 0). Blocks are paged by size \u2014 each page stays under the host tool-result trim budget (up to 100 messages) \u2014 so follow the continue hint in the result to walk the rest." },
+  limit: { type: "integer", description: "Messages per page (default 100; values above 100 are capped to 100). Pages are also bounded by a character budget, so long messages return fewer than this per call." }
 };
 function resolveBlockId(session, arg) {
   const byKernelRef = blockIdOfKernelRef(session, arg);
@@ -4485,17 +4507,40 @@ function handleDecompress(_env, rawArgs, exec) {
   if (block === void 0) {
     return { text: `decompress: block "${args.blockId}" not found (see acp_status for the block list)` };
   }
+  const expanded = expandShadowedSeqs(session, block.blockId);
+  const page = sliceDecompressPage(
+    expanded,
+    args.offset ?? 0,
+    args.limit ?? DEFAULT_DECOMPRESS_PAGE,
+    DEFAULT_DECOMPRESS_PAGE_CHARS,
+    (seq) => {
+      const event = eventAtOf(session, seq);
+      const text = event === void 0 ? "" : extractEventText(event);
+      return text.length === 0 ? 0 : `[seq ${seq}] ${text}`.length;
+    }
+  );
+  if (page.total === 0 || page.seqs.length === 0) {
+    const where = page.total === 0 ? "" : ` has ${page.total} messages; offset ${page.offset} is past the end \u2014 use an offset below ${page.total}, or omit it`;
+    return { text: page.total === 0 ? `Block ${block.blockId} \u2014 ${block.summary}
+
+(no recoverable content)` : `decompress: block ${block.blockId}${where}` };
+  }
   const parts = [];
-  for (const seq of expandShadowedSeqs(session, block.blockId)) {
+  for (const seq of page.seqs) {
     const event = eventAtOf(session, seq);
     const text = event === void 0 ? "" : extractEventText(event);
     if (text.length > 0) parts.push(`[seq ${seq}] ${text}`);
   }
   const tierNote = block.tier > 1 ? ` (tier ${block.tier}, distills ${block.parentBlockIds.length} block(s))` : "";
+  const lines = [];
+  lines.push(`[messages ${page.offset + 1}..${page.offset + page.seqs.length} of ${page.total}]`);
+  if (!page.exhausted) lines.push(`More available \u2014 continue with decompress({ blockId: "${block.blockId}", offset: ${page.offset + page.seqs.length} })`);
   return {
     text: `Block ${block.blockId} \u2014 ${block.summary}${tierNote}
 
-${parts.join("\n\n") || "(no recoverable content)"}`
+${lines.join("\n")}
+
+${parts.join("\n\n") || "(no text content on this page)"}`
   };
 }
 var searchParameters = {
@@ -4748,22 +4793,45 @@ function compressText(env, agent, args) {
   });
   return `Compressed seqs ${start}..${end} (${shadowed.length} messages) as block ${compactionId.slice(0, 8)}`;
 }
+var DECOMPRESS_USAGE = "/acp decompress <blockId> [offset] [limit]";
 function decompressText(_env, agent, args) {
-  if (args.length < 1) return "/acp decompress <blockId>";
+  if (args.length < 1) return DECOMPRESS_USAGE;
+  const offset = args[1] === void 0 ? 0 : Number(args[1]);
+  if (!Number.isInteger(offset) || offset < 0) return `${DECOMPRESS_USAGE} \u2014 offset must be a non-negative integer`;
+  const limit = args[2] === void 0 ? DEFAULT_DECOMPRESS_PAGE : Number(args[2]);
+  if (!Number.isInteger(limit) || limit < 1 || limit > DEFAULT_DECOMPRESS_PAGE) return `${DECOMPRESS_USAGE} \u2014 limit must be an integer between 1 and ${DEFAULT_DECOMPRESS_PAGE}`;
   const session = agent.session;
   const blockId = blockIdOfKernelRef(session, args[0]);
   const ledger = rebuildBlockLedger(sessionEventsOf(session));
   const block = blockId === null ? ledger.find((entry) => entry.blockId.startsWith(args[0])) : ledger.find((entry) => entry.blockId === blockId);
   if (block === void 0) return `block "${args[0]}" not found (see /acp status)`;
-  const parts = expandShadowedSeqs(session, block.blockId).map((seq) => extractEventText(eventAtOf(session, seq))).filter((text) => text.length > 0);
-  return `Block ${block.blockId} \u2014 ${block.summary}
+  const expanded = expandShadowedSeqs(session, block.blockId);
+  const page = sliceDecompressPage(
+    expanded,
+    offset,
+    limit,
+    DEFAULT_DECOMPRESS_PAGE_CHARS,
+    (seq) => extractEventText(eventAtOf(session, seq)).length
+  );
+  if (page.seqs.length === 0) {
+    if (page.total === 0) return `Block ${block.blockId} \u2014 ${block.summary}
 
-${parts.join("\n\n") || "(no recoverable content)"}`;
+(no recoverable content)`;
+    return `block ${block.blockId} has ${page.total} messages; offset ${offset} is past the end \u2014 use an offset below ${page.total}`;
+  }
+  const parts = page.seqs.map((seq) => extractEventText(eventAtOf(session, seq))).filter((text) => text.length > 0);
+  const lines = [
+    `Block ${block.blockId} \u2014 ${block.summary}`,
+    `[messages ${page.offset + 1}..${page.offset + page.seqs.length} of ${page.total}]`
+  ];
+  if (!page.exhausted) lines.push(`Continue with: /acp decompress ${block.blockId.slice(0, 8)} ${page.offset + page.seqs.length}`);
+  lines.push("", parts.join("\n\n") || "(no recoverable content)");
+  return lines.join("\n");
 }
 function acpCommand(env) {
   return {
     name: "acp",
-    description: "Active Context Pruning \u2014 model-driven context compression. Usage: /acp status | /acp compress <startSeq> <endSeq> <summary> | /acp decompress <blockId>",
+    description: "Active Context Pruning \u2014 model-driven context compression. Usage: /acp status | /acp compress <startSeq> <endSeq> <summary> | /acp decompress <blockId> [offset] [limit]",
     handler: async (invocation) => {
       const raw = invocation.rawInput.trim();
       if (raw === "" || raw === "status") {

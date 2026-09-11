@@ -97,3 +97,15 @@ export function buildTextSession(count: number): Session {
   }
   return session
 }
+
+/** Short (~87-char, fixed-length) counterpart to buildTextSession: small enough that several messages fit under one decompress page's char budget, so paging/limit assertions are stable (issue #112). Callers must size the session AND compressed range to clear the kernel's compress gates — see the tools.test.ts decompress-limit test. */
+export function buildShortTextSession(count: number): Session {
+  const session = Session.create('test-session')
+  appendTurn(session, 1)
+  for (let index = 0; index < count; index += 1) {
+    const line = `short line ${String(index).padStart(3, '0')} ${'abcdefghijklmnopqrstuvwxyz0123456789'.repeat(2)}`
+    if (index % 2 === 0) appendUser(session, line)
+    else appendAssistant(session, line, 1, index)
+  }
+  return session
+}

@@ -212,7 +212,7 @@ DSH 的每个模型请求都派生自其 append-only 会话日志（*surface*）
 | 工具 | 作用 |
 | --- | --- |
 | `compress` | 用你书写的紧凑摘要替换 seq 范围（边界自动平衡到 tool-call/result 配对点）；对某块的摘要节点再次压缩 = 分层蒸馏（tier 2/3） |
-| `decompress` | 恢复已压缩块的原始内容（只读）；接受 acp_status 显示的 `bN` 或 compaction id |
+| `decompress` | 恢复已压缩块的原始内容（只读）；接受 acp_status 显示的 `bN` 或 compaction id。大块按字符预算分页（默认每页约 7K 字符、至多 100 条），使普通页面低于宿主 tool-result 截断阈值（8192）；`offset`/`limit` + 续页提示走完全块 |
 | `search_context` | 按关键词搜索压缩块摘要与原文（acp-kernel hybrid 检索：词干化 + CJK bigram + 模糊）；命中回链所属块 |
 | `acp_status` | CONTEXT BREAKDOWN（tool/text/summaries 占可见总量）+ 压缩块账本 + nudge 决策行 + `Checkpoint seqs` 行（active 块的 `bN → seq` 蒸馏入口，issue #60）；不含上下文窗口。支持钻取：`scope:"compressed"` 逐块、`scope:"uncompressed"` + `view:"messages"`/`"ranges"` 逐消息/区间，`tool` 过滤、`sort` 排序、`limit` 截断。钻取行 ref 是内核 mN——可直接作为 `compress` 的 `startSeq`/`endSeq`（自动映射为 live surface seq）；`Surface:` 的 seq 同样可用 |
 | `/acp` | 从命令栏执行 status / compress / decompress；status 额外展示 human-side 窗口信息（estimated context、context window 来源、压缩账本、**nudge 仲裁**——`nudge: idle/ACTIVE — reason` 及距下一次 nudge 还差多少 token，与 nudge 路径同一内核判定） |

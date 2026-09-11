@@ -28,6 +28,9 @@ import {
   resolveSurfaceRange,
   runCompactionTransaction,
   shadowedSeqsOf,
+  sliceDecompressPage,
+  DEFAULT_DECOMPRESS_PAGE,
+  DEFAULT_DECOMPRESS_PAGE_CHARS,
 } from './region.ts'
 import { allLogMessages, eventsToCoreMessages, extractEventText, surfaceEventsOf } from './messages.ts'
 import { shadowedTokensViaMeter } from './host-tokens.ts'
@@ -147,8 +150,16 @@ function compressText(env: ToolEnvironment, agent: Agent, args: string[]): strin
   return `Compressed seqs ${start}..${end} (${shadowed.length} messages) as block ${compactionId.slice(0, 8)}`
 }
 
+const DECOMPRESS_USAGE = '/acp decompress <blockId> [offset] [limit]'
+
 function decompressText(_env: ToolEnvironment, agent: Agent, args: string[]): string {
-  if (args.length < 1) return '/acp decompress <blockId>'
+  if (args.length < 1) return DECOMPRESS_USAGE
+  const offset = args[1] === undefined ? 0 : Number(args[1])
+  if (!Number.isInteger(offset) || offset < 0) return `${DECOMPRESS_USAGE} — offset must be a non-negative integer`
+  const limit = args[2] === undefined ? DEFAULT_DECOMPRESS_PAGE : Number(args[2])
+  // /acp is human-facing, so it rejects out-of-range values loudly (the model
+  // tool clamps instead); the ceiling matches the tool's hard cap.
+  if (!Number.isInteger(limit) || limit < 1 || limit > DEFAULT_DECOMPRESS_PAGE) return `${DECOMPRESS_USAGE} — limit must be an integer between 1 and ${DEFAULT_DECOMPRESS_PAGE}`
   const session = agent.session
   // Accept the kernel block ref (`bN`) the model tool acp_status shows, as
   // well as the compaction-id prefix (same dual-id resolution as the tool).
@@ -159,10 +170,33 @@ function decompressText(_env: ToolEnvironment, agent: Agent, args: string[]): st
     : ledger.find((entry) => entry.blockId === blockId)
   if (block === undefined) return `block "${args[0]}" not found (see /acp status)`
   // Tier-2/3 blocks shadow parent checkpoint nodes: expand to the originals.
-  const parts = expandShadowedSeqs(session, block.blockId)
+  // Same char-budget paging as the model tool so a normal page stays under the
+  // host pruner threshold; /acp renders bare text (no `[seq N]` prefix), so
+  // renderLen prices the raw message text.
+  const expanded = expandShadowedSeqs(session, block.blockId)
+  const page = sliceDecompressPage(
+    expanded,
+    offset,
+    limit,
+    DEFAULT_DECOMPRESS_PAGE_CHARS,
+    (seq) => extractEventText(eventAtOf(session, seq)!).length,
+  )
+  if (page.seqs.length === 0) {
+    if (page.total === 0) return `Block ${block.blockId} — ${block.summary}\n\n(no recoverable content)`
+    return `block ${block.blockId} has ${page.total} messages; offset ${offset} is past the end — use an offset below ${page.total}`
+  }
+  const parts = page.seqs
     .map((seq) => extractEventText(eventAtOf(session, seq)!))
     .filter((text) => text.length > 0)
-  return `Block ${block.blockId} — ${block.summary}\n\n${parts.join('\n\n') || '(no recoverable content)'}`
+  // Marker + continue hint lead the payload (not trail it) so the "this page
+  // is partial" line survives if the host ever trims an oversized page's middle.
+  const lines = [
+    `Block ${block.blockId} — ${block.summary}`,
+    `[messages ${page.offset + 1}..${page.offset + page.seqs.length} of ${page.total}]`,
+  ]
+  if (!page.exhausted) lines.push(`Continue with: /acp decompress ${block.blockId.slice(0, 8)} ${page.offset + page.seqs.length}`)
+  lines.push('', parts.join('\n\n') || '(no recoverable content)')
+  return lines.join('\n')
 }
 
 /** Register the /acp command (idempotent per engine). */
@@ -171,7 +205,7 @@ export function acpCommand(env: ToolEnvironment): CommandDefinition {
     name: 'acp',
     description:
       'Active Context Pruning — model-driven context compression. '
-      + 'Usage: /acp status | /acp compress <startSeq> <endSeq> <summary> | /acp decompress <blockId> | /acp config [list|set <key> <value>|reset <key>|all]',
+      + 'Usage: /acp status | /acp compress <startSeq> <endSeq> <summary> | /acp decompress <blockId> [offset] [limit] | /acp config [list|set <key> <value>|reset <key>|all]',
     handler: async (invocation) => {
       const raw = invocation.rawInput.trim()
       if (raw === '' || raw === 'status') {

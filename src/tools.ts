@@ -32,7 +32,10 @@ import {
   shadowedSeqsOf,
   stripOrphanedSurfaceToolMessages,
   openToolCallIds,
+  sliceDecompressPage,
   surfaceSummary,
+  DEFAULT_DECOMPRESS_PAGE,
+  DEFAULT_DECOMPRESS_PAGE_CHARS,
   type ResolvedSurfaceRange,
 } from './region.ts'
 import { allLogMessages, buildToolCallIndex, eventsToCoreMessages, extractEventText, isCheckpointNode, surfaceEventsOf } from './messages.ts'
@@ -623,10 +626,14 @@ async function handleCompress(env: ToolEnvironment, args: CompressArgs, exec: To
 
 const decompressParameters = {
   blockId: { type: 'string' as const, required: true, description: 'Block id: the kernel block ref `bN` shown by acp_status (e.g. b1), or a compaction id / prefix from search_context.' },
+  offset: { type: 'integer' as const, description: 'Start position in the block\'s message list (default 0). Blocks are paged by size — each page stays under the host tool-result trim budget (up to 100 messages) — so follow the continue hint in the result to walk the rest.' },
+  limit: { type: 'integer' as const, description: 'Messages per page (default 100; values above 100 are capped to 100). Pages are also bounded by a character budget, so long messages return fewer than this per call.' },
 } as const
 
 interface DecompressArgs {
   blockId: string
+  offset?: number
+  limit?: number
 }
 
 /** Resolve a block arg to its durable compaction id: exact `bN` kernel ref
@@ -654,16 +661,41 @@ function handleDecompress(_env: ToolEnvironment, rawArgs: DecompressArgs, exec: 
   if (block === undefined) {
     return { text: `decompress: block "${args.blockId}" not found (see acp_status for the block list)` }
   }
-  const parts: string[] = []
   // Tier-2/3 blocks shadow parent checkpoint nodes: expand to the originals.
-  for (const seq of expandShadowedSeqs(session, block.blockId)) {
+  // Page by BOTH message count and rendered chars so a normal page stays under
+  // the host's tool-result pruner threshold (DEFAULT_DECOMPRESS_PAGE_CHARS);
+  // renderLen prices each message exactly as it will appear on this page.
+  const expanded = expandShadowedSeqs(session, block.blockId)
+  const page = sliceDecompressPage(
+    expanded,
+    args.offset ?? 0,
+    args.limit ?? DEFAULT_DECOMPRESS_PAGE,
+    DEFAULT_DECOMPRESS_PAGE_CHARS,
+    (seq) => {
+      const event = eventAtOf(session, seq)
+      const text = event === undefined ? '' : extractEventText(event)
+      return text.length === 0 ? 0 : `[seq ${seq}] ${text}`.length
+    },
+  )
+  if (page.total === 0 || page.seqs.length === 0) {
+    const where = page.total === 0 ? '' : ` has ${page.total} messages; offset ${page.offset} is past the end — use an offset below ${page.total}, or omit it`
+    return { text: page.total === 0 ? `Block ${block.blockId} — ${block.summary}\n\n(no recoverable content)` : `decompress: block ${block.blockId}${where}` }
+  }
+  const parts: string[] = []
+  for (const seq of page.seqs) {
     const event = eventAtOf(session, seq)
     const text = event === undefined ? '' : extractEventText(event)
     if (text.length > 0) parts.push(`[seq ${seq}] ${text}`)
   }
   const tierNote = block.tier > 1 ? ` (tier ${block.tier}, distills ${block.parentBlockIds.length} block(s))` : ''
+  // Marker + continue hint LEAD the payload, not trail it: if a page is ever
+  // oversized and the host drops its middle, the "this page is partial" line
+  // survives up top rather than being the exact line that gets trimmed away.
+  const lines: string[] = []
+  lines.push(`[messages ${page.offset + 1}..${page.offset + page.seqs.length} of ${page.total}]`)
+  if (!page.exhausted) lines.push(`More available — continue with decompress({ blockId: "${block.blockId}", offset: ${page.offset + page.seqs.length} })`)
   return {
-    text: `Block ${block.blockId} — ${block.summary}${tierNote}\n\n${parts.join('\n\n') || '(no recoverable content)'}`,
+    text: `Block ${block.blockId} — ${block.summary}${tierNote}\n\n${lines.join('\n')}\n\n${parts.join('\n\n') || '(no text content on this page)'}`,
   }
 }
 
