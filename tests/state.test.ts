@@ -120,7 +120,11 @@ test('M2: block topic persists through the log — the acp_status block title su
 
   // Optional semantics: a compress without topic records no topic field, and
   // the rehydrated block has none (kernel renders "(no topic)" — unchanged).
-  const plain = buildTextSession(12)
+  // Distinct session id: kernel >= 0.0.54 refuses ranges fully covered by an
+  // active block, and the store keys state by session.id — sharing
+  // 'test-session' would make this compress look like a duplicate of the one
+  // above and land no block.
+  const plain = buildTextSession(12, 'plain-session')
   await toolOf(env, 'compress').execute({
     content: [{ startSeq: 1, endSeq: 5, summary: TIER_SUMMARY }],
   } as never, fakeExec(plain))

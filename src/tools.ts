@@ -42,6 +42,7 @@ import { allLogMessages, buildToolCallIndex, eventsToCoreMessages, extractEventT
 import { shadowedTokensViaMeter } from './host-tokens.ts'
 import { eventAtOf, sessionEventsOf } from './session-events.ts'
 import { DEFAULT_RESOLVED, type ResolvedPrompts } from './prompts.ts'
+import type { SettingsCommandSurface } from './settings.ts'
 import type { PresetName } from './presets.ts'
 
 export interface ToolEnvironment extends KernelConfigInput {
@@ -60,6 +61,12 @@ export interface ToolEnvironment extends KernelConfigInput {
    * (strict providers reject that sequence with HTTP 400).
    */
   readonly compressCallIdsToHide?: Set<string>
+  /**
+   * Read/write access to the runtime settings layer for `/acp config`.
+   * Absent surfaces (never expected — the engine always builds one) would
+   * degrade the command to advice text.
+   */
+  readonly settingsCommand?: SettingsCommandSurface
 }
 
 interface TextOutput {
@@ -101,7 +108,7 @@ export async function resolveEffectiveWindow(env: ToolEnvironment, agent: Agent)
     : await env.windowFor(agent)
 }
 
-const compressParameters = {
+export const compressParameters = {
   // Tolerated wrapped-arguments form: some models emit
   // `{ "arguments": "{\"content\": [...]}" }` (double-nested) or
   // `{ "arguments": { "content": [...] } }` instead of the unwrapped
@@ -147,6 +154,19 @@ const compressParameters = {
         },
         summary: { type: 'string' as const, required: true, description: 'Complete technical summary replacing the range; keep paths, decisions, values verbatim. Minimum 50 characters.' },
         topic: { type: 'string' as const, description: 'Short label (3-5 words) for this range.' },
+        // B3 (2026-09-08 governance plan): the handler and region.ts have
+        // accepted verifiedReadings since the plan landed, but the declared
+        // parameter schema did not list it — `additionalProperties: false`
+        // then rejected every live call that carried it
+        // (`invalid arguments: "content[0].verifiedReadings" is not a declared
+        // property`), so the structured-loss-stopping field was unreachable
+        // from the model's tool interface. Declared here; additionalProperties
+        // stays false so unknown fields are still rejected.
+        verifiedReadings: {
+          type: 'array' as const,
+          items: { type: 'string' as const },
+          description: 'Optional: acceptance readings that are already green before this compression (e.g. "t0-fastpath 8/8", "closedloop 414/414"). Stored structurally on the compaction/summary event and recovered by verifiedReadingsOf, so later steps need not re-run the checks.',
+        },
       },
       additionalProperties: false,
     },
@@ -217,7 +237,7 @@ interface CompressArgs {
   /** Tolerated wrapped-arguments form (model-generated double-nesting). */
   arguments?: string | { content?: CompressArgs['content'] }
   topic?: string
-  content?: Array<{ startSeq: number | string; endSeq: number | string; summary: string; topic?: string }>
+  content?: Array<{ startSeq: number | string; endSeq: number | string; summary: string; topic?: string; verifiedReadings?: string[] }>
 }
 
 /**
@@ -403,6 +423,8 @@ async function handleCompress(env: ToolEnvironment, args: CompressArgs, exec: To
       endRef: string
       summary: string
       topic?: string
+      /** B3：本段压缩时已绿的验收读数（结构化落盘）。 */
+      verifiedReadings?: string[]
     }
   > = []
   // Ranges whose whole span was already shadowed by earlier compressions.
@@ -477,6 +499,10 @@ async function handleCompress(env: ToolEnvironment, args: CompressArgs, exec: To
       endSeq,
       startRef,
       endRef,
+      // B3：把该段声明的已绿验收读数带上（缺位=不写键）
+      ...(Array.isArray(range.verifiedReadings) && range.verifiedReadings.length > 0
+        ? { verifiedReadings: range.verifiedReadings.map(String) }
+        : {}),
       summary: range.summary,
       ...(range.topic ?? args.topic) === undefined ? {} : { topic: range.topic ?? args.topic },
     })
@@ -587,6 +613,8 @@ async function handleCompress(env: ToolEnvironment, args: CompressArgs, exec: To
       // its parents' originals, not the checkpoint node).
       directMessageIds: block.directMessageIds,
       effectiveMessageIds: block.effectiveMessageIds,
+      // B3：已绿验收读数随压缩块落盘（缺位=不写键）
+      ...(range.verifiedReadings === undefined ? {} : { verifiedReadings: range.verifiedReadings }),
     })
     const adjusted = start !== range.startSeq || end !== range.endSeq
     // Always report the tier, even tier 1: a silently-downgraded distill
@@ -594,13 +622,19 @@ async function handleCompress(env: ToolEnvironment, args: CompressArgs, exec: To
     // message) must be visible to the model immediately, or the model keeps
     // believing the distillation landed (issue #60, failure mode 2).
     const tierLabel = `, tier ${tier}`
+    // B3 must be READABLE, not just durable: echo the recorded readings back in the
+    // compress result, otherwise "later steps need not re-run them" is unreachable
+    // (the field had no other production reader).
+    const readingsLabel = range.verifiedReadings !== undefined && range.verifiedReadings.length > 0
+      ? `, verified: ${range.verifiedReadings.join('; ')}`
+      : ''
     const note = range.recovered === true
       ? ` (seqs ${range.startSeq}..${range.endSeq} were already shadowed — compressed the live remainder ${start}..${end})`
       : adjusted
         ? ` (adjusted from ${range.startSeq}..${range.endSeq} to balanced edges)`
         : ''
     lines.push(
-      `  block ${compactionId.slice(0, 8)}: seqs ${start}..${end}, ${shadowed.length} messages shadowed${tierLabel}${note}`,
+      `  block ${compactionId.slice(0, 8)}: seqs ${start}..${end}, ${shadowed.length} messages shadowed${tierLabel}${readingsLabel}${note}`,
     )
   }
 

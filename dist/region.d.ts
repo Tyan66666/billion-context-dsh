@@ -35,6 +35,8 @@ export interface AcpBlockLedgerEntry {
     /** The kernel block's raw direct/effective message ids at creation (recorded since the tier feature; absent for legacy). */
     readonly directMessageIds?: readonly string[];
     readonly effectiveMessageIds?: readonly string[];
+    /** B3: acceptance readings that were already green before compression (absent when the compress call carried none). */
+    readonly verifiedReadings?: readonly string[];
     /** Unix epoch ms of the compaction/summary event. */
     readonly createdAt: number;
 }
@@ -118,6 +120,8 @@ export interface CompactionTransactionInput {
     /** The kernel block's direct/effective message ids (raw CoreMessage ids) — recorded for faithful rehydration. */
     readonly directMessageIds?: readonly string[];
     readonly effectiveMessageIds?: readonly string[];
+    /** B3：压缩前已绿的验收读数（结构化，压缩后仍可读）。 */
+    readonly verifiedReadings?: readonly string[];
 }
 type CompactionSummaryData = SessionEventMap['compaction/summary'];
 /**
@@ -129,6 +133,19 @@ type CompactionSummaryData = SessionEventMap['compaction/summary'];
  * readers fall back to the legacy shape. Never `any`.
  */
 export declare function readCompactionSummary(event: SessionEvent): CompactionSummaryData & AcpBlockLedgerPayload;
+/**
+ * B3: read the structured verified readings a compress call recorded for this
+ * block (acceptance checks that were already green before the range was
+ * shadowed — e.g. "t0-fastpath 8/8"). Post-fix writers carry them inside the
+ * admitted `rawOutput` member (AcpBlockLedgerPayload); legacy writers put them
+ * top-level. Absent in either shape → empty array; never throws.
+ */
+export declare function verifiedReadingsOf(event: SessionEvent): string[];
+/**
+ * B1：给摘要块数组的第一个文本块加标源前缀（幂等——已带前缀不重复加）。
+ * 只动文本块，工具/图片块原样保留。
+ */
+export declare function prefixSummaryBlocks(blocks: readonly ContentBlock[]): ContentBlock[];
 /**
  * Run one durable compression transaction. Throws on invalid state; on success
  * the four events are in the log and the surface has one summary node.
@@ -241,22 +258,54 @@ export declare function newestInstructionSeqsOf(session: Session): Set<number>;
  */
 export declare function guardedSurfaceSeqsOf(session: Session): Set<number>;
 /**
- * Compute compressible spans directly from the surface — independent of the
- * kernel's ref map, which can drift after surface replacements in long
- * sessions and hide large tool results from the nudge range table. Skips the
- * recent protected tail (last REAL user turn — injected rows never win it,
- * see isRealUserTurn), the newest AGENTS.md row of every scope, compaction
- * checkpoints, and ALL host instruction/policy rows (they are barriers that
- * split segments — compressing a current instruction row makes the host
- * re-inject it, the loop this PR fixes). Engine-authored metadata rows (nudge
- * echo, compress-pair stub) fold into the adjacent real segment like main.
- * Edges are then balanced through resolveSurfaceRange. Ranges are ordered
- * oldest-first (stable across turns — matches the kernel's `oldest first`).
- * UPSTREAM: this self-computation is a labeled workaround for kernel
- * ref-map drift after surface replacements (AGENTS.md rule 11) — drop it and
- * use kernel compressibleRanges once the drift is fixed upstream.
+ * The kernel's own view of what can be compressed, as the engine hands it to
+ * the range table: the geometry (`nudge.compressibleRanges`) plus the ref map
+ * that turns a kernel ref back into a surface seq (`state.messageRefs`).
+ *
+ * Structural shapes only, so the engine passes the kernel's own objects
+ * straight through and tests can hand-build a view.
  */
-export declare function buildCompressibleSeqRanges(session: Session, opts?: {
+export interface KernelRangeView {
+    /** Kernel `recommendedRanges`/`compressibleRanges` entries (oldest first). */
+    readonly ranges: readonly {
+        readonly startRef: string;
+        readonly endRef: string;
+    }[];
+    /** Kernel ref map: `mNNNNN` → our message id (which IS the surface seq). */
+    readonly refs: {
+        readonly byRef: Readonly<Record<string, string>>;
+    };
+}
+/**
+ * Compressible spans in the DSH seq dialect, for the nudge range table.
+ *
+ * The GEOMETRY — which messages group into one compressible span — comes from
+ * the kernel's own ranges (design decision 7: the kernel owns the algorithm).
+ * The kernel splits a group when the next message is a user turn and the group
+ * already holds 3+ messages, and after any protected or already-compressed
+ * message, so a row reads as "roughly one stretch of work" rather than an
+ * arbitrary slice. This function only does the two jobs the kernel cannot:
+ *
+ * 1. Translate refs into surface seqs — DSH has no `<acp>` ref tags; seq is our
+ *    ref (design decision 2).
+ * 2. Apply the host guards on top of the kernel's grouping: injected
+ *    instruction rows split a span and the newest copy of every scope is never
+ *    offered, checkpoints and the surface's system node are not compressible,
+ *    and the recent tail plus the last REAL user turn stay protected (rule 16).
+ *
+ * History — why this used to compute the spans itself. A kernel range's edges
+ * were derived by counting refs, and a surface replacement breaks that
+ * arithmetic: the checkpoint node of a replace lands mid-array carrying a much
+ * higher ref, so ref order and array order diverge and the spans came back
+ * reversed (`end < start`) or lost large tool results entirely. The table was
+ * therefore self-computed from the surface, labeled `UPSTREAM:` and tracked as
+ * issue #38 (rule 11). The pinned kernel segments by ARRAY adjacency instead
+ * (upstream #207) and the drift is gone — measured on a session whose
+ * compressed span sits in the MIDDLE of the surface: every ref resolves to the
+ * right seq, no span crosses the shadowed hole, and the compressed span is
+ * excluded. Rules 3 and 11 are updated with it.
+ */
+export declare function buildCompressibleSeqRanges(session: Session, kernelView: KernelRangeView, opts?: {
     preserveRecent?: number;
 }): SeqCompressibleRange[];
 /**

@@ -27,9 +27,9 @@ export declare const ACP_BLOCK_LEDGER_MARKER = "$dshAcpBlockLedger";
 /** Current block-ledger payload version. Bump (and add a legacy reader) when the shape changes. */
 export declare const ACP_BLOCK_LEDGER_VERSION = 1;
 /**
- * The six ACP tier/lineage fields carried durably per compressed block so a
+ * The ACP tier/lineage fields carried durably per compressed block so a
  * restarted engine rehydrates the SAME kernel blocks (tier, lineage, coverage)
- * instead of collapsing everything to tier 1.
+ * instead of collapsing everything to tier 1, plus B3's verified readings.
  */
 export interface AcpBlockLedgerPayload {
     /** Compression tier: 1 (message range), 2 (distills tier-1), 3 (distills tier-2). */
@@ -44,6 +44,8 @@ export interface AcpBlockLedgerPayload {
     readonly directMessageIds?: readonly string[];
     /** The kernel block's effective message ids at creation (raw CoreMessage ids). */
     readonly effectiveMessageIds?: readonly string[];
+    /** B3: acceptance readings already green before compression (e.g. "t0-fastpath 8/8"). */
+    readonly verifiedReadings?: readonly string[];
 }
 /**
  * Encode the block-ledger fields as a single text content block whose text is a

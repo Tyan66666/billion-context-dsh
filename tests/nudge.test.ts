@@ -10,7 +10,7 @@ import { makeTools, type ToolEnvironment } from '../src/tools.ts'
 import { rebuildBlockLedger, runCompactionTransaction } from '../src/region.ts'
 import { allLogMessages, eventsToCoreMessages, surfaceEventsOf } from '../src/messages.ts'
 import { Session } from '@deepseek-ai/dsh-session'
-import { appendToolCall, appendToolResult, appendTurn, appendUser, buildTextSession, longText } from './helpers.ts'
+import { appendToolCall, appendToolResult, appendTurn, appendUser, buildTextSession, longText, wholeSurfaceRangeView } from './helpers.ts'
 
 function fakeAgent(session: import('@deepseek-ai/dsh-session').Session): Agent {
   return {
@@ -168,7 +168,7 @@ test('M4: a normal nudge does not consume the emergency budget (issue #108)', ()
 
 test('M4: range table is computed from the surface, skipping the protected tail', () => {
   const session = buildTextSession(12)
-  const text = rangeTable(session)
+  const text = rangeTable(session, wholeSurfaceRangeView(session))
   assert.match(text, /Compressible ranges/)
   assert.match(text, /Surface: 12 nodes, seqs 1\.\.12/, 'the range table also reports the surface span so edges are locatable')
   // The protected recent tail (last 5 messages) is skipped; older runs appear.
@@ -230,7 +230,7 @@ test('M4: buildNudgeText renders the distillable tier-2 line with surface seqs',
       pendingT3: 0,
     },
   }
-  const text = buildNudgeText(decision, false, session)
+  const text = buildNudgeText(decision, false, session, wholeSurfaceRangeView(session))
   assert.match(text, /Tier 2: 1 tier-1 block\(s\) distillable \(4750 tokens\)/)
   const summarySeq = rebuildBlockLedger(session.snapshotEvents())[0]!.summarySeq
   assert.ok(summarySeq !== undefined, 'the checkpoint seq is derivable from the log')

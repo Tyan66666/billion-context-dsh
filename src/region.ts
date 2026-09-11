@@ -28,6 +28,7 @@ import {
   isCheckpointNode,
   isRealUserTurn,
   toolCallIdOfResultEvent,
+  withSummaryFramePrefix,
 } from './messages.ts'
 import { hostPriceEvent } from './host-tokens.ts'
 import { eventAtOf, sessionEventsOf } from './session-events.ts'
@@ -65,6 +66,8 @@ export interface AcpBlockLedgerEntry {
   /** The kernel block's raw direct/effective message ids at creation (recorded since the tier feature; absent for legacy). */
   readonly directMessageIds?: readonly string[]
   readonly effectiveMessageIds?: readonly string[]
+  /** B3: acceptance readings that were already green before compression (absent when the compress call carried none). */
+  readonly verifiedReadings?: readonly string[]
   /** Unix epoch ms of the compaction/summary event. */
   readonly createdAt: number
 }
@@ -373,6 +376,8 @@ export interface CompactionTransactionInput {
   /** The kernel block's direct/effective message ids (raw CoreMessage ids) — recorded for faithful rehydration. */
   readonly directMessageIds?: readonly string[]
   readonly effectiveMessageIds?: readonly string[]
+  /** B3：压缩前已绿的验收读数（结构化，压缩后仍可读）。 */
+  readonly verifiedReadings?: readonly string[]
 }
 
 type CompactionSummaryData = SessionEventMap['compaction/summary']
@@ -387,6 +392,33 @@ type CompactionSummaryData = SessionEventMap['compaction/summary']
  */
 export function readCompactionSummary(event: SessionEvent): CompactionSummaryData & AcpBlockLedgerPayload {
   return event.data as CompactionSummaryData & AcpBlockLedgerPayload
+}
+
+/**
+ * B3: read the structured verified readings a compress call recorded for this
+ * block (acceptance checks that were already green before the range was
+ * shadowed — e.g. "t0-fastpath 8/8"). Post-fix writers carry them inside the
+ * admitted `rawOutput` member (AcpBlockLedgerPayload); legacy writers put them
+ * top-level. Absent in either shape → empty array; never throws.
+ */
+export function verifiedReadingsOf(event: SessionEvent): string[] {
+  const data = readCompactionSummary(event)
+  const list = decodeAcpBlockLedger(data.rawOutput).verifiedReadings ?? data.verifiedReadings
+  return Array.isArray(list) ? list.map(String) : []
+}
+
+/**
+ * B1：给摘要块数组的第一个文本块加标源前缀（幂等——已带前缀不重复加）。
+ * 只动文本块，工具/图片块原样保留。
+ */
+export function prefixSummaryBlocks(blocks: readonly ContentBlock[]): ContentBlock[] {
+  let done = false
+  return blocks.map((block) => {
+    if (done || block.type !== 'text') return block
+    done = true
+    const textBlock = block as { type: 'text'; text: string }
+    return { ...textBlock, text: withSummaryFramePrefix(textBlock.text) } as ContentBlock
+  })
 }
 
 /**
@@ -435,10 +467,18 @@ export function runCompactionTransaction(
         : { parentBlockIds: [...input.parentBlockIds] }),
       ...(input.directMessageIds === undefined ? {} : { directMessageIds: [...input.directMessageIds] }),
       ...(input.effectiveMessageIds === undefined ? {} : { effectiveMessageIds: [...input.effectiveMessageIds] }),
+      ...(input.verifiedReadings === undefined || input.verifiedReadings.length === 0
+        ? {}
+        : { verifiedReadings: [...input.verifiedReadings] }),
     }
+    // B1: frame the model-written summary ONCE at creation and write the SAME framed
+    // blocks to both the durable compaction/summary event and the checkpoint node
+    // below — log readers (search, acp_status, ledger) must never see different text
+    // than what the model sees in context (review item: prefix/raw mismatch).
+    const framedSummary = prefixSummaryBlocks(input.summary)
     seqs.push(session.append('compaction/summary', {
       compactionId,
-      summary: input.summary,
+      summary: framedSummary,
       shadowedRange: { start: input.start, end: input.end },
       shadowedSeqs: [...input.shadowedSeqs],
       shadowedTokenCount: input.shadowedTokenCount,
@@ -447,8 +487,11 @@ export function runCompactionTransaction(
       rawOutput: encodeAcpBlockLedger(ledgerPayload),
     } as CompactionSummaryData).seq)
 
+    // The checkpoint node carries the SAME framed blocks as the compaction/summary
+    // event (see above); projection-time framing in messages.ts stays as an
+    // idempotent safety net for legacy blocks written before this feature.
     const message = createUserMessage({
-      content: input.summary,
+      content: framedSummary,
       source: compactCheckpointSource(compactionId),
     })
     // The replace op MUST use the 0.1.5 field names: dsh-session's validator
@@ -544,6 +587,9 @@ export function rebuildBlockLedger(events: readonly SessionEvent[]): AcpBlockLed
     const topic: string | undefined = embedded.topic ?? (typeof data.topic === 'string' ? data.topic : undefined)
     const kernelBlockId: string | undefined = embedded.kernelBlockId
       ?? (typeof data.kernelBlockId === 'string' ? data.kernelBlockId : undefined)
+    const verifiedReadings: string[] | undefined = embedded.verifiedReadings
+      ? [...embedded.verifiedReadings]
+      : (Array.isArray(data.verifiedReadings) ? [...data.verifiedReadings] : undefined)
     const summarySeq = summarySeqs.get(data.compactionId) ?? null
     ledger.push({
       blockId: data.compactionId,
@@ -559,6 +605,7 @@ export function rebuildBlockLedger(events: readonly SessionEvent[]): AcpBlockLed
       ...(summarySeq === null ? {} : { summarySeq }),
       ...(directMessageIds === undefined ? {} : { directMessageIds }),
       ...(effectiveMessageIds === undefined ? {} : { effectiveMessageIds }),
+      ...(verifiedReadings === undefined ? {} : { verifiedReadings }),
       createdAt: event.time,
     })
   }
@@ -931,119 +978,207 @@ export function guardedSurfaceSeqsOf(session: Session): Set<number> {
 }
 
 /**
- * Compute compressible spans directly from the surface — independent of the
- * kernel's ref map, which can drift after surface replacements in long
- * sessions and hide large tool results from the nudge range table. Skips the
- * recent protected tail (last REAL user turn — injected rows never win it,
- * see isRealUserTurn), the newest AGENTS.md row of every scope, compaction
- * checkpoints, and ALL host instruction/policy rows (they are barriers that
- * split segments — compressing a current instruction row makes the host
- * re-inject it, the loop this PR fixes). Engine-authored metadata rows (nudge
- * echo, compress-pair stub) fold into the adjacent real segment like main.
- * Edges are then balanced through resolveSurfaceRange. Ranges are ordered
- * oldest-first (stable across turns — matches the kernel's `oldest first`).
- * UPSTREAM: this self-computation is a labeled workaround for kernel
- * ref-map drift after surface replacements (AGENTS.md rule 11) — drop it and
- * use kernel compressibleRanges once the drift is fixed upstream.
+ * The kernel's own view of what can be compressed, as the engine hands it to
+ * the range table: the geometry (`nudge.compressibleRanges`) plus the ref map
+ * that turns a kernel ref back into a surface seq (`state.messageRefs`).
+ *
+ * Structural shapes only, so the engine passes the kernel's own objects
+ * straight through and tests can hand-build a view.
  */
-export function buildCompressibleSeqRanges(
-  session: Session,
-  opts: { preserveRecent?: number } = {},
-): SeqCompressibleRange[] {
-  // Orphan tool messages corrupt the pairing balance cache and fragment every
-  // large span. Prune them before scanning so the range table reflects the
-  // actually compressible surface (issue #18).
-  stripOrphanedSurfaceToolMessages(session)
+export interface KernelRangeView {
+  /** Kernel `recommendedRanges`/`compressibleRanges` entries (oldest first). */
+  readonly ranges: readonly { readonly startRef: string; readonly endRef: string }[]
+  /** Kernel ref map: `mNNNNN` → our message id (which IS the surface seq). */
+  readonly refs: { readonly byRef: Readonly<Record<string, string>> }
+}
+
+/** `mNNNNN` → surface seq, or null when this session has no such ref. */
+function seqOfKernelRef(refs: KernelRangeView['refs'], ref: string): number | null {
+  const id = refs.byRef[ref]
+  if (id === undefined) return null
+  // Our CoreMessage ids ARE surface seqs (src/messages.ts), so the kernel's ref
+  // map is the bridge between the two id dialects.
+  const seq = Number(id)
+  return Number.isInteger(seq) ? seq : null
+}
+
+/**
+ * Surface seqs the range table must never offer, in two roles: they are skipped
+ * when scanning a span AND they split it, because a span that reaches across
+ * one would shadow it. Three sources:
+ *
+ * - the recent tail (`preserveRecent`, default 5) — cheap protection for the
+ *   messages the current step is still working with;
+ * - the last REAL user turn (never an injected row — see `isRealUserTurn`);
+ * - the newest instruction row of every scope: the host re-injects the current
+ *   copy of an instruction file the moment it disappears from the surface, so
+ *   folding it reclaims nothing (rule 16).
+ */
+function protectedSurfaceSeqs(session: Session, preserve: number): Set<number> {
   const nodes = session.surface.nodes
-  const preserve = opts.preserveRecent ?? 5
   const protectedSeqs = new Set<number>()
   // `nodes.slice(-preserve)` would protect EVERYTHING when preserve is 0
   // (`slice(-0) === slice(0)`) — guard so 0 means "no recent protection".
   if (preserve > 0) {
     for (const seq of nodes.slice(-preserve)) protectedSeqs.add(seq)
   }
+  // Only a REAL user turn may win "last user message" protection. A plain
+  // `role === 'user'` scan protects the injected AGENTS.md row instead whenever
+  // the host appended it in the same enter batch as the user input — the actual
+  // last user message was then left compressible while synthetic output sat
+  // safe (issue #71 PR1). The classifier subsumes the narrower guards the old
+  // scan carried: checkpoints are their own class, and engine-authored rows
+  // (prune tombstones, compress-pair stubs) are `metadata`.
   for (let index = nodes.length - 1; index >= 0; index -= 1) {
     const event = eventAtOf(session, nodes[index]!)
-    // Only a REAL user turn may win "last real user message" protection. The
-    // scan this replaces protected "the last non-checkpoint user/message",
-    // which on live sessions is frequently an injected AGENTS.md row (the
-    // host appends it in the same enter batch as the user input) — the
-    // actual last user message was left compressible while synthetic output
-    // sat safe (issue #71 PR1). The classifier subsumes the narrower guards
-    // main's version carried: checkpoints are their own class, and
-    // engine-authored rows (prune tombstones, compress-pair stubs) are
-    // `metadata`, so neither can steal the protection window.
     if (event !== undefined && isRealUserTurn(event)) {
       protectedSeqs.add(nodes[index]!)
       break
     }
   }
-  // The newest instruction row of every scope (source file) is never offered
-  // either: the host re-injects the current copy when it disappears from the
-  // surface, so folding it into a block starts the compress → re-inject →
-  // compress loop (belt-and-braces — the instruction barrier below already
-  // keeps every instruction row out of segments; the pin also documents intent
-  // for future range-solving integration).
   for (const seq of newestInstructionSeqsOf(session)) protectedSeqs.add(seq)
-  const raw: Array<{ start: number; end: number; count: number; tokens: number; toolCount: number }> = []
-  let cur: { start: number; end: number; count: number; tokens: number; toolCount: number } | null = null
+  return protectedSeqs
+}
+
+/** One compressible run inside a kernel range. `start`/`end` are surface seqs. */
+interface CompressibleSegment {
+  start: number
+  end: number
+  count: number
+  tokens: number
+  toolCount: number
+}
+
+/**
+ * Split the surface nodes at `fromIndex..toIndex` (a kernel range, in surface
+ * order) into contiguous compressible runs.
+ *
+ * A node that cannot be compressed ENDS the run rather than being skipped: the
+ * host guards (instruction rows, the protected tail) are barriers, and a span
+ * that reached across one would shadow it — the compress → re-inject loop of
+ * issue #71 depends on that. Panel edges are reported as min/max because the
+ * surface is locally unordered after a replacement (a checkpoint node lands
+ * with a much higher seq than its neighbours).
+ */
+function compressibleSegmentsOf(
+  session: Session,
+  fromIndex: number,
+  toIndex: number,
+  protectedSeqs: ReadonlySet<number>,
+): CompressibleSegment[] {
+  const nodes = session.surface.nodes
+  const segments: CompressibleSegment[] = []
+  let current: CompressibleSegment | null = null
   const flush = (): void => {
-    if (cur !== null) raw.push(cur)
-    cur = null
+    if (current !== null) segments.push(current)
+    current = null
   }
-  for (const seq of nodes) {
+  for (let index = fromIndex; index <= toIndex; index += 1) {
+    const seq = nodes[index]
+    if (seq === undefined) continue
     const event = eventAtOf(session, seq)
-    if (event === undefined || protectedSeqs.has(seq) || isCheckpointNode(event) || isSystemNode(event)) {
+    if (
+      event === undefined
+      || protectedSeqs.has(seq)
+      || isCheckpointNode(event)
+      || isSystemNode(event)
+      // Host policy rows (AGENTS.md injections in both shapes, skill catalogs,
+      // unknown plugin rows — `classifySurfaceEvent` 'instruction') are
+      // barriers. Compressing the CURRENT copy of an instruction file makes the
+      // host re-inject it on its next step — the tokens come straight back, and
+      // a model that keeps compressing them loops forever (live-measured: 20 of
+      // 43 compressions in a long session re-triggered an injection within 7
+      // events; observed again live in session-8c15904e, seq 8 absorbed by a
+      // compress → host re-injected at seq 53191). Stale copies stay barriers
+      // here too; the system-side GC that removes them lands separately
+      // (instruction hygiene PR2). Engine-authored metadata rows (nudge echo,
+      // compress-pair stub) intentionally fall through and stay foldable.
+      || classifySurfaceEvent(event) === 'instruction'
+    ) {
       flush()
       continue
-    }
-    // Host policy rows (AGENTS.md injections in both shapes, skill catalogs,
-    // unknown plugin rows — classifySurfaceEvent 'instruction') are BARRIERS:
-    // flush the open segment and skip the row entirely. Compressing the
-    // CURRENT copy of an instruction file makes the host re-inject it on its
-    // next step — the tokens come straight back, and a model that keeps
-    // compressing them loops forever (live-measured: 20 of 43 compressions in
-    // a long session re-triggered an injection within 7 events; observed
-    // again live in session-8c15904e, seq 8 absorbed by a compress → host
-    // re-injected at seq 53191). Stale copies stay barriers in this PR too;
-    // the system-side GC that removes them lands separately (instruction
-    // hygiene PR2). Engine-authored metadata rows (nudge echo, compress-pair
-    // stub) intentionally fall through and stay foldable like main.
-    if (classifySurfaceEvent(event) === 'instruction') {
-      flush()
-      continue
-    }
-    // Surface nodes can be locally out of order after surface replacements in
-    // long sessions; a node with a SMALLER seq than the running segment would
-    // produce a reversed range (e.g. 110295..106762). Break the segment so
-    // ranges always stay start <= end.
-    if (cur !== null && seq < cur.start) {
-      flush()
-      cur = null
     }
     const tokens = defaultCountTokens(extractEventText(event))
     const isTool = isToolEvent(event)
-    if (cur === null) {
-      cur = { start: seq, end: seq, count: 1, tokens, toolCount: isTool ? 1 : 0 }
+    if (current === null) {
+      current = { start: seq, end: seq, count: 1, tokens, toolCount: isTool ? 1 : 0 }
     } else {
-      cur = { start: cur.start, end: seq, count: cur.count + 1, tokens: cur.tokens + tokens, toolCount: cur.toolCount + (isTool ? 1 : 0) }
+      current.start = Math.min(current.start, seq)
+      current.end = Math.max(current.end, seq)
+      current.count += 1
+      current.tokens += tokens
+      current.toolCount += isTool ? 1 : 0
     }
   }
   flush()
+  return segments
+}
+
+/**
+ * Compressible spans in the DSH seq dialect, for the nudge range table.
+ *
+ * The GEOMETRY — which messages group into one compressible span — comes from
+ * the kernel's own ranges (design decision 7: the kernel owns the algorithm).
+ * The kernel splits a group when the next message is a user turn and the group
+ * already holds 3+ messages, and after any protected or already-compressed
+ * message, so a row reads as "roughly one stretch of work" rather than an
+ * arbitrary slice. This function only does the two jobs the kernel cannot:
+ *
+ * 1. Translate refs into surface seqs — DSH has no `<acp>` ref tags; seq is our
+ *    ref (design decision 2).
+ * 2. Apply the host guards on top of the kernel's grouping: injected
+ *    instruction rows split a span and the newest copy of every scope is never
+ *    offered, checkpoints and the surface's system node are not compressible,
+ *    and the recent tail plus the last REAL user turn stay protected (rule 16).
+ *
+ * History — why this used to compute the spans itself. A kernel range's edges
+ * were derived by counting refs, and a surface replacement breaks that
+ * arithmetic: the checkpoint node of a replace lands mid-array carrying a much
+ * higher ref, so ref order and array order diverge and the spans came back
+ * reversed (`end < start`) or lost large tool results entirely. The table was
+ * therefore self-computed from the surface, labeled `UPSTREAM:` and tracked as
+ * issue #38 (rule 11). The pinned kernel segments by ARRAY adjacency instead
+ * (upstream #207) and the drift is gone — measured on a session whose
+ * compressed span sits in the MIDDLE of the surface: every ref resolves to the
+ * right seq, no span crosses the shadowed hole, and the compressed span is
+ * excluded. Rules 3 and 11 are updated with it.
+ */
+export function buildCompressibleSeqRanges(
+  session: Session,
+  kernelView: KernelRangeView,
+  opts: { preserveRecent?: number } = {},
+): SeqCompressibleRange[] {
+  // Orphan tool messages corrupt the pairing balance cache and fragment every
+  // large span. Prune them before mapping so the table reflects the surface
+  // that will actually be compressed (issue #18).
+  stripOrphanedSurfaceToolMessages(session)
+  const nodes = session.surface.nodes
+  const indexOfSeq = new Map<number, number>()
+  for (let index = 0; index < nodes.length; index += 1) indexOfSeq.set(nodes[index]!, index)
+  const protectedSeqs = protectedSurfaceSeqs(session, opts.preserveRecent ?? 5)
   const out: SeqCompressibleRange[] = []
-  for (const range of raw) {
-    try {
-      const { start, end } = resolveSurfaceRange(session, range.start, range.end)
-      const count = range.count
-      out.push({
-        start,
-        end,
-        count,
-        tokens: range.tokens,
-        toolPct: count > 0 ? Math.round((range.toolCount / count) * 100) : 0,
-      })
-    } catch {
-      // Cannot be balanced into a compressible span — skip.
+  for (const range of kernelView.ranges) {
+    const startSeq = seqOfKernelRef(kernelView.refs, range.startRef)
+    const endSeq = seqOfKernelRef(kernelView.refs, range.endRef)
+    // A ref the kernel knows but this surface does not contributes nothing —
+    // skip the range rather than guess a span for it.
+    const from = startSeq === null ? undefined : indexOfSeq.get(startSeq)
+    const to = endSeq === null ? undefined : indexOfSeq.get(endSeq)
+    if (from === undefined || to === undefined) continue
+    const segments = compressibleSegmentsOf(session, Math.min(from, to), Math.max(from, to), protectedSeqs)
+    for (const segment of segments) {
+      try {
+        const { start, end } = resolveSurfaceRange(session, segment.start, segment.end)
+        out.push({
+          start,
+          end,
+          count: segment.count,
+          tokens: segment.tokens,
+          toolPct: segment.count > 0 ? Math.round((segment.toolCount / segment.count) * 100) : 0,
+        })
+      } catch {
+        // Cannot be balanced into a compressible span — skip.
+      }
     }
   }
   // Oldest-first: the order is stable across turns (the oldest ranges do not

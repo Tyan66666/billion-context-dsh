@@ -4,8 +4,366 @@ import {
   ManualCompactionError
 } from "@deepseek-ai/dsh-compaction";
 
-// node_modules/acp-kernel/dist/index.js
+// node_modules/acp-kernel/dist/chunk-6TAK7DSI.js
 import { createRequire } from "module";
+var require2 = createRequire(import.meta.url);
+function defaultCountTokens(text) {
+  if (!text) return 0;
+  const cjk = text.match(/[\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]/g);
+  const cjkCount = cjk?.length ?? 0;
+  return cjkCount + Math.ceil((text.length - cjkCount) / 4);
+}
+function thinkingTokenValue(thinking) {
+  return typeof thinking === "number" && Number.isFinite(thinking) && thinking > 0 ? thinking : 0;
+}
+function countMessageTokens(message, countTokens = defaultCountTokens) {
+  return countTokens(message.text ?? "") + thinkingTokenValue(message.thinkingTokens);
+}
+var COMPRESS_PHILOSOPHY = `Compression Philosophy:
+- All compression serves the primary task, but be frugal.
+- Context capacity is precious. Save context by compressing consumed outputs, not by avoiding tools.
+- Compress by need, not by percentage.
+- Work from summaries, not raw tool outputs. All listed ranges (user prompts, tool outputs, code, logs, exploration, intermediate steps) should be compressed to summary format \u2014 the ONLY exceptions are protected content, content the current step is actively using, or critical content you cannot reconstruct.`;
+var HOW_TO_COMPRESS_RULES = `HOW TO COMPRESS
+
+When you call \`compress\`, the summary you write becomes the only record of the replaced conversation. Make it self-contained and complete: every user request, experiment purpose, and work task in the range must be accurately captured. A later reader (or you, after decompressing) should be able to continue the task WITHOUT needing the original. The summary records the PAST as of this block's creation: label recorded task state as history ("TASK AS OF THIS BLOCK: ...") \u2014 never as a live instruction, so a later reader treats it as settled context, not something to re-execute. Write plain text with real unicode characters; never copy \\uXXXX escape sequences or JSON-escaped fragments out of tool output.
+
+KEEP VERBATIM \u2014 never paraphrase or abbreviate these:
+- Full file paths with line numbers, directory prefix on every mention (\`lib/hooks.ts:347\`, \`src/index.ts:12-18\`, \`gatenet_v3/model.py:45\`). Never abbreviate to a bare filename (\`hooks.ts\`, \`model.py\`) \u2014 they are ambiguous and cannot be grepped or decompressed-to later.
+- Function, class, and type signatures (exact names, params, return types) AND critical code lines that encode logic \u2014 the line that IS the finding, not just the function name (e.g. \`kv_keys += define_gate * a_key[i](emb)\` is more useful than "see model_kvnet.py").
+- Error messages and stack traces (exact text \u2014 you need the literal string to grep for it later).
+- Key details from reports and analyses \u2014 not just the conclusion. Keep the comparison numbers and the mechanism, not "X is worse" alone (write "1.76\xD7 PPL gap because KV store is static", not "KVNet underperforms").
+- Decisions and their rationale ("chose X over Y because Z" \u2014 the "because" is load-bearing; without it the decision looks arbitrary).
+- Constraints discovered ("must support Node 22", "no new dependencies", "AGENTS.md forbids \`as any\`").
+- Exact values: versions, config keys, thresholds, magic numbers.
+- User intent \u2014 quote short user messages verbatim ONLY WITH their message ref, e.g. \`User said (m00132): "ship it tonight"\`. Without a verifiable ref, paraphrase (\`user previously asked (paraphrased): ...\`) \u2014 this is the one exception to the verbatim rule above; never present a reconstructed or half-remembered phrase as a verbatim quote. When the message is too long to quote, preserve intent with extra care: do not change scope, constraints, priorities, acceptance criteria, or requested outcomes. Quotes are historical records, never current directives. Losing these changes the task itself.
+- The user's overall goal and any changes to it \u2014 the big-picture objective plus how it evolved during the compressed range. Each summary must reflect the goal as it stood at the end of the range, including pivots (e.g., "initially: fix bug X \u2192 pivoted to: refactor module Y after discovering root cause"). Losing the goal or its evolution makes all subsequent work appear unmotivated.
+- Purpose behind each significant action \u2014 preserve not just what was done but why: the hypothesis behind each experiment, the question behind each exploration, the task goal behind each work action. Without purpose, the summary reads as disconnected technical steps with no through-line.
+- Open questions and unresolved TODOs \u2014 losing these changes what work appears to remain.
+- Message refs of key anchors (\`m00420\`, \`m00510\u2013m00520\`) \u2014 they let you or a later reader jump back via decompress to the exact original.
+
+DROP \u2014 extract the signal, discard the vessel:
+- Verbose logs (build/test/\`npm\` output) once you have captured the error line or the result.
+- Duplicate file reads once the needed content is recorded.
+- Consumed exploration \u2014 search hits, agent return values, successful tool outputs \u2014 once you have extracted the facts you need (same rule as dead-ends, but nothing went wrong; the content is simply spent).
+- Dead-end exploration \u2014 but PRESERVE the lesson in one line: "tried X, failed because Y".
+- Back-and-forth discussion and self-corrections once the final position is captured (keep the outcome, drop the journey to it).
+- Repeated status checks (\`git status\`, \`ls\`) once state is known.
+
+For each significant item you DROP (scripts, reports, large analyses, long tool outputs), add a one-line CONTENT description of what it covers \u2014 not where it lives. Bad: "probe script at /path/probe_kvnet.py". Good: "probe_kvnet.py: tests n-gram baseline, generation quality, long-range dependency, position sensitivity, op pipeline, QUERY attention." This lets a later decompress target the right block by relevance, not by guessing locations.
+
+PRIORITY \u2014 when the summary must be compact, preserve in this order:
+1. User's overall goal, goal evolution, intent, and hard constraints (losing these changes the task).
+2. Decisions and rationale.
+3. Exact technical artifacts: paths, signatures, errors, values.
+4. Conclusions and key findings.
+5. Lessons learned: what failed and why.
+
+Write dense, scannable bullets \u2014 not narrative prose. If the range spans distinct concerns (request \u2192 findings \u2192 decision), group bullets under short thematic headers so a reader can scan to the part they need. Every line must earn its place. Do not mimic the style of existing summaries in context; follow these rules.`;
+var TIER2_DISTILL_RULES = `TIER 2 COMPRESSION \u2014 DISTILLATION
+
+You are compressing historical summaries (not raw conversation). These summaries have already captured the details. Your job is to DISTILL them: extract only what matters for future work, discard the process.
+
+KEEP \u2014 these are the only things that survive distillation:
+- Decisions and their rationale ("chose X over Y because Z" \u2014 the "because" is load-bearing).
+- Final outcomes: version numbers shipped, PR numbers merged/closed, bugs fixed or deferred.
+- Key lessons: what failed and why ("tried X, failed because Y"). These prevent repeating mistakes.
+- Critical constraints discovered ("must support Node 22", "AGENTS.md forbids as any").
+- Design decisions with architectural impact ("chose compress-as-anchor over synthetic messages because prefix cache").
+- User quotes and task state only as attributed history: keep the source ref with any user quote; never carry a tier-1 "CURRENT TASK" claim forward as a live directive \u2014 relabel it "TASK AS OF THIS BLOCK".
+- Whether content is OBSOLETE or SUPERSEDED \u2014 mark with one line: "[SUPERSEDED by PR #NNN]" or "[OBSOLETE: deleted in vX.Y.Z]". Do NOT keep the obsolete content's details \u2014 just the marker and reason.
+- Function/class/type names and module paths that are the SUBJECT of the work \u2014 e.g., "fixed filterCompressedRanges in prune.ts", "added SessionStateRegistry in state.ts". Not exact line numbers or full signatures \u2014 just enough to LOCATE the code without searching.
+- Exploration findings: if a block was exploratory with no decision, keep the CONCLUSION in one line ("explored X, not viable because Y"). Do not keep the exploration process.
+
+DROP \u2014 these were useful during the work but are no longer needed:
+- Exact line numbers, diffs, verbose function signatures, full code listings.
+- Build/deploy process details, test execution steps.
+- Review process details (who reviewed, what rounds, test counts).
+- Verbose logs, command output, intermediate debugging steps.
+
+FORMAT:
+- Start each distilled block with a source header line:
+  \`Source: bN+bM+... (XK\u2192YK tok, Zx). [original topic]\`
+  Example: \`Source: b5+b7 (56K+44K\u2192268 tok, 375x). [Tool-result recap + publish]\`
+- 3-5 bullet points per source block, each a self-contained fact.
+- Dense, scannable \u2014 no narrative prose.
+- Start with the outcome, not the process: "v1.13.0 shipped (7 PRs bundled)" not "implemented 7 PRs then reviewed then merged".
+- Cross-block synthesis: if multiple source blocks cover the same topic (same PR, same feature, same bug), MERGE them into a single group of bullets. Do not repeat the same fact from different blocks \u2014 keep it once under the most relevant source header.
+
+SIZE TARGET: 50-150 tokens per source block (excluding the header). If you can't fit it in 150 tokens, you're keeping too much process. If a block has nothing worth keeping (pure noise), output just the header followed by "[no actionable content]."`;
+var TIER3_CONDENSE_RULES = `TIER 3 COMPRESSION \u2014 ULTRA-CONDENSATION
+
+You are compressing distilled summaries (Tier 2) into ultra-condensed facts (Tier 3). The distilled summaries already contain only decisions and outcomes. Your job is to reduce them to bare factual references.
+
+PRIORITY \u2014 when a source block has more facts than the size target allows, keep in this order:
+1. Shipped outcomes (versions released, PRs merged) \u2014 these are permanent record.
+2. Open work (PRs/issues still pending) \u2014 these may need follow-up.
+3. Key decisions with architectural impact ("chose X over Y because Z").
+4. Critical constraints ("must support Node 22").
+Drop everything else. Tier 3 is a lookup index, not a knowledge base.
+
+FORMAT:
+- Start with a source header line:
+  \`Source: bN+bM+... (XK\u2192YK tok, Zx). [original topic]\`
+- Output 1-3 facts per source block. Each fact is a single line: subject + outcome.
+- No explanations, no rationale, no process \u2014 just the fact.
+- Format: "[PR/Issue/Version] \u2014 [outcome in \u22648 words]"
+- Merge related facts from different source blocks if they concern the same topic.
+
+EXAMPLES:
+- "v1.13.0 shipped \u2014 quality gate + GC fix (7 PRs)"
+- "PR #196 merged \u2014 preserve-first-user (supersedes #169)"
+- "Bug 1214 fixed \u2014 compress consumed all user messages"
+- "Chose compress-as-anchor \u2014 prefix cache benefit over synthetic injection"
+- "Constraint: AGENTS.md forbids as any \u2014 never suppress types"
+
+DROP:
+- Multi-sentence context. If a fact needs >1 sentence, it's too detailed for Tier 3.
+- Lessons learned ("tried X, failed because Y") \u2014 drop UNLESS the failure is likely to recur and the block is <30 days old.
+- Design rationale details \u2014 keep the decision, drop the "because" unless it's a critical constraint.
+- Anything marked [OBSOLETE] or [SUPERSEDED] \u2014 drop entirely, note "[N blocks obsolete]" in the summary.
+
+SIZE TARGET: 30-60 tokens per source block (including header). For a batch of N source blocks, total output \u2248 N \xD7 40 tokens. If a source block has only one trivial fact, output just the header + one line.`;
+var defaultPrompts = Object.freeze({
+  compressPhilosophy: COMPRESS_PHILOSOPHY,
+  howToCompressRules: HOW_TO_COMPRESS_RULES,
+  tier2DistillRules: TIER2_DISTILL_RULES,
+  tier3CondenseRules: TIER3_CONDENSE_RULES
+});
+function efficiencyNote(prompts) {
+  return `This is an efficiency nudge to compress early and keep context lean \u2014 not an overflow warning. A separate, stronger alert will appear if the context is actually full.
+
+${prompts.compressPhilosophy}`;
+}
+function emergencyHeader(prompts) {
+  return `\u26A0\uFE0F Context limit reached \u2014 compress now. Prioritize consumed tool outputs.
+
+${prompts.compressPhilosophy}`;
+}
+function formatK(n) {
+  if (n >= 1e3) return `${(n / 1e3).toFixed(1)}K`;
+  return `${n}`;
+}
+function formatBreakdown(bd) {
+  if (!bd) return "";
+  const parts = [];
+  if (bd.system > 0) parts.push(`${formatK(bd.system)} system`);
+  if (bd.tool > 0) parts.push(`${formatK(bd.tool)} tool`);
+  if (bd.summaries > 0) parts.push(`${formatK(bd.summaries)} summaries`);
+  if (bd.code > 0) parts.push(`${formatK(bd.code)} code`);
+  if (bd.text > 0) parts.push(`${formatK(bd.text)} text`);
+  const growth = bd.growth > 0 ? `
++${formatK(bd.growth)} since last nudge` : "";
+  return `Context breakdown: ${parts.join(" | ")}${growth}`;
+}
+function formatTierTargetBlocks(blocks) {
+  if (blocks.length === 0) {
+    return "Target blocks: (none \u2014 no tier blocks found)";
+  }
+  const lines = blocks.map((b) => {
+    const summaryTokens = Math.ceil((b.summary ?? "").length / 4);
+    const topic = b.topic ? `  "${b.topic}"` : "";
+    return `  ${b.blockId}  ${b.effectiveMessageIds.length} msgs  ${formatK(b.compressedTokens)}\u2192${formatK(summaryTokens)}${topic}`;
+  });
+  return `Target ${blocks[0].tier === 1 ? "tier-1" : "tier-2"} blocks to distill (${blocks.length}):
+${lines.join("\n")}`;
+}
+function formatRanges(compressible, protectedRanges) {
+  if (compressible.length === 0 && protectedRanges.length === 0) {
+    return "[No specific ranges detected \u2014 compress any consumed content.]";
+  }
+  const refNum = (ref) => {
+    const m = ref.match(/\d+/);
+    return m ? parseInt(m[0], 10) : 0;
+  };
+  const entries = [];
+  for (const r of compressible) {
+    entries.push({
+      startRef: r.startRef,
+      endRef: r.endRef,
+      startNum: refNum(r.startRef),
+      endNum: refNum(r.endRef),
+      count: r.count,
+      tokens: r.tokens,
+      toolPct: r.toolPct,
+      textPct: r.textPct,
+      compressibleTokens: r.tokens,
+      compressibleCount: r.count,
+      protectedTokens: 0,
+      protectedCount: 0,
+      protectedTools: [],
+      dangerous: r.dangerous ?? false
+    });
+  }
+  for (const r of protectedRanges) {
+    entries.push({
+      startRef: r.startRef,
+      endRef: r.endRef,
+      startNum: refNum(r.startRef),
+      endNum: refNum(r.endRef),
+      count: r.count,
+      tokens: r.tokens,
+      toolPct: 0,
+      textPct: 0,
+      compressibleTokens: 0,
+      compressibleCount: 0,
+      protectedTokens: r.tokens,
+      protectedCount: r.count,
+      protectedTools: [...r.tools],
+      dangerous: false
+    });
+  }
+  entries.sort((a, b) => a.startNum - b.startNum);
+  const merged = [];
+  for (const e of entries) {
+    const last = merged[merged.length - 1];
+    if (last && e.startNum <= last.endNum + 1) {
+      last.endRef = e.endRef;
+      last.endNum = Math.max(last.endNum, e.endNum);
+      last.count += e.count;
+      last.tokens += e.tokens;
+      last.compressibleTokens += e.compressibleTokens;
+      last.compressibleCount += e.compressibleCount;
+      last.protectedTokens += e.protectedTokens;
+      last.protectedCount += e.protectedCount;
+      if (e.dangerous) last.dangerous = true;
+      for (const t of e.protectedTools) {
+        if (!last.protectedTools.includes(t)) last.protectedTools.push(t);
+      }
+    } else {
+      merged.push({ ...e });
+    }
+  }
+  const lines = merged.map((e) => {
+    const suffix = e.dangerous && e.compressibleTokens > 0 ? "  \u26A0\uFE0F NOT recommended unless you are certain." : "";
+    if (e.protectedTokens > 0 && e.compressibleTokens === 0) {
+      return `  ${e.startRef}\u2013${e.endRef}  ${e.count} msgs  ${formatK(e.tokens)} [PROTECTED: ${e.protectedTools.join(", ")} \u2014 not compressible]${suffix}`;
+    }
+    if (e.protectedTokens > 0 && e.compressibleTokens > 0) {
+      return `  ${e.startRef}\u2013${e.endRef}  ${e.count} msgs  ${formatK(e.tokens)} [${formatK(e.compressibleTokens)} compressible | ${formatK(e.protectedTokens)} protected: ${e.protectedTools.join(", ")}]${suffix}`;
+    }
+    return `  ${e.startRef}\u2013${e.endRef}  ${e.count} msgs  ${formatK(e.tokens)} [tool ${e.toolPct}% | text ${e.textPct}%]${suffix}`;
+  });
+  return `Compressible ranges (${merged.length}, oldest first):
+${lines.join("\n")}`;
+}
+function renderNudgeText(decision, prompts = defaultPrompts) {
+  const breakdownStr = formatBreakdown(decision.contextBreakdown);
+  const rangesStr = formatRanges(decision.compressibleRanges, decision.protectedRanges ?? []);
+  const isEmergency = !!decision.breakdown?.emergencyOverride || !!decision.breakdown?.overLimit;
+  if (decision.tier !== null && decision.tier >= 2) {
+    const isT2 = decision.tier === 2;
+    const targets = decision.tierTargetBlocks ?? [];
+    const blockList = formatTierTargetBlocks(targets);
+    const startId = targets[0]?.blockId ?? "b1";
+    const endId = targets[targets.length - 1]?.blockId ?? "b5";
+    const voice = isEmergency ? "emergency" : "gentle";
+    const triggerLine = isEmergency ? `[EMERGENCY \u2014 TIER ${decision.tier} ${isT2 ? "DISTILLATION" : "CONDENSATION"}] Context limit reached \u2014 distill NOW into a denser summary to reclaim tokens.` : `[TIER ${decision.tier} ${isT2 ? "DISTILLATION" : "CONDENSATION"} TRIGGER]`;
+    return {
+      voice,
+      text: [
+        efficiencyNote(prompts),
+        "",
+        breakdownStr,
+        "",
+        triggerLine,
+        isT2 ? `Your tier-1 compression summaries have accumulated. Distill them into a single denser tier-2 summary. Use block IDs as boundaries (startId and endId as bN). Any raw (uncompressed) messages sitting between the boundary blocks are absorbed into the tier-2 block as well \u2014 apply HOW TO COMPRESS to those raw messages and the TIER 2 distillation rules to the existing summaries, so the whole span is covered and nothing is lost.` : `Your tier-2 compression summaries have accumulated. Condense them further into a tier-3 ultra-condensed summary. Use block IDs as boundaries (startId and endId as bN). Any raw (uncompressed) messages sitting between the boundary blocks are absorbed into the tier-3 block as well \u2014 apply HOW TO COMPRESS to those raw messages and the TIER 3 condensation rules to the existing summaries, so the whole span is covered and nothing is lost.`,
+        blockList,
+        `Example: compress({ content: [{ startId: "${startId}", endId: "${endId}", summary: "..." }] })`,
+        "",
+        prompts.howToCompressRules,
+        "",
+        isT2 ? prompts.tier2DistillRules : prompts.tier3CondenseRules
+      ].join("\n")
+    };
+  }
+  if (isEmergency) {
+    return {
+      voice: "emergency",
+      text: [
+        emergencyHeader(prompts),
+        "",
+        breakdownStr,
+        "",
+        prompts.howToCompressRules,
+        "",
+        `{ "topic": "...", "content": [{ "startId": "<ID>", "endId": "<ID>", "summary": "..." }] }`,
+        "Only use IDs from visible messages above. Compress older work first.",
+        "",
+        rangesStr
+      ].join("\n")
+    };
+  }
+  return {
+    voice: "gentle",
+    text: [
+      efficiencyNote(prompts),
+      "",
+      breakdownStr,
+      "",
+      prompts.howToCompressRules,
+      "",
+      rangesStr,
+      "",
+      `\u{1F4A1} Compress all ranges in one call (pass multiple content entries: \`content: [{...}, {...}]\`).`
+    ].join("\n")
+  };
+}
+
+// node_modules/acp-kernel/dist/chunk-UX4LINT7.js
+function createInitialState() {
+  return {
+    blocks: [],
+    messageRefs: { byRaw: {}, byRef: {} },
+    tokenSnapshot: {},
+    nudge: {
+      lastPerMessageNudgeTokens: 0,
+      lastNudgeShownTokens: 0,
+      baselineTokens: 0,
+      anchors: {},
+      lastShownByTier: {}
+    },
+    stats: { tokensCompressed: 0, compressionCount: 0, absorbedTokens: 0 },
+    absorbed: [],
+    nextBlockId: 1,
+    nextRunId: 1
+  };
+}
+function allocateBlockId(state) {
+  const id = state.nextBlockId;
+  state.nextBlockId = Math.max(1, id) + 1;
+  return `b${id}`;
+}
+function allocateRunId(state) {
+  const id = state.nextRunId;
+  state.nextRunId = Math.max(1, id) + 1;
+  return `r${id}`;
+}
+function blockById(state, blockId) {
+  return state.blocks.find((block) => block.blockId === blockId);
+}
+function activeBlocks(state) {
+  return state.blocks.filter((block) => block.active);
+}
+function coveredMessageIds(state) {
+  const covered = /* @__PURE__ */ new Set();
+  for (const block of state.blocks) {
+    if (!block.active) continue;
+    for (const id of block.effectiveMessageIds) covered.add(id);
+  }
+  return covered;
+}
+function advanceSurvival(state, promotionThreshold) {
+  for (const block of state.blocks) {
+    if (!block.active) continue;
+    block.survivedCount += 1;
+    if (block.survivedCount >= promotionThreshold) {
+      block.generation = "old";
+    }
+  }
+}
+
+// node_modules/acp-kernel/dist/index.js
 var REF_WIDTH = 5;
 var MIN_INDEX = 1;
 var MAX_INDEX = 99999;
@@ -72,57 +430,17 @@ function highestUsedIndex(map) {
   }
   return highest;
 }
-function createInitialState() {
-  return {
-    blocks: [],
-    messageRefs: { byRaw: {}, byRef: {} },
-    tokenSnapshot: {},
-    nudge: {
-      lastPerMessageNudgeTokens: 0,
-      lastNudgeShownTokens: 0,
-      baselineTokens: 0,
-      anchors: {},
-      lastShownByTier: {}
-    },
-    stats: { tokensCompressed: 0, compressionCount: 0 },
-    nextBlockId: 1,
-    nextRunId: 1
-  };
-}
-function allocateBlockId(state) {
-  const id = state.nextBlockId;
-  state.nextBlockId = Math.max(1, id) + 1;
-  return `b${id}`;
-}
-function allocateRunId(state) {
-  const id = state.nextRunId;
-  state.nextRunId = Math.max(1, id) + 1;
-  return `r${id}`;
-}
-function blockById(state, blockId) {
-  return state.blocks.find((block) => block.blockId === blockId);
-}
-function activeBlocks(state) {
-  return state.blocks.filter((block) => block.active);
-}
-function coveredMessageIds(state) {
-  const covered = /* @__PURE__ */ new Set();
-  for (const block of state.blocks) {
-    if (!block.active) continue;
-    for (const id of block.effectiveMessageIds) covered.add(id);
-  }
-  return covered;
-}
-function advanceSurvival(state, promotionThreshold) {
-  for (const block of state.blocks) {
-    if (!block.active) continue;
-    block.survivedCount += 1;
-    if (block.survivedCount >= promotionThreshold) {
-      block.generation = "old";
-    }
-  }
-}
 var SUMMARY_HEADER = "[Compressed conversation section]";
+var SUMMARY_ID_PREFIX = "acp_summary_";
+function summaryMessageId(blockId) {
+  return `${SUMMARY_ID_PREFIX}${blockId}`;
+}
+function isSummaryMessageId(id) {
+  return id.startsWith(SUMMARY_ID_PREFIX);
+}
+function isRenderedSummaryMessage(message) {
+  return isSummaryMessageId(message.id) && message.role === "system" && message.contentType === "text";
+}
 function prune(messages, state, options = {}) {
   const covered = coveredMessageIds(state);
   if (covered.size === 0) return [...messages];
@@ -131,8 +449,13 @@ function prune(messages, state, options = {}) {
     (message) => message.role === "user"
   );
   const indexById = /* @__PURE__ */ new Map();
-  messages.forEach((message, index) => indexById.set(message.id, index));
-  const anchors = inject ? collectSummaryAnchors(state, indexById) : [];
+  const summaryIndexById = /* @__PURE__ */ new Map();
+  messages.forEach((message, index) => {
+    indexById.set(message.id, index);
+    if (isRenderedSummaryMessage(message))
+      summaryIndexById.set(message.id, index);
+  });
+  const anchors = inject ? collectSummaryAnchors(state, indexById, summaryIndexById) : [];
   return stripOrphanedReasoning(
     stripOrphanedToolResults(
       stripOrphanedToolCalls(
@@ -141,9 +464,19 @@ function prune(messages, state, options = {}) {
     )
   );
 }
-function collectSummaryAnchors(state, indexById) {
+function collectSummaryAnchors(state, indexById, summaryIndexById) {
   const anchors = [];
   for (const block of activeBlocks(state)) {
+    const existingIndex = summaryIndexById.get(summaryMessageId(block.blockId));
+    if (existingIndex !== void 0) {
+      anchors.push({
+        blockId: block.blockId,
+        summary: block.summary,
+        topic: block.topic,
+        insertAt: existingIndex
+      });
+      continue;
+    }
     let earliest = null;
     for (const id of block.effectiveMessageIds) {
       const index = indexById.get(id);
@@ -164,6 +497,9 @@ function collectSummaryAnchors(state, indexById) {
 function rebuildMessages(messages, covered, firstUserIndex, anchors) {
   const result = [];
   const pending = [...anchors];
+  const anchoredSummaryIds = new Set(
+    anchors.map((anchor) => summaryMessageId(anchor.blockId))
+  );
   for (let index = 0; index < messages.length; index++) {
     while (pending.length > 0 && pending[0].insertAt === index) {
       result.push(renderSummary(pending.shift()));
@@ -173,6 +509,8 @@ function rebuildMessages(messages, covered, firstUserIndex, anchors) {
       continue;
     }
     if (covered.has(messages[index].id)) continue;
+    if (isRenderedSummaryMessage(messages[index]) && anchoredSummaryIds.has(messages[index].id))
+      continue;
     result.push(messages[index]);
   }
   while (pending.length > 0) {
@@ -186,7 +524,7 @@ function renderSummary(anchor) {
   const text = body.length === 0 ? topicLine : `${topicLine}
 ${body}`;
   return {
-    id: `acp_summary_${anchor.blockId}`,
+    id: summaryMessageId(anchor.blockId),
     role: "system",
     contentType: "text",
     text
@@ -250,6 +588,7 @@ function syncBlocks(messages, state) {
     tokenSnapshot: { ...state.tokenSnapshot ?? {} },
     nudge: { ...state.nudge, anchors: { ...state.nudge.anchors } },
     stats: { ...state.stats },
+    absorbed: (state.absorbed ?? []).map((record) => ({ ...record })),
     nextBlockId: state.nextBlockId,
     nextRunId: state.nextRunId
   };
@@ -274,23 +613,18 @@ function syncBlocks(messages, state) {
       block.active = false;
       continue;
     }
+    if (block.expanded) {
+      block.active = false;
+      continue;
+    }
     block.active = true;
-    const stillPresent = block.effectiveMessageIds.some(
-      (id) => presentIds.has(id)
-    );
+    const stillPresent = block.effectiveMessageIds.some((id) => presentIds.has(id)) || presentIds.has(summaryMessageId(block.blockId));
     if (!stillPresent) {
       block.active = false;
       deactivated.push(block.blockId);
     }
   }
   return { state: result, deactivated };
-}
-var require2 = createRequire(import.meta.url);
-function defaultCountTokens(text) {
-  if (!text) return 0;
-  const cjk = text.match(/[\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]/g);
-  const cjkCount = cjk?.length ?? 0;
-  return cjkCount + Math.ceil((text.length - cjkCount) / 4);
 }
 function defaultConfig(modelContextLimit, overrides = {}) {
   const base = {
@@ -319,7 +653,14 @@ function defaultConfig(modelContextLimit, overrides = {}) {
     protectedTools: [],
     preserveRecentMessages: 5,
     preserveRecentTokens: 5e3,
-    modelContextLimit
+    modelContextLimit,
+    absorb: {
+      enabled: false,
+      toolName: "absorb",
+      minToolTokens: 1e3,
+      contextThresholdPct: 0,
+      excludeTools: []
+    }
   };
   return {
     ...base,
@@ -327,7 +668,8 @@ function defaultConfig(modelContextLimit, overrides = {}) {
     tiers: { ...base.tiers, ...overrides.tiers },
     nudge: { ...base.nudge, ...overrides.nudge },
     truncate: { ...base.truncate, ...overrides.truncate },
-    compress: { ...base.compress, ...overrides.compress }
+    compress: { ...base.compress, ...overrides.compress },
+    absorb: overrides.absorb ? { ...base.absorb, ...overrides.absorb } : base.absorb
   };
 }
 function validateConfig(config) {
@@ -345,6 +687,9 @@ function validateConfig(config) {
       "nudge.maxContextLimitPct must not exceed nudge.emergencyThresholdPct"
     );
   }
+  if (config.nudge.minPressureBenefitTokens !== void 0 && (!Number.isFinite(config.nudge.minPressureBenefitTokens) || config.nudge.minPressureBenefitTokens < 0)) {
+    errors.push("nudge.minPressureBenefitTokens must be finite and >= 0");
+  }
   if (config.promotionThreshold < 1) {
     errors.push("promotionThreshold must be >= 1");
   }
@@ -356,6 +701,17 @@ function validateConfig(config) {
   }
   if (config.tiers.tier3Trigger <= config.tiers.tier2Trigger) {
     errors.push("tiers.tier3Trigger must be greater than tiers.tier2Trigger");
+  }
+  if (config.absorb) {
+    if (config.absorb.enabled && !config.absorb.toolName) {
+      errors.push("absorb.toolName must be a non-empty string when enabled");
+    }
+    if (!Number.isFinite(config.absorb.minToolTokens) || config.absorb.minToolTokens < 0) {
+      errors.push("absorb.minToolTokens must be >= 0");
+    }
+    if (config.absorb.contextThresholdPct < 0 || config.absorb.contextThresholdPct > 1) {
+      errors.push("absorb.contextThresholdPct must be in [0, 1]");
+    }
   }
   return errors;
 }
@@ -397,26 +753,41 @@ function resolveBoundaries(input) {
       `Invalid boundary ref(s): startId="${input.startRef}", endId="${input.endRef}". Use mNNNNN or bN.`
     );
   }
-  const indexByRawId = /* @__PURE__ */ new Map();
+  const indexByMessageId = /* @__PURE__ */ new Map();
   input.messages.forEach(
-    (message, index) => indexByRawId.set(message.id, index)
+    (message, index) => indexByMessageId.set(message.id, index)
   );
-  let startIndex = resolveAnchorIndex(start, input.state, indexByRawId, "start");
-  let endIndex = resolveAnchorIndex(end, input.state, indexByRawId, "end");
+  let snappedBoundaries = [];
+  const startAnchor = resolveAnchorIndex(
+    start,
+    input.state,
+    indexByMessageId,
+    "start"
+  );
+  if (startAnchor.snapped) snappedBoundaries.push(startAnchor.snapped);
+  const endAnchor = resolveAnchorIndex(
+    end,
+    input.state,
+    indexByMessageId,
+    "end"
+  );
+  if (endAnchor.snapped) snappedBoundaries.push(endAnchor.snapped);
+  let startIndex = startAnchor.index;
+  let endIndex = endAnchor.index;
   if (startIndex > endIndex) {
     [startIndex, endIndex] = [endIndex, startIndex];
   }
   const messageIds = [];
   for (let index = startIndex; index <= endIndex; index++) {
     const message = input.messages[index];
-    if (message) messageIds.push(message.id);
+    if (message && !isRenderedSummaryMessage(message))
+      messageIds.push(message.id);
   }
   const boundaryKind = start.kind === "block" || end.kind === "block" ? "block" : "message";
   const nestedBlockIds = [];
   const nestedSeen = /* @__PURE__ */ new Set();
   for (const block of activeBlocks(input.state)) {
-    const anchor = earliestIndexOfIds(block.effectiveMessageIds, indexByRawId);
-    if (anchor !== null && anchor >= startIndex && anchor <= endIndex) {
+    if (blockVisibleInRange(block, indexByMessageId, startIndex, endIndex)) {
       if (!nestedSeen.has(block.blockId)) {
         nestedSeen.add(block.blockId);
         nestedBlockIds.push(block.blockId);
@@ -430,10 +801,11 @@ function resolveBoundaries(input) {
     messageIds,
     nestedBlockIds,
     boundaryKind,
-    protectedGaps
+    protectedGaps,
+    snappedBoundaries
   };
 }
-function resolveAnchorIndex(boundary, state, indexByRawId, endpoint) {
+function resolveAnchorIndex(boundary, state, indexByMessageId, endpoint) {
   const label = endpoint === "start" ? "startId" : "endId";
   if (boundary.kind === "message") {
     const rawId = state.messageRefs.byRef[boundary.raw] ?? state.messageRefs.byRef[formatPaddedRef(boundary.numericId)];
@@ -444,15 +816,22 @@ function resolveAnchorIndex(boundary, state, indexByRawId, endpoint) {
         `${label}="${boundary.raw}" does not exist in this session (typo or wrong session) \u2014 run acp_status for current refs.`
       );
     }
-    const index = indexByRawId.get(rawId);
-    if (index === void 0) {
-      throw new BoundaryNotFoundError(
-        "consumed",
-        endpoint,
-        `${label}="${boundary.raw}" not found in visible context (likely consumed by an existing block).`
-      );
+    const index = indexByMessageId.get(rawId);
+    if (index !== void 0) {
+      return { index, snapped: null };
     }
-    return index;
+    const owner2 = activeOwnerAnchor(state, [rawId], indexByMessageId);
+    if (owner2 !== null) {
+      return {
+        index: owner2,
+        snapped: `${label}="${boundary.raw}" refers to a message already compressed into an active block \u2014 anchored to the active block covering it instead.`
+      };
+    }
+    throw new BoundaryNotFoundError(
+      "consumed",
+      endpoint,
+      `${label}="${boundary.raw}" not found in visible context (likely consumed by an existing block).`
+    );
   }
   const block = blockById(state, `b${boundary.numericId}`);
   if (!block) {
@@ -462,6 +841,23 @@ function resolveAnchorIndex(boundary, state, indexByRawId, endpoint) {
       `${label}="b${boundary.numericId}" does not exist in this session (typo or wrong session) \u2014 run acp_status for current refs.`
     );
   }
+  if (block.active) {
+    const anchor = visibleBlockAnchor(block, indexByMessageId);
+    if (anchor !== null) {
+      return { index: anchor, snapped: null };
+    }
+  }
+  const owner = activeOwnerAnchor(
+    state,
+    block.effectiveMessageIds,
+    indexByMessageId
+  );
+  if (owner !== null) {
+    return {
+      index: owner,
+      snapped: `${label}="b${boundary.numericId}" was consumed by a higher-tier block \u2014 anchored to the active block covering its content instead.`
+    };
+  }
   if (!block.active) {
     throw new BoundaryNotFoundError(
       "consumed",
@@ -469,23 +865,67 @@ function resolveAnchorIndex(boundary, state, indexByRawId, endpoint) {
       `${label}="b${boundary.numericId}" not found in visible context (block distilled/consumed by a higher-tier block).`
     );
   }
-  const anchor = earliestIndexOfIds(block.effectiveMessageIds, indexByRawId);
-  if (anchor === null) {
-    throw new BoundaryNotFoundError(
-      "consumed",
-      endpoint,
-      `${label}="b${boundary.numericId}" not found in visible context (block messages consumed by a higher-tier block).`
-    );
+  throw new BoundaryNotFoundError(
+    "consumed",
+    endpoint,
+    `${label}="b${boundary.numericId}" is an active block but none of its content (raw messages or rendered summary) is visible in the current context \u2014 run acp_status to verify.`
+  );
+}
+function activeOwnerAnchor(state, ownedIds, indexByMessageId) {
+  if (ownedIds.length === 0) return null;
+  const owned = new Set(ownedIds);
+  let best = null;
+  for (const block of state.blocks) {
+    if (!block.active) continue;
+    const inherited = inheritedContentIds(state, block);
+    let ownsInherited = false;
+    for (const id of owned) {
+      if (inherited.has(id)) {
+        ownsInherited = true;
+        break;
+      }
+    }
+    if (!ownsInherited) continue;
+    const anchor = visibleBlockAnchor(block, indexByMessageId);
+    if (anchor === null) continue;
+    if (best === null || anchor < best) {
+      best = anchor;
+    }
   }
-  return anchor;
+  return best;
+}
+function inheritedContentIds(state, block) {
+  const ids = /* @__PURE__ */ new Set();
+  for (const childId of block.directBlockIds) {
+    const child = blockById(state, childId);
+    if (!child) continue;
+    for (const id of child.effectiveMessageIds) ids.add(id);
+  }
+  return ids;
 }
 function formatPaddedRef(index) {
   return `m${String(index).padStart(5, "0")}`;
 }
-function earliestIndexOfIds(ids, indexByRawId) {
+function visibleBlockAnchor(block, indexByMessageId) {
+  const summaryIndex = indexByMessageId.get(summaryMessageId(block.blockId));
+  if (summaryIndex !== void 0) return summaryIndex;
+  return earliestIndexOfIds(block.effectiveMessageIds, indexByMessageId);
+}
+function blockVisibleInRange(block, indexByMessageId, startIndex, endIndex) {
+  const summaryIndex = indexByMessageId.get(summaryMessageId(block.blockId));
+  if (summaryIndex !== void 0 && summaryIndex >= startIndex && summaryIndex <= endIndex) {
+    return true;
+  }
+  const rawIndex = earliestIndexOfIds(
+    block.effectiveMessageIds,
+    indexByMessageId
+  );
+  return rawIndex !== null && rawIndex >= startIndex && rawIndex <= endIndex;
+}
+function earliestIndexOfIds(ids, indexByMessageId) {
   let earliest = null;
   for (const id of ids) {
-    const index = indexByRawId.get(id);
+    const index = indexByMessageId.get(id);
     if (index !== void 0 && (earliest === null || index < earliest)) {
       earliest = index;
     }
@@ -543,29 +983,75 @@ function truncateLargeToolOutputs(messages, tokenCount, config, countTokens, opt
   );
   return { messages: updated, truncatedCount, savedTokens };
 }
-var KEEP_LAST_ORPHANED = 0;
+var KEEP_LAST_ORPHANED = 2;
 function rangeKey(startRef, endRef) {
   return `${startRef}::${endRef}`;
 }
-function rewriteCompressText(text, liveKeys) {
+function parseCallText(text) {
+  const raw = text ?? "";
+  const start = raw.indexOf("{");
+  if (start < 0) return null;
   let parsed;
   try {
-    parsed = JSON.parse(text ?? "");
+    parsed = JSON.parse(raw.slice(start));
   } catch {
     return null;
   }
   if (!parsed || typeof parsed !== "object") return null;
   const obj = parsed;
-  const content = obj.content;
-  if (!Array.isArray(content) || content.length === 0) return null;
+  let content = null;
+  let contentWasString = false;
+  if (Array.isArray(obj.content)) {
+    content = obj.content;
+  } else if (typeof obj.content === "string") {
+    contentWasString = true;
+    try {
+      const inner = JSON.parse(obj.content);
+      if (Array.isArray(inner)) content = inner;
+    } catch {
+      content = null;
+    }
+  }
+  if (!content || content.length === 0) return null;
+  return { prefix: raw.slice(0, start), obj, content, contentWasString };
+}
+function rewriteCompressText(text, liveKeys) {
+  const parsed = parseCallText(text);
+  if (!parsed) return null;
+  const { prefix, obj, content, contentWasString } = parsed;
   const kept = content.filter((entry) => {
     if (!entry || typeof entry !== "object") return false;
-    const s = typeof entry.startId === "string" ? entry.startId : typeof entry.messageId === "string" ? entry.messageId : "";
-    const e = typeof entry.endId === "string" ? entry.endId : typeof entry.messageId === "string" ? entry.messageId : "";
-    return liveKeys.has(rangeKey(s, e));
+    const e = entry;
+    const s = typeof e.startId === "string" ? e.startId : typeof e.messageId === "string" ? e.messageId : "";
+    const end = typeof e.endId === "string" ? e.endId : typeof e.messageId === "string" ? e.messageId : "";
+    return liveKeys.has(rangeKey(s, end));
   });
-  if (kept.length === content.length || kept.length === 0) return null;
-  return JSON.stringify({ ...obj, content: kept });
+  if (kept.length === 0) return null;
+  return prefix + serializeCompacted(obj, kept, contentWasString).text;
+}
+var SUMMARY_STUB_CHARS = 200;
+function compactEntry(entry) {
+  if (!entry || typeof entry !== "object") return entry;
+  const e = entry;
+  if (typeof e.summary !== "string" || e.summary.length <= SUMMARY_STUB_CHARS) return entry;
+  return { ...e, summary: `${e.summary.slice(0, SUMMARY_STUB_CHARS - 1)}\u2026` };
+}
+function serializeCompacted(obj, content, contentWasString) {
+  let changed = false;
+  const compacted = content.map((entry) => {
+    const out = compactEntry(entry);
+    if (out !== entry) changed = true;
+    return out;
+  });
+  const outContent = contentWasString ? JSON.stringify(compacted) : compacted;
+  return { text: JSON.stringify({ ...obj, content: outContent }), changed };
+}
+function compactCompressText(text) {
+  const parsed = parseCallText(text);
+  if (!parsed) return null;
+  const { prefix, obj, content, contentWasString } = parsed;
+  const { text: out, changed } = serializeCompacted(obj, content, contentWasString);
+  return changed ? prefix + out : null;
 }
 function hideConsumedCompressCalls(state, messages) {
   const allBlockCallIds = /* @__PURE__ */ new Set();
@@ -624,10 +1110,315 @@ function hideConsumedCompressCalls(state, messages) {
           continue;
         }
       }
+      const compacted = compactCompressText(message.text);
+      if (compacted !== null) {
+        result.push({ ...message, text: compacted });
+        continue;
+      }
     }
     result.push(message);
   }
   return { messages: result, hidden };
+}
+var COMPRESS_TOOL_NAME = "compress";
+var DECOMPRESS_TOOL_NAME = "decompress";
+var SEARCH_CONTEXT_TOOL_NAME = "search_context";
+var ACP_STATUS_TOOL_NAME = "acp_status";
+var ABSORB_TOOL_NAME = "absorb";
+var COMPRESS_TOOL = {
+  name: COMPRESS_TOOL_NAME,
+  description: "Replace a contiguous range of older conversation with a detailed summary you write. Use when content is genuinely consumed. Batch form: content=[{startId,endId,summary,topic?}]. REQUIRED \u2014 compress without content is invalid.",
+  input_schema: {
+    type: "object",
+    properties: {
+      topic: {
+        type: "string",
+        description: "Optional short title for the compressed range"
+      },
+      content: {
+        type: "array",
+        description: "One or more ranges to compress into separate summary blocks",
+        items: {
+          type: "object",
+          properties: {
+            topic: { type: "string" },
+            startId: {
+              type: "string",
+              description: "mNNNNN ref at the start of the range"
+            },
+            endId: {
+              type: "string",
+              description: "mNNNNN ref at the end of the range"
+            },
+            summary: {
+              type: "string",
+              description: "Self-contained summary replacing the range"
+            }
+          },
+          required: ["startId", "endId", "summary"]
+        }
+      }
+    },
+    required: ["content"]
+  }
+};
+var COMPRESS_TOOL_OPENAI = {
+  type: "function",
+  function: {
+    name: COMPRESS_TOOL_NAME,
+    description: COMPRESS_TOOL.description,
+    parameters: {
+      type: "object",
+      properties: {
+        topic: {
+          type: "string",
+          description: "Optional short title for the compressed range"
+        },
+        content: {
+          type: "array",
+          description: "One or more ranges to compress into separate summary blocks. REQUIRED \u2014 compress without content is invalid.",
+          items: {
+            type: "object",
+            properties: {
+              topic: { type: "string" },
+              startId: {
+                type: "string",
+                description: "mNNNNN ref at the start of the range"
+              },
+              endId: {
+                type: "string",
+                description: "mNNNNN ref at the end of the range"
+              },
+              summary: {
+                type: "string",
+                description: "Self-contained summary replacing the range"
+              }
+            },
+            required: ["startId", "endId", "summary"]
+          }
+        }
+      },
+      required: ["content"]
+    }
+  }
+};
+var DECOMPRESS_TOOL_OPENAI = {
+  type: "function",
+  function: {
+    name: DECOMPRESS_TOOL_NAME,
+    description: "Restores previously compressed content. Use when you need exact details lost in compression. By default restores one tier up. Use full:true for all the way to original messages. Use toFile to write to file instead of inflating context.",
+    parameters: {
+      type: "object",
+      properties: {
+        blockId: {
+          type: "string",
+          description: "Block ID to decompress (e.g. b5)"
+        },
+        toFile: {
+          type: "string",
+          description: "Optional: write content to file instead of context"
+        },
+        full: {
+          type: "boolean",
+          description: "Restore all the way to original messages"
+        }
+      },
+      required: ["blockId"]
+    }
+  }
+};
+var SEARCH_CONTEXT_TOOL_OPENAI = {
+  type: "function",
+  function: {
+    name: SEARCH_CONTEXT_TOOL_NAME,
+    description: "Search through compressed block summaries by keyword. Use BEFORE decompressing to find the right block.",
+    parameters: {
+      type: "object",
+      properties: {
+        query: { type: "string", description: "Search query" },
+        limit: { type: "number", description: "Max results (default 5)" }
+      },
+      required: ["query"]
+    }
+  }
+};
+var ACP_STATUS_TOOL_OPENAI = {
+  type: "function",
+  function: {
+    name: ACP_STATUS_TOOL_NAME,
+    description: "Show context usage and compressible ranges. No args = overview. Use to find what to compress next.",
+    parameters: {
+      type: "object",
+      properties: {}
+    }
+  }
+};
+var DECOMPRESS_TOOL = {
+  name: DECOMPRESS_TOOL_NAME,
+  description: DECOMPRESS_TOOL_OPENAI.function.description,
+  input_schema: DECOMPRESS_TOOL_OPENAI.function.parameters
+};
+var SEARCH_CONTEXT_TOOL = {
+  name: SEARCH_CONTEXT_TOOL_NAME,
+  description: SEARCH_CONTEXT_TOOL_OPENAI.function.description,
+  input_schema: SEARCH_CONTEXT_TOOL_OPENAI.function.parameters
+};
+var ACP_STATUS_TOOL = {
+  name: ACP_STATUS_TOOL_NAME,
+  description: ACP_STATUS_TOOL_OPENAI.function.description,
+  input_schema: ACP_STATUS_TOOL_OPENAI.function.parameters
+};
+var COMPRESS_TOOL_RESPONSES = {
+  type: "function",
+  name: COMPRESS_TOOL_NAME,
+  description: COMPRESS_TOOL.description,
+  parameters: COMPRESS_TOOL_OPENAI.function.parameters
+};
+var DECOMPRESS_TOOL_RESPONSES = {
+  type: "function",
+  name: DECOMPRESS_TOOL_OPENAI.function.name,
+  description: DECOMPRESS_TOOL_OPENAI.function.description,
+  parameters: DECOMPRESS_TOOL_OPENAI.function.parameters
+};
+var SEARCH_CONTEXT_TOOL_RESPONSES = {
+  type: "function",
+  name: SEARCH_CONTEXT_TOOL_OPENAI.function.name,
+  description: SEARCH_CONTEXT_TOOL_OPENAI.function.description,
+  parameters: SEARCH_CONTEXT_TOOL_OPENAI.function.parameters
+};
+var ACP_STATUS_TOOL_RESPONSES = {
+  type: "function",
+  name: ACP_STATUS_TOOL_OPENAI.function.name,
+  description: ACP_STATUS_TOOL_OPENAI.function.description,
+  parameters: ACP_STATUS_TOOL_OPENAI.function.parameters
+};
+var ACP_TOOL_NAMES = /* @__PURE__ */ new Set([
+  COMPRESS_TOOL_NAME,
+  DECOMPRESS_TOOL_NAME,
+  SEARCH_CONTEXT_TOOL_NAME,
+  ACP_STATUS_TOOL_NAME
+]);
+var ALWAYS_PROTECTED_TOOLS = ["compress"];
+var NEVER_PRESERVE_RECENT_TOOLS = [
+  "decompress",
+  "search_context",
+  "read",
+  "bash"
+];
+function isNeverPreserveRecent(msg) {
+  if (msg.contentType !== "tool-call" && msg.contentType !== "tool-result") {
+    return false;
+  }
+  if (!msg.toolName) return false;
+  return NEVER_PRESERVE_RECENT_TOOLS.includes(msg.toolName);
+}
+function matchToolPattern(toolName, pattern) {
+  if (pattern.endsWith("*")) {
+    return toolName.startsWith(pattern.slice(0, -1));
+  }
+  return toolName === pattern;
+}
+function isMessageProtected(msg, config) {
+  if (msg.contentType !== "tool-call" && msg.contentType !== "tool-result" || !msg.toolName) {
+    return false;
+  }
+  if (ALWAYS_PROTECTED_TOOLS.includes(msg.toolName)) {
+    return true;
+  }
+  for (const pattern of config.protectedTools) {
+    if (matchToolPattern(msg.toolName, pattern)) return true;
+  }
+  if (config.isToolProtected?.(msg.toolName, msg.text)) return true;
+  return false;
+}
+function collectProtectedToolCallIds(messages, config) {
+  const ids = /* @__PURE__ */ new Set();
+  for (const m of messages) {
+    if (m.contentType === "tool-call" && m.toolCallId && isMessageProtected(m, config)) {
+      ids.add(m.toolCallId);
+    }
+  }
+  return ids;
+}
+function isMessageProtectedWithPairing(msg, config, protectedCallIds) {
+  if (isMessageProtected(msg, config)) return true;
+  if (msg.contentType === "tool-result" && msg.toolCallId && protectedCallIds.has(msg.toolCallId)) {
+    return true;
+  }
+  return false;
+}
+var ABSORB_PROMPT_MARKER = "[ACP absorb]";
+var DEFAULT_ABSORB_CONFIG = {
+  enabled: false,
+  toolName: ABSORB_TOOL_NAME,
+  minToolTokens: 1e3,
+  contextThresholdPct: 0,
+  excludeTools: []
+};
+function resolveAbsorbConfig(config) {
+  return { ...DEFAULT_ABSORB_CONFIG, ...config.absorb ?? {} };
+}
+function formatTokenCount(tokens) {
+  if (tokens < 1e3) return String(tokens);
+  if (tokens < 1e4) return (tokens / 1e3).toFixed(1) + "K";
+  return Math.round(tokens / 1e3) + "K";
+}
+function buildAbsorbPrompt(ref, tokens, toolName = ABSORB_TOOL_NAME) {
+  return `${ABSORB_PROMPT_MARKER} This tool result (~${formatTokenCount(tokens)} tokens) will be REMOVED from context. Your IMMEDIATE next action: call ${toolName}({ ref: "${ref}", summary: "..." }) \u2014 summary = distilled essentials only (outcome, key values, exact paths:lines, error text verbatim, decisions). Afterwards work from your summary; do NOT re-run this tool. If the result contains nothing you need, call ${toolName} with summary "(nothing needed)".`;
+}
+function isAcpOrConfiguredTool(toolName, cfg) {
+  if (!toolName) return false;
+  if (toolName === cfg.toolName) return true;
+  return ACP_TOOL_NAMES.has(toolName);
+}
+function isAbsorbCandidate(msg, config) {
+  if (msg.contentType !== "tool-result" || !msg.toolCallId) return false;
+  const cfg = resolveAbsorbConfig(config);
+  if (isAcpOrConfiguredTool(msg.toolName, cfg)) return false;
+  if (isMessageProtected(msg, config)) return false;
+  for (const pattern of cfg.excludeTools) {
+    if (msg.toolName && matchToolPattern(msg.toolName, pattern)) return false;
+  }
+  return true;
+}
+function hideAbsorbedMessages(messages, state) {
+  const records = state.absorbed ?? [];
+  if (records.length === 0) return messages;
+  const hidden = /* @__PURE__ */ new Set();
+  for (const record of records) {
+    if (record.callMessageId) hidden.add(record.callMessageId);
+    if (record.resultMessageId) hidden.add(record.resultMessageId);
+  }
+  return messages.filter((msg) => !hidden.has(msg.id));
+}
+function appendAbsorbPrompts(messages, state, config, tokenCount, countTokens) {
+  const cfg = resolveAbsorbConfig(config);
+  if (!cfg.enabled) return { messages, promptedCount: 0 };
+  const limit = config.modelContextLimit;
+  if (cfg.contextThresholdPct > 0 && limit > 0 && tokenCount < cfg.contextThresholdPct * limit) {
+    return { messages, promptedCount: 0 };
+  }
+  const absorbedIds = /* @__PURE__ */ new Set();
+  for (const record of state.absorbed ?? []) {
+    if (record.resultMessageId) absorbedIds.add(record.resultMessageId);
+  }
+  let promptedCount = 0;
+  const out = messages.map((msg) => {
+    if (!isAbsorbCandidate(msg, config)) return msg;
+    if (absorbedIds.has(msg.id)) return msg;
+    const text = msg.text ?? "";
+    if (text.includes(ABSORB_PROMPT_MARKER)) return msg;
+    const tokens = countTokens(text);
+    if (tokens < cfg.minToolTokens) return msg;
+    const ref = refForRaw(state.messageRefs, msg.id);
+    if (!ref || ref === BLOCKED_REF) return msg;
+    promptedCount++;
+    return {
+      ...msg,
+      text: text + "\n\n" + buildAbsorbPrompt(ref, tokens, cfg.toolName)
+    };
+  });
+  return { messages: out, promptedCount };
 }
 var registry = /* @__PURE__ */ new Map();
 function listMessageFilters() {
@@ -748,7 +1539,8 @@ function renderMessage(message, map, countTokens, strategy, snapshot = null) {
     "^" + escapeRegex(TAG_OPEN) + "[^>]*" + GT + escapeRegex(ref) + escapeRegex(TAG_CLOSE) + "\\n?"
   );
   const cleanText = (message.text || "").replace(ownTagRe, "");
-  const tokens = snapshot ? snapshot[ref] ?? (snapshot[ref] = countTokens(cleanText)) : countTokens(cleanText);
+  const textTokens = snapshot ? snapshot[ref] ?? (snapshot[ref] = countTokens(cleanText)) : countTokens(cleanText);
+  const tokens = textTokens + thinkingTokenValue(message.thinkingTokens);
   const type = classifyType(message);
   const prefix = acpTag(ref, tokens, type) + "\n";
   if (!cleanText) return { ...message, text: prefix };
@@ -779,55 +1571,6 @@ function createRenderRefsNode(strategy) {
   };
 }
 var renderRefsNode = createRenderRefsNode("all");
-var ALWAYS_PROTECTED_TOOLS = ["compress"];
-var NEVER_PRESERVE_RECENT_TOOLS = [
-  "decompress",
-  "search_context",
-  "read",
-  "bash"
-];
-function isNeverPreserveRecent(msg) {
-  if (msg.contentType !== "tool-call" && msg.contentType !== "tool-result") {
-    return false;
-  }
-  if (!msg.toolName) return false;
-  return NEVER_PRESERVE_RECENT_TOOLS.includes(msg.toolName);
-}
-function matchToolPattern(toolName, pattern) {
-  if (pattern.endsWith("*")) {
-    return toolName.startsWith(pattern.slice(0, -1));
-  }
-  return toolName === pattern;
-}
-function isMessageProtected(msg, config) {
-  if (msg.contentType !== "tool-call" && msg.contentType !== "tool-result" || !msg.toolName) {
-    return false;
-  }
-  if (ALWAYS_PROTECTED_TOOLS.includes(msg.toolName)) {
-    return true;
-  }
-  for (const pattern of config.protectedTools) {
-    if (matchToolPattern(msg.toolName, pattern)) return true;
-  }
-  if (config.isToolProtected?.(msg.toolName, msg.text)) return true;
-  return false;
-}
-function collectProtectedToolCallIds(messages, config) {
-  const ids = /* @__PURE__ */ new Set();
-  for (const m of messages) {
-    if (m.contentType === "tool-call" && m.toolCallId && isMessageProtected(m, config)) {
-      ids.add(m.toolCallId);
-    }
-  }
-  return ids;
-}
-function isMessageProtectedWithPairing(msg, config, protectedCallIds) {
-  if (isMessageProtected(msg, config)) return true;
-  if (msg.contentType === "tool-result" && msg.toolCallId && protectedCallIds.has(msg.toolCallId)) {
-    return true;
-  }
-  return false;
-}
 function adjustBoundariesForToolPairs(startIndex, endIndex, messages, maxScan = 20) {
   const callIdsInRange = /* @__PURE__ */ new Set();
   for (let i = startIndex; i <= endIndex; i++) {
@@ -876,8 +1619,12 @@ function adjustBoundariesForReasoningPairs(startIndex, endIndex, messages) {
         j++;
       }
       const companion = messages[j + 1];
-      if (companion !== void 0 && companion.role === "assistant" && (companion.contentType === "text" || companion.contentType === "tool-call") && j + 1 > newEndIndex) {
-        newEndIndex = j + 1;
+      if (companion !== void 0 && companion.role === "assistant" && (companion.contentType === "text" || companion.contentType === "tool-call")) {
+        let e = j + 1;
+        while (e + 1 < messages.length && messages[e + 1].role === "assistant" && (messages[e + 1].contentType === "text" || messages[e + 1].contentType === "tool-call")) {
+          e++;
+        }
+        if (e > newEndIndex) newEndIndex = e;
       }
     }
     if (msg.role === "assistant" && (msg.contentType === "text" || msg.contentType === "tool-call")) {
@@ -893,9 +1640,63 @@ function adjustBoundariesForReasoningPairs(startIndex, endIndex, messages) {
   }
   return { startIndex: newStartIndex, endIndex: newEndIndex };
 }
-function refNum(ref) {
-  const n = parseInt(ref.slice(1), 10);
-  return Number.isNaN(n) ? -1 : n;
+function isAssistantAct(msg) {
+  return msg.role === "assistant" && (msg.contentType === "text" || msg.contentType === "tool-call");
+}
+function computeTurnGroups(messages) {
+  const resultIdByCallId = /* @__PURE__ */ new Map();
+  for (const msg of messages) {
+    if (msg.contentType === "tool-result" && typeof msg.toolCallId === "string" && msg.id) {
+      if (!resultIdByCallId.has(msg.toolCallId))
+        resultIdByCallId.set(msg.toolCallId, msg.id);
+    }
+  }
+  const grouped = /* @__PURE__ */ new Set();
+  const groups = [];
+  for (let i = 0; i < messages.length; i++) {
+    const msg = messages[i];
+    if (!msg.id || grouped.has(msg.id)) continue;
+    if (!(msg.contentType === "reasoning" || isAssistantAct(msg))) continue;
+    let reasoningStart = i;
+    if (msg.contentType === "reasoning") {
+      while (reasoningStart > 0 && messages[reasoningStart - 1].contentType === "reasoning") {
+        reasoningStart--;
+      }
+    } else {
+      let s = i;
+      while (s > 0 && isAssistantAct(messages[s - 1])) s--;
+      reasoningStart = s;
+      while (reasoningStart > 0 && messages[reasoningStart - 1].contentType === "reasoning") {
+        reasoningStart--;
+      }
+    }
+    const burstStart = (() => {
+      let s = reasoningStart;
+      while (s < messages.length && messages[s].contentType === "reasoning")
+        s++;
+      return s;
+    })();
+    if (burstStart >= messages.length || !isAssistantAct(messages[burstStart])) {
+      continue;
+    }
+    let burstEnd = burstStart;
+    while (burstEnd + 1 < messages.length && isAssistantAct(messages[burstEnd + 1])) {
+      burstEnd++;
+    }
+    const members = /* @__PURE__ */ new Set();
+    for (let k = reasoningStart; k <= burstEnd; k++) {
+      const m = messages[k];
+      if (!m.id) continue;
+      members.add(m.id);
+      if (m.role === "assistant" && m.contentType === "tool-call" && typeof m.toolCallId === "string") {
+        const rid = resultIdByCallId.get(m.toolCallId);
+        if (rid) members.add(rid);
+      }
+    }
+    for (const id of members) grouped.add(id);
+    groups.push([...members]);
+  }
+  return groups;
 }
 function estimateTextTokens(text) {
   return Math.ceil(text.length / 4);
@@ -920,7 +1721,7 @@ function computeProtectedRefs(messages, state, config, countTokens = estimateTex
     if (isNeverPreserveRecent(msg)) continue;
     const ref = state.messageRefs.byRaw[msg.id];
     if (!ref || ref === "BLOCKED") continue;
-    visible.push({ ref, tokens: countTokens(msg.text ?? "") });
+    visible.push({ ref, tokens: countMessageTokens(msg, countTokens) });
   }
   if (preserveN > 0) {
     for (const m of visible.slice(-preserveN)) {
@@ -949,42 +1750,50 @@ function buildCompressibleRanges(messages, state, config, protectedZoneRefs, cou
   const compressibleMsgs = [];
   const protectedMsgs = [];
   const protectedCallIds = collectProtectedToolCallIds(messages, config);
+  let skipSinceCompressible = false;
+  let skipSinceProtected = false;
   for (const msg of messages) {
-    if (isSyntheticOrPruned(msg, state)) continue;
     const ref = state.messageRefs.byRaw[msg.id];
     if (!ref || ref === "BLOCKED") continue;
-    const rn = refNum(ref);
+    if (isSyntheticOrPruned(msg, state)) {
+      skipSinceCompressible = true;
+      skipSinceProtected = true;
+      continue;
+    }
     if (isMessageProtectedWithPairing(msg, config, protectedCallIds)) {
       protectedMsgs.push({
         ref,
-        refNum: rn,
-        tokens: countTokens(msg.text ?? ""),
+        gapBefore: skipSinceProtected,
+        tokens: countMessageTokens(msg, countTokens),
         tools: msg.toolName ? [msg.toolName] : []
       });
+      skipSinceProtected = false;
+      skipSinceCompressible = true;
       continue;
     }
     if (protectedZoneRefs?.has(ref)) {
+      skipSinceCompressible = true;
+      skipSinceProtected = true;
       continue;
     }
     compressibleMsgs.push({
       ref,
-      refNum: rn,
-      tokens: countTokens(msg.text ?? ""),
+      gapBefore: skipSinceCompressible,
+      tokens: countMessageTokens(msg, countTokens),
       chars: (msg.text ?? "").length,
       isTool: isToolMessage(msg),
       isUser: msg.role === "user"
     });
+    skipSinceCompressible = false;
+    skipSinceProtected = true;
   }
   const compressible = [];
   let cur = null;
-  let prevRefNum = -2;
   for (const info of compressibleMsgs) {
-    const hasGap = info.refNum > prevRefNum + 1;
-    if (cur && (info.isUser && cur.count >= 3 || hasGap)) {
+    if (cur && (info.isUser && cur.count >= 3 || info.gapBefore)) {
       compressible.push(cur);
       cur = null;
     }
-    prevRefNum = info.refNum;
     if (!cur) {
       cur = {
         startRef: info.ref,
@@ -1011,14 +1820,11 @@ function buildCompressibleRanges(messages, state, config, protectedZoneRefs, cou
   if (cur) compressible.push(cur);
   const protectedRanges = [];
   let pcur = null;
-  let pPrevRefNum = -2;
   for (const info of protectedMsgs) {
-    const hasGap = info.refNum > pPrevRefNum + 1;
-    if (pcur && hasGap) {
+    if (pcur && info.gapBefore) {
       protectedRanges.push(pcur);
       pcur = null;
     }
-    pPrevRefNum = info.refNum;
     if (!pcur) {
       pcur = {
         startRef: info.ref,
@@ -1098,6 +1904,30 @@ function runPipeline(nodes, initial, ctx) {
 function rangeError(spec, message) {
   return `range ${spec.startRef}..${spec.endRef}: ${message}`;
 }
+function numericBlockId(id) {
+  const parsed = /^b(\d+)$/.exec(id);
+  return parsed ? Number(parsed[1]) : 0;
+}
+function refGateDiagnostics(state, requestedRanges, unknownCount) {
+  const highest = highestUsedIndex(state.messageRefs);
+  const highestRef = highest > 0 ? indexToRef(highest) : "none";
+  return `[diagnostics: session highest ref=${highestRef}, unknown ranges in request=${unknownCount}/${requestedRanges}, session history=${state.stats.compressionCount} compression(s), ${state.blocks.length} block(s)]`;
+}
+function danglingMessageRefs(state, messages, spec) {
+  const visible = new Set(messages.map((m) => m.id));
+  const dangling = [];
+  for (const ref of [spec.startRef, spec.endRef]) {
+    const parsed = parseBoundary(ref);
+    if (!parsed || parsed.kind !== "message") continue;
+    const rawId = state.messageRefs.byRef[parsed.raw] ?? state.messageRefs.byRef[indexToRef(parsed.numericId)];
+    if (!rawId || visible.has(rawId)) continue;
+    const covered = state.blocks.some(
+      (block) => block.active && block.effectiveMessageIds.includes(rawId)
+    );
+    if (!covered) dangling.push(parsed.raw);
+  }
+  return dangling;
+}
 function createCore(ports = {}) {
   const countTokens = ports.countTokens ?? defaultCountTokens;
   function applyCompression(input) {
@@ -1107,7 +1937,12 @@ function createCore(ports = {}) {
     let tokensCompressed = 0;
     const errors = [];
     const warnings = [];
-    const protectedMessageIds = input.protectedMessageIds ?? computeProtectedRefs(input.messages, input.state, input.config, countTokens);
+    const protectedMessageIds = input.protectedMessageIds ?? computeProtectedRefs(
+      input.messages,
+      input.state,
+      input.config,
+      countTokens
+    );
     const preExistingCoverage = collectCoverage(state);
     const classifications = /* @__PURE__ */ new Map();
     const classificationErrors = [];
@@ -1138,37 +1973,41 @@ function createCore(ports = {}) {
             error: error instanceof Error ? error : new Error(String(error))
           });
           classificationErrors.push(
-            rangeError(spec, error instanceof Error ? error.message : String(error))
+            rangeError(
+              spec,
+              error instanceof Error ? error.message : String(error)
+            )
           );
         }
       }
     }
-    const rangeIndexSets = [];
+    let resolvableCount = 0;
+    let unknownCount = 0;
+    for (const resolution of classifications.values()) {
+      if (resolution.status === "ok") resolvableCount++;
+      else if (resolution.status === "unknown") unknownCount++;
+    }
+    const rangeSpans = [];
     for (const [spec, resolution] of classifications) {
       if (resolution.status !== "ok") continue;
-      const indices = resolution.resolved.messageIds.map(
-        (id) => input.messages.findIndex((m) => m.id === id)
-      ).filter((i) => i >= 0);
-      rangeIndexSets.push({ spec, indices });
+      rangeSpans.push({
+        spec,
+        start: resolution.resolved.startIndex,
+        end: resolution.resolved.endIndex
+      });
     }
-    const sortedRanges = [...rangeIndexSets].sort((a, b) => {
-      const aMin = a.indices.length > 0 ? Math.min(...a.indices) : Infinity;
-      const bMin = b.indices.length > 0 ? Math.min(...b.indices) : Infinity;
-      return aMin - bMin;
-    });
+    const sortedRanges = [...rangeSpans].sort((a, b) => a.start - b.start);
     const skipSpecs = /* @__PURE__ */ new Set();
     let acceptedMaxIndex = -1;
     for (const entry of sortedRanges) {
-      const entryMax = entry.indices.length > 0 ? Math.max(...entry.indices) : -1;
-      const entryMin = entry.indices.length > 0 ? Math.min(...entry.indices) : -1;
-      if (entryMin >= 0 && entryMin <= acceptedMaxIndex) {
+      if (entry.start <= acceptedMaxIndex) {
         skipSpecs.add(entry.spec);
         warnings.push(
           `Skipped range (${entry.spec.startRef}..${entry.spec.endRef}) \u2014 overlaps an earlier range in the batch; the earlier range takes precedence. Keep ranges disjoint.`
         );
         continue;
       }
-      if (entryMax > acceptedMaxIndex) acceptedMaxIndex = entryMax;
+      if (entry.end > acceptedMaxIndex) acceptedMaxIndex = entry.end;
     }
     if (input.config.compress.minCompressRange > 0 && input.ranges.length > 0) {
       let totalRangeChars = 0;
@@ -1187,7 +2026,17 @@ function createCore(ports = {}) {
         }
       }
       if (!hasBlockBoundaryRange && totalRangeChars < input.config.compress.minCompressRange) {
-        const gateMessage = consumedRanges.length > 0 ? `Requested range(s) already compressed (e.g. ${consumedRanges[0].startRef}..${consumedRanges[0].endRef}); remaining compressible content ${totalRangeChars} chars < min ${input.config.compress.minCompressRange}. Nothing to do \u2014 run acp_status to see current compressible ranges.` : `Total compressible content too small (${totalRangeChars} chars across ${countedRanges} range(s), min ${input.config.compress.minCompressRange}). Combine more messages into your range(s) to meet the threshold.`;
+        const live = activeBlocks(state).map((b) => b.blockId).sort((x, y) => numericBlockId(x) - numericBlockId(y));
+        const liveHint = live.length > 0 ? ` Current active blocks span ${live[0]}..${live[live.length - 1]} \u2014 retry with startId/endId set to active block IDs in that span.` : "";
+        const diagnostics = refGateDiagnostics(
+          state,
+          input.ranges.length,
+          unknownCount
+        );
+        const danglingRefs = consumedRanges.flatMap(
+          (spec) => danglingMessageRefs(state, input.messages, spec)
+        );
+        const gateMessage = resolvableCount === 0 && consumedRanges.length === 0 && unknownCount > 0 ? `None of the ${input.ranges.length} requested range(s) resolved \u2014 every ref is unknown to this session. Refs are per-session snapshots, assigned once when a message is first rendered; no compress reassigns them, so unknown refs cannot come from an earlier compress in this session. They come from a different generation: a previous session instance (switching model or upstream mid-conversation starts a fresh session whose refs restart at m00001), the generation before a native-compaction rebase (which also resets refs to m00001), or a typo. ${diagnostics} Run acp_status, then call the compress tool again using only the refs it reports.` : consumedRanges.length > 0 ? danglingRefs.length > 0 ? `Requested range(s) cannot be anchored (e.g. ${consumedRanges[0].startRef}..${consumedRanges[0].endRef}) \u2014 the refs exist in this session's ref map, but the messages they point to are no longer in the visible context and no active block covers them: the message content changed (or the message was filtered out of the view) and now carries a new ref, leaving your old refs dangling. ${diagnostics} Run acp_status, then call the compress tool again using only the refs it reports.` : `Requested range(s) already compressed (e.g. ${consumedRanges[0].startRef}..${consumedRanges[0].endRef}) \u2014 those refs no longer point to directly compressible content: the range is covered by active block(s) or the block ref(s) are stale (distilled or consumed). ${diagnostics} Run acp_status, then call the compress tool again using only the CURRENT compressible ranges it reports.${liveHint}` : `Total compressible content too small (${totalRangeChars} chars across ${countedRanges} range(s), min ${input.config.compress.minCompressRange}). Combine more messages into your range(s) to meet the threshold.`;
         return {
           state: input.state,
           result: {
@@ -1213,6 +2062,7 @@ function createCore(ports = {}) {
         errors.push(rangeError(spec, resolution.error.message));
         continue;
       }
+      warnings.push(...resolution.resolved.snappedBoundaries);
       try {
         const outcome = applySingleRange({
           spec,
@@ -1228,7 +2078,12 @@ function createCore(ports = {}) {
         tokensCompressed += outcome.tokens;
         warnings.push(...outcome.warnings);
       } catch (error) {
-        errors.push(rangeError(spec, error instanceof Error ? error.message : String(error)));
+        errors.push(
+          rangeError(
+            spec,
+            error instanceof Error ? error.message : String(error)
+          )
+        );
       }
     }
     state.stats.compressionCount += blocksCreated;
@@ -1238,12 +2093,17 @@ function createCore(ports = {}) {
       state.nudge.lastNudgeShownTokens = 0;
       state.nudge.lastShownByTier = {};
     }
-    return { state, result: { blocksCreated, tokensCompressed, errors, warnings } };
+    return {
+      state,
+      result: { blocksCreated, tokensCompressed, errors, warnings }
+    };
   }
   function processTurn(input) {
     const configErrors = validateConfig(input.config);
     if (configErrors.length > 0) {
-      console.warn(`[acp-kernel] Config validation warnings: ${configErrors.join("; ")}. Thresholds may not fire correctly.`);
+      console.warn(
+        `[acp-kernel] Config validation warnings: ${configErrors.join("; ")}. Thresholds may not fire correctly.`
+      );
     }
     const ctx = {
       config: input.config,
@@ -1294,6 +2154,8 @@ function createCore(ports = {}) {
       assignRefsNode,
       syncBlocksNode,
       pruneNode,
+      absorbHideNode,
+      absorbPromptNode,
       filterNode,
       hideCompressCallsNode,
       recommendNode,
@@ -1303,7 +2165,14 @@ function createCore(ports = {}) {
     if (strategy === "none") return base;
     return [...base, createRenderRefsNode(strategy)];
   }
-  return { processTurn, applyCompression, defaultNodes, decompress, search, status };
+  return {
+    processTurn,
+    applyCompression,
+    defaultNodes,
+    decompress,
+    search,
+    status
+  };
 }
 var assignRefsNode = {
   name: "assign-refs",
@@ -1330,6 +2199,31 @@ var pruneNode = {
   name: "prune",
   run(io) {
     return { ...io, messages: prune(io.messages, io.state) };
+  }
+};
+var absorbHideNode = {
+  name: "absorb-hide",
+  enabled: (io) => (io.state.absorbed?.length ?? 0) > 0,
+  run(io) {
+    return { ...io, messages: hideAbsorbedMessages(io.messages, io.state) };
+  }
+};
+var absorbPromptNode = {
+  name: "absorb-prompt",
+  enabled: (_io, ctx) => ctx.config.absorb?.enabled === true,
+  run(io, ctx) {
+    const applied = appendAbsorbPrompts(
+      io.messages,
+      io.state,
+      ctx.config,
+      ctx.tokenCount,
+      ctx.countTokens
+    );
+    return {
+      ...io,
+      messages: applied.messages,
+      effects: { ...io.effects, absorbPromptedCount: applied.promptedCount }
+    };
   }
 };
 var filterNode = {
@@ -1403,7 +2297,10 @@ var nudgeNode = {
     if (nudge.shouldInject) {
       stamped.lastNudgeShownTokens = ctx.tokenCount;
       if (nudge.tier !== null) {
-        stamped.lastShownByTier = { ...stamped.lastShownByTier, [nudge.tier]: ctx.tokenCount };
+        stamped.lastShownByTier = {
+          ...stamped.lastShownByTier,
+          [nudge.tier]: ctx.tokenCount
+        };
       }
     }
     return {
@@ -1443,17 +2340,16 @@ function applySingleRange(input) {
   const rangeMessageIds = applyPairBoundaryAdjustments(
     resolved,
     input.messages
-  );
+  ).filter((id) => !isSummaryMessageId(id));
   if (rangeMessageIds.length > resolved.messageIds.length) {
-    const indexByRawId = /* @__PURE__ */ new Map();
-    input.messages.forEach((m, i) => indexByRawId.set(m.id, i));
-    const adjustedStart = indexByRawId.get(rangeMessageIds[0]) ?? resolved.startIndex;
-    const adjustedEnd = indexByRawId.get(rangeMessageIds[rangeMessageIds.length - 1]) ?? resolved.endIndex;
+    const indexByMessageId = /* @__PURE__ */ new Map();
+    input.messages.forEach((m, i) => indexByMessageId.set(m.id, i));
+    const adjustedStart = rangeMessageIds.length > 0 ? indexByMessageId.get(rangeMessageIds[0]) ?? resolved.startIndex : resolved.startIndex;
+    const adjustedEnd = rangeMessageIds.length > 0 ? indexByMessageId.get(rangeMessageIds[rangeMessageIds.length - 1]) ?? resolved.endIndex : resolved.endIndex;
     const nestedSeen = new Set(resolved.nestedBlockIds);
     for (const block2 of activeBlocks(input.state)) {
       if (nestedSeen.has(block2.blockId)) continue;
-      const anchor = earliestIndexOfIds(block2.effectiveMessageIds, indexByRawId);
-      if (anchor !== null && anchor >= adjustedStart && anchor <= adjustedEnd) {
+      if (blockVisibleInRange(block2, indexByMessageId, adjustedStart, adjustedEnd)) {
         nestedSeen.add(block2.blockId);
         resolved.nestedBlockIds.push(block2.blockId);
       }
@@ -1516,11 +2412,56 @@ function applySingleRange(input) {
       )} from compression range (recent/last-user zone).`
     );
   }
+  {
+    const reasoningIds = /* @__PURE__ */ new Set();
+    const callIds = /* @__PURE__ */ new Set();
+    for (const m of input.messages) {
+      if (!m.id) continue;
+      if (m.contentType === "reasoning") reasoningIds.add(m.id);
+      if (m.role === "assistant" && m.contentType === "tool-call") callIds.add(m.id);
+    }
+    const withdrawIds = /* @__PURE__ */ new Set();
+    let splitTurnCount = 0;
+    for (const group of computeTurnGroups(input.messages)) {
+      const foldHasReasoning = group.some(
+        (id) => effectiveMessageIds.has(id) && reasoningIds.has(id)
+      );
+      if (!foldHasReasoning) continue;
+      const keptHasCall = group.some(
+        (id) => !effectiveMessageIds.has(id) && callIds.has(id)
+      );
+      if (!keptHasCall) continue;
+      splitTurnCount++;
+      for (const id of group) withdrawIds.add(id);
+    }
+    if (withdrawIds.size > 0) {
+      for (const id of withdrawIds) effectiveMessageIds.delete(id);
+      const beforeWithdraw = filteredIds.length;
+      filteredIds = filteredIds.filter((id) => !withdrawIds.has(id));
+      if (filteredIds.length === 0 && consumedBlockIds.length === 0) {
+        throw new Error(
+          `Range would split ${splitTurnCount} turn(s) at the protected-zone boundary: a visible tool-call must keep its reasoning run (strict-echo providers reject a rebuilt request that lost it). Shrink the range to end before the turn starts, or wait until the whole turn ages out of the protected zone.`
+        );
+      }
+      warnings.push(
+        `Withdrawn ${beforeWithdraw - filteredIds.length} message(s) from compression range to keep ${splitTurnCount} turn(s) intact (visible tool-call would lose its reasoning run).`
+      );
+    }
+  }
+  if (!isBlockBoundary && filteredIds.length === 0 && consumedBlockIds.length > 0) {
+    const first = consumedBlockIds[0];
+    const last = consumedBlockIds[consumedBlockIds.length - 1];
+    throw new Error(
+      `Range ${input.spec.startRef}..${input.spec.endRef} contains no new compressible messages \u2014 every message in it is already covered by active block(s) ${consumedBlockIds.join(
+        ", "
+      )}. Nothing was compressed. To rewrite or merge those blocks, reference them by block ID (${first}..${last}); otherwise run acp_status and compress a range it reports as compressible.`
+    );
+  }
   validateCompressionRange(input, filteredIds, consumedBlockIds.length);
   let compressedTokens = 0;
   for (const id of filteredIds) {
     const message = input.messages.find((entry) => entry.id === id);
-    compressedTokens += input.countTokens(message?.text ?? "");
+    compressedTokens += message ? countMessageTokens(message, input.countTokens) : 0;
   }
   for (const consumedId of consumedBlockIds) {
     const consumed = blockById(input.state, consumedId);
@@ -1664,16 +2605,28 @@ function resolveAdaptiveGrowth(modelContextLimit, nudge) {
     )
   );
 }
+function resolveMinPressureBenefit(modelContextLimit, nudge) {
+  return nudge.minPressureBenefitTokens ?? Math.max(5e3, Math.round(modelContextLimit * 0.01));
+}
 function pendingByTier(state, recommendation, countTokens, minCompressRange) {
   const out = {};
   const merged = recommendation?.recommendedRanges ?? [];
   const effective = minCompressRange > 0 ? merged.filter((r) => (r.chars ?? r.tokens * 4) >= minCompressRange) : merged;
-  out[1] = { pending: effective.reduce((s, r) => s + r.tokens, 0), targetBlocks: [] };
+  out[1] = {
+    pending: effective.reduce((s, r) => s + r.tokens, 0),
+    targetBlocks: []
+  };
   const active = activeBlocks(state);
   const t1 = active.filter((b) => b.tier === 1);
   const t2 = active.filter((b) => b.tier === 2);
-  out[2] = { pending: t1.reduce((s, b) => s + countTokens(b.summary), 0), targetBlocks: t1 };
-  out[3] = { pending: t2.reduce((s, b) => s + countTokens(b.summary), 0), targetBlocks: t2 };
+  out[2] = {
+    pending: t1.reduce((s, b) => s + countTokens(b.summary), 0),
+    targetBlocks: t1
+  };
+  out[3] = {
+    pending: t2.reduce((s, b) => s + countTokens(b.summary), 0),
+    targetBlocks: t2
+  };
   return out;
 }
 function decideNudge(input) {
@@ -1681,6 +2634,7 @@ function decideNudge(input) {
   const limit = config.modelContextLimit;
   const usage = limit > 0 ? tokenCount / limit : 0;
   const nudgeGrowthTokens = resolveAdaptiveGrowth(limit, config.nudge);
+  const minPressureBenefit = resolveMinPressureBenefit(limit, config.nudge);
   const overLimit = usage >= config.nudge.maxContextLimitPct;
   const emergencyOverride = usage >= config.nudge.emergencyThresholdPct;
   const pressure = overLimit || emergencyOverride;
@@ -1706,17 +2660,23 @@ function decideNudge(input) {
   );
   let injectedTier = null;
   let injectedReason = "";
-  const growthReady = growthSinceReference >= growthFloor;
+  let bestPending = 0;
   const t1Eff = tiers[1]?.pending ?? 0;
   const t2Pen = tiers[2]?.pending ?? 0;
   const t3Pen = tiers[3]?.pending ?? 0;
+  const firstSightMassReady = state.nudge.lastNudgeShownTokens === 0 && baseline === 0 && usage >= config.nudge.minContextLimitPct && Math.max(t1Eff, t2Pen, t3Pen) >= nudgeGrowthTokens;
+  const growthReady = firstSightMassReady || growthSinceReference >= growthFloor;
+  const t2Count = tiers[2]?.targetBlocks.length ?? 0;
+  const t3Count = tiers[3]?.targetBlocks.length ?? 0;
+  const tierCountUsageFloor = config.nudge.minContextLimitPct;
+  const t2CountReady = t2Count >= config.tiers.tier2Trigger && usage >= tierCountUsageFloor;
+  const t3CountReady = t3Count >= config.tiers.tier3Trigger && usage >= tierCountUsageFloor;
   if (pressure) {
     const candidates = [1];
     if (config.tiers.enabled) {
       candidates.push(2, 3);
     }
     let best = null;
-    let bestPending = 0;
     for (const t of candidates) {
       const p = tiers[t]?.pending ?? 0;
       if (p > bestPending) {
@@ -1724,7 +2684,7 @@ function decideNudge(input) {
         best = t;
       }
     }
-    if (best !== null && bestPending > 0) {
+    if (best !== null && bestPending >= minPressureBenefit) {
       injectedTier = best;
       const label = emergencyOverride ? "EMERGENCY" : "OVER-LIMIT";
       injectedReason = best === 1 ? `${label} T1: max effective pending ${bestPending}, usage ${Math.round(usage * 100)}%` : `${label} T${best} distill: max pending ${bestPending} (T1 effective ${t1Eff}, T2 ${t2Pen}, T3 ${t3Pen}), usage ${Math.round(usage * 100)}%`;
@@ -1733,46 +2693,74 @@ function decideNudge(input) {
     if (t1Eff >= nudgeGrowthTokens) {
       injectedTier = 1;
       injectedReason = `T1 effective ${t1Eff} >= ${nudgeGrowthTokens}, growth ${growthSinceReference}, usage ${Math.round(usage * 100)}%`;
-    } else if (config.tiers.enabled && t2Pen >= tier2Threshold && t2Pen > t1Eff) {
+    } else if (config.tiers.enabled && (t2CountReady || t2Pen >= tier2Threshold && t2Pen > t1Eff)) {
       const lastShown = state.nudge.lastShownByTier[2] ?? 0;
       const cadenceMet = lastShown === 0 || tokenCount - lastShown >= growthFloor;
       if (cadenceMet) {
         injectedTier = 2;
-        injectedReason = `T2 distill ready: ${tiers[2].targetBlocks.length} tier-1 blocks (${t2Pen} tokens) >= ${tier2Threshold} (1.5x) and > T1 effective ${t1Eff}, usage ${Math.round(usage * 100)}%`;
+        injectedReason = t2CountReady ? `T2 distill ready: ${t2Count} tier-1 blocks >= tier2Trigger ${config.tiers.tier2Trigger} (${t2Pen} tokens), usage ${Math.round(usage * 100)}%` : `T2 distill ready: ${tiers[2].targetBlocks.length} tier-1 blocks (${t2Pen} tokens) >= ${tier2Threshold} (1.5x) and > T1 effective ${t1Eff}, usage ${Math.round(usage * 100)}%`;
       }
-    } else if (config.tiers.enabled && t3Pen >= tier2Threshold && t3Pen > t2Pen && t3Pen > t1Eff) {
+    } else if (config.tiers.enabled && (t3CountReady || t3Pen >= tier2Threshold && t3Pen > t2Pen && t3Pen > t1Eff)) {
       const lastShown = state.nudge.lastShownByTier[3] ?? 0;
       const cadenceMet = lastShown === 0 || tokenCount - lastShown >= growthFloor;
       if (cadenceMet) {
         injectedTier = 3;
-        injectedReason = `T3 condense ready: ${tiers[3].targetBlocks.length} tier-2 blocks (${t3Pen} tokens) >= ${tier2Threshold} (1.5x) and > T2 ${t2Pen} and > T1 effective ${t1Eff}, usage ${Math.round(usage * 100)}%`;
+        injectedReason = t3CountReady ? `T3 condense ready: ${t3Count} tier-2 blocks >= tier3Trigger ${config.tiers.tier3Trigger} (${t3Pen} tokens), usage ${Math.round(usage * 100)}%` : `T3 condense ready: ${tiers[3].targetBlocks.length} tier-2 blocks (${t3Pen} tokens) >= ${tier2Threshold} (1.5x) and > T2 ${t2Pen} and > T1 effective ${t1Eff}, usage ${Math.round(usage * 100)}%`;
       }
     }
   }
   const shouldInject = injectedTier !== null;
+  if (shouldInject && firstSightMassReady) {
+    injectedReason += " [first-sight mass]";
+  }
   let reason;
   if (injectedTier !== null) {
     reason = injectedReason;
   } else if (pressure) {
     const label = emergencyOverride ? "EMERGENCY" : "OVER-LIMIT";
-    reason = `${label}: usage ${Math.round(usage * 100)}% but no tier has effective compressible content (T1 effective ${t1Eff}, T2 ${t2Pen}, T3 ${t3Pen}) \u2014 nudge suppressed to avoid offering ranges below minCompressRange`;
+    reason = bestPending === 0 ? `${label}: usage ${Math.round(usage * 100)}% but no tier has effective compressible content (T1 effective ${t1Eff}, T2 ${t2Pen}, T3 ${t3Pen}) \u2014 nudge suppressed to avoid offering ranges below minCompressRange` : `${label}: usage ${Math.round(usage * 100)}% but max pending ${bestPending} < min benefit ${minPressureBenefit} tokens (T1 effective ${t1Eff}, T2 ${t2Pen}, T3 ${t3Pen}) \u2014 suppressed: rewriting below the benefit floor reclaims almost nothing while usage stays high; truncate.threshold remains the safety valve`;
   } else {
     const tiersList = [1, 2, 3];
     const eligible = tiersList.filter((t) => config.tiers.enabled || t === 1);
+    const countReadyUngated = (t) => t === 2 ? t2Count >= config.tiers.tier2Trigger : t === 3 ? t3Count >= config.tiers.tier3Trigger : false;
+    const countReady = (t) => countReadyUngated(t) && usage >= tierCountUsageFloor;
     const ready = eligible.filter((t) => (tiers[t]?.pending ?? 0) >= nudgeGrowthTokens).map((t) => `T${t} ${tiers[t].pending}`);
-    const readyHint = ready.length > 0 ? `, ready: ${ready.join(", ")}` : "";
-    const blocked = eligible.filter((t) => (tiers[t]?.pending ?? 0) >= nudgeGrowthTokens && (state.nudge.lastShownByTier[t] ?? 0) > 0 && tokenCount - (state.nudge.lastShownByTier[t] ?? 0) < growthFloor).map((t) => `T${t} (cadence)`);
+    const readyCount = eligible.filter(
+      (t) => (tiers[t]?.pending ?? 0) < nudgeGrowthTokens && countReadyUngated(t)
+    ).map(
+      (t) => `T${t} ${t === 2 ? t2Count : t3Count} blocks (count${usage >= tierCountUsageFloor ? "" : ", usage-gated"})`
+    );
+    const readyAll = [...ready, ...readyCount];
+    const readyHint = readyAll.length > 0 ? `, ready: ${readyAll.join(", ")}` : "";
+    const blocked = eligible.filter(
+      (t) => ((tiers[t]?.pending ?? 0) >= nudgeGrowthTokens || countReady(t)) && (state.nudge.lastShownByTier[t] ?? 0) > 0 && tokenCount - (state.nudge.lastShownByTier[t] ?? 0) < growthFloor
+    ).map((t) => `T${t} (cadence)`);
     const blockedHint = blocked.length > 0 ? `, blocked: ${blocked.join(", ")}` : "";
-    const maxPending = Math.max(0, ...Object.values(tiers).map((t) => t.pending));
+    const maxPending = Math.max(
+      0,
+      ...Object.values(tiers).map((t) => t.pending)
+    );
     const pendingShort = maxPending < nudgeGrowthTokens;
     const growthShort = growthSinceReference < growthFloor;
     const parts = [];
-    if (pendingShort) parts.push(`max compressible ${maxPending} < threshold ${nudgeGrowthTokens}`);
-    if (growthShort) parts.push(`growth ${growthSinceReference} < floor ${growthFloor}`);
-    if (parts.length === 0) parts.push(`max compressible ${maxPending}, growth ${growthSinceReference}`);
+    if (pendingShort)
+      parts.push(
+        `max compressible ${maxPending} < threshold ${nudgeGrowthTokens}`
+      );
+    if (growthShort)
+      parts.push(`growth ${growthSinceReference} < floor ${growthFloor}`);
+    if (parts.length === 0)
+      parts.push(
+        `max compressible ${maxPending}, growth ${growthSinceReference}`
+      );
     reason = `${parts.join("; ")}${readyHint}${blockedHint}`;
   }
-  const ctxBreakdown = computeContextBreakdown(input.messages, tokenCount, growthSinceReference, countTokens);
+  const ctxBreakdown = computeContextBreakdown(
+    input.messages,
+    tokenCount,
+    growthSinceReference,
+    countTokens
+  );
   return {
     shouldInject,
     reason,
@@ -1791,6 +2779,7 @@ function decideNudge(input) {
       hasPendingNudge: hasPendingNudge ? 1 : 0,
       overLimit: overLimit ? 1 : 0,
       emergencyOverride: emergencyOverride ? 1 : 0,
+      minPressureBenefit,
       pendingT1: tiers[1].pending,
       pendingT2: tiers[2].pending,
       pendingT3: tiers[3].pending
@@ -1802,7 +2791,7 @@ function computeContextBreakdown(messages, total, growth, countTokens) {
   const count = countTokens ?? ((t) => Math.ceil(t.length / 4));
   let system = 0, tool = 0, summaries = 0, code = 0, text = 0;
   for (const msg of messages) {
-    const tokens = count(msg.text ?? "");
+    const tokens = countMessageTokens(msg, count);
     if (msg.text?.startsWith("[Compressed conversation section]")) {
       summaries += tokens;
     } else if (msg.contentType === "tool-call" || msg.contentType === "tool-result") {
@@ -1832,6 +2821,7 @@ function cloneState(state) {
     tokenSnapshot: { ...state.tokenSnapshot ?? {} },
     nudge: { ...state.nudge, anchors: { ...state.nudge.anchors } },
     stats: { ...state.stats },
+    absorbed: (state.absorbed ?? []).map((record) => ({ ...record })),
     nextBlockId: state.nextBlockId,
     nextRunId: state.nextRunId
   };
@@ -1858,302 +2848,13 @@ function countOccurrences(haystack, needle) {
   }
   return count;
 }
-var COMPRESS_PHILOSOPHY = `Compression Philosophy:
-- All compression serves the primary task, but be frugal.
-- Context capacity is precious. Save context by compressing consumed outputs, not by avoiding tools.
-- Compress by need, not by percentage.
-- Work from summaries, not raw tool outputs. All listed ranges (user prompts, tool outputs, code, logs, exploration, intermediate steps) should be compressed to summary format \u2014 the ONLY exceptions are protected content, content the current step is actively using, or critical content you cannot reconstruct.`;
-var HOW_TO_COMPRESS_RULES = `HOW TO COMPRESS
-
-When you call \`compress\`, the summary you write becomes the only record of the replaced conversation. Make it self-contained and complete: every user request, experiment purpose, and work task in the range must be accurately captured. A later reader (or you, after decompressing) should be able to continue the task WITHOUT needing the original.
-
-KEEP VERBATIM \u2014 never paraphrase or abbreviate these:
-- Full file paths with line numbers, directory prefix on every mention (\`lib/hooks.ts:347\`, \`src/index.ts:12-18\`, \`gatenet_v3/model.py:45\`). Never abbreviate to a bare filename (\`hooks.ts\`, \`model.py\`) \u2014 they are ambiguous and cannot be grepped or decompressed-to later.
-- Function, class, and type signatures (exact names, params, return types) AND critical code lines that encode logic \u2014 the line that IS the finding, not just the function name (e.g. \`kv_keys += define_gate * a_key[i](emb)\` is more useful than "see model_kvnet.py").
-- Error messages and stack traces (exact text \u2014 you need the literal string to grep for it later).
-- Key details from reports and analyses \u2014 not just the conclusion. Keep the comparison numbers and the mechanism, not "X is worse" alone (write "1.76\xD7 PPL gap because KV store is static", not "KVNet underperforms").
-- Decisions and their rationale ("chose X over Y because Z" \u2014 the "because" is load-bearing; without it the decision looks arbitrary).
-- Constraints discovered ("must support Node 22", "no new dependencies", "AGENTS.md forbids \`as any\`").
-- Exact values: versions, config keys, thresholds, magic numbers.
-- User intent \u2014 quote short user messages verbatim. When the message is too long to quote, preserve intent with extra care: do not change scope, constraints, priorities, acceptance criteria, or requested outcomes. Mark them clearly as past quotes (e.g., "User said: ..."), not as current directives. Losing these changes the task itself.
-- The user's overall goal and any changes to it \u2014 the big-picture objective plus how it evolved during the compressed range. Each summary must reflect the goal as it stood at the end of the range, including pivots (e.g., "initially: fix bug X \u2192 pivoted to: refactor module Y after discovering root cause"). Losing the goal or its evolution makes all subsequent work appear unmotivated.
-- Purpose behind each significant action \u2014 preserve not just what was done but why: the hypothesis behind each experiment, the question behind each exploration, the task goal behind each work action. Without purpose, the summary reads as disconnected technical steps with no through-line.
-- Open questions and unresolved TODOs \u2014 losing these changes what work appears to remain.
-- Message refs of key anchors (\`m00420\`, \`m00510\u2013m00520\`) \u2014 they let you or a later reader jump back via decompress to the exact original.
-
-DROP \u2014 extract the signal, discard the vessel:
-- Verbose logs (build/test/\`npm\` output) once you have captured the error line or the result.
-- Duplicate file reads once the needed content is recorded.
-- Consumed exploration \u2014 search hits, agent return values, successful tool outputs \u2014 once you have extracted the facts you need (same rule as dead-ends, but nothing went wrong; the content is simply spent).
-- Dead-end exploration \u2014 but PRESERVE the lesson in one line: "tried X, failed because Y".
-- Back-and-forth discussion and self-corrections once the final position is captured (keep the outcome, drop the journey to it).
-- Repeated status checks (\`git status\`, \`ls\`) once state is known.
-
-For each significant item you DROP (scripts, reports, large analyses, long tool outputs), add a one-line CONTENT description of what it covers \u2014 not where it lives. Bad: "probe script at /path/probe_kvnet.py". Good: "probe_kvnet.py: tests n-gram baseline, generation quality, long-range dependency, position sensitivity, op pipeline, QUERY attention." This lets a later decompress target the right block by relevance, not by guessing locations.
-
-PRIORITY \u2014 when the summary must be compact, preserve in this order:
-1. User's overall goal, goal evolution, intent, and hard constraints (losing these changes the task).
-2. Decisions and rationale.
-3. Exact technical artifacts: paths, signatures, errors, values.
-4. Conclusions and key findings.
-5. Lessons learned: what failed and why.
-
-Write dense, scannable bullets \u2014 not narrative prose. If the range spans distinct concerns (request \u2192 findings \u2192 decision), group bullets under short thematic headers so a reader can scan to the part they need. Every line must earn its place. Do not mimic the style of existing summaries in context; follow these rules.`;
-var TIER2_DISTILL_RULES = `TIER 2 COMPRESSION \u2014 DISTILLATION
-
-You are compressing historical summaries (not raw conversation). These summaries have already captured the details. Your job is to DISTILL them: extract only what matters for future work, discard the process.
-
-KEEP \u2014 these are the only things that survive distillation:
-- Decisions and their rationale ("chose X over Y because Z" \u2014 the "because" is load-bearing).
-- Final outcomes: version numbers shipped, PR numbers merged/closed, bugs fixed or deferred.
-- Key lessons: what failed and why ("tried X, failed because Y"). These prevent repeating mistakes.
-- Critical constraints discovered ("must support Node 22", "AGENTS.md forbids as any").
-- Design decisions with architectural impact ("chose compress-as-anchor over synthetic messages because prefix cache").
-- Whether content is OBSOLETE or SUPERSEDED \u2014 mark with one line: "[SUPERSEDED by PR #NNN]" or "[OBSOLETE: deleted in vX.Y.Z]". Do NOT keep the obsolete content's details \u2014 just the marker and reason.
-- Function/class/type names and module paths that are the SUBJECT of the work \u2014 e.g., "fixed filterCompressedRanges in prune.ts", "added SessionStateRegistry in state.ts". Not exact line numbers or full signatures \u2014 just enough to LOCATE the code without searching.
-- Exploration findings: if a block was exploratory with no decision, keep the CONCLUSION in one line ("explored X, not viable because Y"). Do not keep the exploration process.
-
-DROP \u2014 these were useful during the work but are no longer needed:
-- Exact line numbers, diffs, verbose function signatures, full code listings.
-- Build/deploy process details, test execution steps.
-- Review process details (who reviewed, what rounds, test counts).
-- Verbose logs, command output, intermediate debugging steps.
-
-FORMAT:
-- Start each distilled block with a source header line:
-  \`Source: bN+bM+... (XK\u2192YK tok, Zx). [original topic]\`
-  Example: \`Source: b5+b7 (56K+44K\u2192268 tok, 375x). [Tool-result recap + publish]\`
-- 3-5 bullet points per source block, each a self-contained fact.
-- Dense, scannable \u2014 no narrative prose.
-- Start with the outcome, not the process: "v1.13.0 shipped (7 PRs bundled)" not "implemented 7 PRs then reviewed then merged".
-- Cross-block synthesis: if multiple source blocks cover the same topic (same PR, same feature, same bug), MERGE them into a single group of bullets. Do not repeat the same fact from different blocks \u2014 keep it once under the most relevant source header.
-
-SIZE TARGET: 50-150 tokens per source block (excluding the header). If you can't fit it in 150 tokens, you're keeping too much process. If a block has nothing worth keeping (pure noise), output just the header followed by "[no actionable content]."`;
-var TIER3_CONDENSE_RULES = `TIER 3 COMPRESSION \u2014 ULTRA-CONDENSATION
-
-You are compressing distilled summaries (Tier 2) into ultra-condensed facts (Tier 3). The distilled summaries already contain only decisions and outcomes. Your job is to reduce them to bare factual references.
-
-PRIORITY \u2014 when a source block has more facts than the size target allows, keep in this order:
-1. Shipped outcomes (versions released, PRs merged) \u2014 these are permanent record.
-2. Open work (PRs/issues still pending) \u2014 these may need follow-up.
-3. Key decisions with architectural impact ("chose X over Y because Z").
-4. Critical constraints ("must support Node 22").
-Drop everything else. Tier 3 is a lookup index, not a knowledge base.
-
-FORMAT:
-- Start with a source header line:
-  \`Source: bN+bM+... (XK\u2192YK tok, Zx). [original topic]\`
-- Output 1-3 facts per source block. Each fact is a single line: subject + outcome.
-- No explanations, no rationale, no process \u2014 just the fact.
-- Format: "[PR/Issue/Version] \u2014 [outcome in \u22648 words]"
-- Merge related facts from different source blocks if they concern the same topic.
-
-EXAMPLES:
-- "v1.13.0 shipped \u2014 quality gate + GC fix (7 PRs)"
-- "PR #196 merged \u2014 preserve-first-user (supersedes #169)"
-- "Bug 1214 fixed \u2014 compress consumed all user messages"
-- "Chose compress-as-anchor \u2014 prefix cache benefit over synthetic injection"
-- "Constraint: AGENTS.md forbids as any \u2014 never suppress types"
-
-DROP:
-- Multi-sentence context. If a fact needs >1 sentence, it's too detailed for Tier 3.
-- Lessons learned ("tried X, failed because Y") \u2014 drop UNLESS the failure is likely to recur and the block is <30 days old.
-- Design rationale details \u2014 keep the decision, drop the "because" unless it's a critical constraint.
-- Anything marked [OBSOLETE] or [SUPERSEDED] \u2014 drop entirely, note "[N blocks obsolete]" in the summary.
-
-SIZE TARGET: 30-60 tokens per source block (including header). For a batch of N source blocks, total output \u2248 N \xD7 40 tokens. If a source block has only one trivial fact, output just the header + one line.`;
-var defaultPrompts = Object.freeze({
-  compressPhilosophy: COMPRESS_PHILOSOPHY,
-  howToCompressRules: HOW_TO_COMPRESS_RULES,
-  tier2DistillRules: TIER2_DISTILL_RULES,
-  tier3CondenseRules: TIER3_CONDENSE_RULES
-});
-function efficiencyNote(prompts) {
-  return `This is an efficiency nudge to compress early and keep context lean \u2014 not an overflow warning. A separate, stronger alert will appear if the context is actually full.
-
-${prompts.compressPhilosophy}`;
-}
-function emergencyHeader(prompts) {
-  return `\u26A0\uFE0F Context limit reached \u2014 compress now. Prioritize consumed tool outputs.
-
-${prompts.compressPhilosophy}`;
-}
-function formatK(n) {
-  if (n >= 1e3) return `${(n / 1e3).toFixed(1)}K`;
-  return `${n}`;
-}
-function formatBreakdown(bd) {
-  if (!bd) return "";
-  const parts = [];
-  if (bd.system > 0) parts.push(`${formatK(bd.system)} system`);
-  if (bd.tool > 0) parts.push(`${formatK(bd.tool)} tool`);
-  if (bd.summaries > 0) parts.push(`${formatK(bd.summaries)} summaries`);
-  if (bd.code > 0) parts.push(`${formatK(bd.code)} code`);
-  if (bd.text > 0) parts.push(`${formatK(bd.text)} text`);
-  const growth = bd.growth > 0 ? `
-+${formatK(bd.growth)} since last nudge` : "";
-  return `Context breakdown: ${parts.join(" | ")}${growth}`;
-}
-function formatTierTargetBlocks(blocks) {
-  if (blocks.length === 0) {
-    return "Target blocks: (none \u2014 no tier blocks found)";
-  }
-  const lines = blocks.map((b) => {
-    const summaryTokens = Math.ceil((b.summary ?? "").length / 4);
-    const topic = b.topic ? `  "${b.topic}"` : "";
-    return `  ${b.blockId}  ${b.effectiveMessageIds.length} msgs  ${formatK(b.compressedTokens)}\u2192${formatK(summaryTokens)}${topic}`;
-  });
-  return `Target ${blocks[0].tier === 1 ? "tier-1" : "tier-2"} blocks to distill (${blocks.length}):
-${lines.join("\n")}`;
-}
-function formatRanges(compressible, protectedRanges) {
-  if (compressible.length === 0 && protectedRanges.length === 0) {
-    return "[No specific ranges detected \u2014 compress any consumed content.]";
-  }
-  const refNum2 = (ref) => {
-    const m = ref.match(/\d+/);
-    return m ? parseInt(m[0], 10) : 0;
-  };
-  const entries = [];
-  for (const r of compressible) {
-    entries.push({
-      startRef: r.startRef,
-      endRef: r.endRef,
-      startNum: refNum2(r.startRef),
-      endNum: refNum2(r.endRef),
-      count: r.count,
-      tokens: r.tokens,
-      toolPct: r.toolPct,
-      textPct: r.textPct,
-      compressibleTokens: r.tokens,
-      compressibleCount: r.count,
-      protectedTokens: 0,
-      protectedCount: 0,
-      protectedTools: [],
-      dangerous: r.dangerous ?? false
-    });
-  }
-  for (const r of protectedRanges) {
-    entries.push({
-      startRef: r.startRef,
-      endRef: r.endRef,
-      startNum: refNum2(r.startRef),
-      endNum: refNum2(r.endRef),
-      count: r.count,
-      tokens: r.tokens,
-      toolPct: 0,
-      textPct: 0,
-      compressibleTokens: 0,
-      compressibleCount: 0,
-      protectedTokens: r.tokens,
-      protectedCount: r.count,
-      protectedTools: [...r.tools],
-      dangerous: false
-    });
-  }
-  entries.sort((a, b) => a.startNum - b.startNum);
-  const merged = [];
-  for (const e of entries) {
-    const last = merged[merged.length - 1];
-    if (last && e.startNum <= last.endNum + 1) {
-      last.endRef = e.endRef;
-      last.endNum = Math.max(last.endNum, e.endNum);
-      last.count += e.count;
-      last.tokens += e.tokens;
-      last.compressibleTokens += e.compressibleTokens;
-      last.compressibleCount += e.compressibleCount;
-      last.protectedTokens += e.protectedTokens;
-      last.protectedCount += e.protectedCount;
-      if (e.dangerous) last.dangerous = true;
-      for (const t of e.protectedTools) {
-        if (!last.protectedTools.includes(t)) last.protectedTools.push(t);
-      }
-    } else {
-      merged.push({ ...e });
-    }
-  }
-  const lines = merged.map((e) => {
-    const suffix = e.dangerous && e.compressibleTokens > 0 ? "  \u26A0\uFE0F NOT recommended unless you are certain." : "";
-    if (e.protectedTokens > 0 && e.compressibleTokens === 0) {
-      return `  ${e.startRef}\u2013${e.endRef}  ${e.count} msgs  ${formatK(e.tokens)} [PROTECTED: ${e.protectedTools.join(", ")} \u2014 not compressible]${suffix}`;
-    }
-    if (e.protectedTokens > 0 && e.compressibleTokens > 0) {
-      return `  ${e.startRef}\u2013${e.endRef}  ${e.count} msgs  ${formatK(e.tokens)} [${formatK(e.compressibleTokens)} compressible | ${formatK(e.protectedTokens)} protected: ${e.protectedTools.join(", ")}]${suffix}`;
-    }
-    return `  ${e.startRef}\u2013${e.endRef}  ${e.count} msgs  ${formatK(e.tokens)} [tool ${e.toolPct}% | text ${e.textPct}%]${suffix}`;
-  });
-  return `Compressible ranges (${merged.length}, oldest first):
-${lines.join("\n")}`;
-}
-function renderNudgeText(decision, prompts = defaultPrompts) {
-  const breakdownStr = formatBreakdown(decision.contextBreakdown);
-  const rangesStr = formatRanges(decision.compressibleRanges, decision.protectedRanges ?? []);
-  const isEmergency = !!decision.breakdown?.emergencyOverride || !!decision.breakdown?.overLimit;
-  if (decision.tier !== null && decision.tier >= 2) {
-    const isT2 = decision.tier === 2;
-    const targets = decision.tierTargetBlocks ?? [];
-    const blockList = formatTierTargetBlocks(targets);
-    const startId = targets[0]?.blockId ?? "b1";
-    const endId = targets[targets.length - 1]?.blockId ?? "b5";
-    const voice = isEmergency ? "emergency" : "gentle";
-    const triggerLine = isEmergency ? `[EMERGENCY \u2014 TIER ${decision.tier} ${isT2 ? "DISTILLATION" : "CONDENSATION"}] Context limit reached \u2014 distill NOW into a denser summary to reclaim tokens.` : `[TIER ${decision.tier} ${isT2 ? "DISTILLATION" : "CONDENSATION"} TRIGGER]`;
-    return {
-      voice,
-      text: [
-        efficiencyNote(prompts),
-        "",
-        breakdownStr,
-        "",
-        triggerLine,
-        isT2 ? `Your tier-1 compression summaries have accumulated. Distill them into a single denser tier-2 summary. Use block IDs as boundaries (startId and endId as bN). Any raw (uncompressed) messages sitting between the boundary blocks are absorbed into the tier-2 block as well \u2014 apply HOW TO COMPRESS to those raw messages and the TIER 2 distillation rules to the existing summaries, so the whole span is covered and nothing is lost.` : `Your tier-2 compression summaries have accumulated. Condense them further into a tier-3 ultra-condensed summary. Use block IDs as boundaries (startId and endId as bN). Any raw (uncompressed) messages sitting between the boundary blocks are absorbed into the tier-3 block as well \u2014 apply HOW TO COMPRESS to those raw messages and the TIER 3 condensation rules to the existing summaries, so the whole span is covered and nothing is lost.`,
-        blockList,
-        `Example: compress({ content: [{ startId: "${startId}", endId: "${endId}", summary: "..." }] })`,
-        "",
-        prompts.howToCompressRules,
-        "",
-        isT2 ? prompts.tier2DistillRules : prompts.tier3CondenseRules
-      ].join("\n")
-    };
-  }
-  if (isEmergency) {
-    return {
-      voice: "emergency",
-      text: [
-        emergencyHeader(prompts),
-        "",
-        breakdownStr,
-        "",
-        prompts.howToCompressRules,
-        "",
-        `{ "topic": "...", "content": [{ "startId": "<ID>", "endId": "<ID>", "summary": "..." }] }`,
-        "Only use IDs from visible messages above. Compress older work first.",
-        "",
-        rangesStr
-      ].join("\n")
-    };
-  }
-  return {
-    voice: "gentle",
-    text: [
-      efficiencyNote(prompts),
-      "",
-      breakdownStr,
-      "",
-      prompts.howToCompressRules,
-      "",
-      rangesStr,
-      "",
-      `\u{1F4A1} Compress all ranges in one call (pass multiple content entries: \`content: [{...}, {...}]\`).`
-    ].join("\n")
-  };
-}
 function formatTokens2(n) {
   if (!Number.isFinite(n) || n <= 0) return "0";
   return n >= 1e3 ? `${(n / 1e3).toFixed(1)}K` : String(n);
 }
 function pct(n, total) {
   if (n <= 0 || total <= 0) return 0;
-  return Math.max(1, Math.round(n / total * 100));
+  return Math.round(n / total * 100);
 }
 function numericPart2(blockId) {
   const match = /^b(\d+)$/.exec(blockId);
@@ -2192,12 +2893,18 @@ function collectVisible(messages, state, countTokens) {
     if (block.active) summaryTokens += summaryTokensOf(block, countTokens);
   }
   const visible = [];
+  const toolCallNames = /* @__PURE__ */ new Map();
+  for (const message of messages) {
+    if (message.contentType === "tool-call" && message.toolCallId && message.toolName) {
+      toolCallNames.set(message.toolCallId, message.toolName);
+    }
+  }
   messages.forEach((message, index) => {
     if (coveredIds.has(message.id)) return;
     const ref = refForRaw(state.messageRefs, message.id);
     if (!ref) return;
-    const tokens = countTokens(message.text ?? "");
-    const tool = message.toolName ?? "text";
+    const tokens = countMessageTokens(message, countTokens);
+    const tool = isToolMessage(message) ? message.toolName ?? (message.toolCallId ? toolCallNames.get(message.toolCallId) : void 0) ?? "tool" : "text";
     if (tokens > 0) visible.push({ ref, tokens, tool, index });
   });
   return { visible, summaryTokens };
@@ -2281,25 +2988,38 @@ function renderUncompressedRanges(visible) {
     lines.push("  (no uncompressed messages)");
     return lines.join("\n");
   }
-  const refNum2 = (ref) => {
+  const refNum = (ref) => {
     const m = ref.match(/\d+/);
     return m ? parseInt(m[0], 10) : 0;
   };
+  const dominantTool = (toolTokens) => {
+    let best = "text";
+    let bestN = -1;
+    for (const [tool, n] of toolTokens) {
+      if (n > bestN) {
+        best = tool;
+        bestN = n;
+      }
+    }
+    return best;
+  };
   const merged = [];
   for (const m of visible) {
-    const num = refNum2(m.ref);
+    const num = refNum(m.ref);
     const last = merged[merged.length - 1];
     if (last && num === last.startNum + last.count) {
       last.endRef = m.ref;
       last.count += 1;
       last.tokens += m.tokens;
+      last.toolTokens.set(m.tool, (last.toolTokens.get(m.tool) ?? 0) + m.tokens);
     } else {
-      merged.push({ startRef: m.ref, endRef: m.ref, startNum: num, count: 1, tokens: m.tokens, tool: m.tool });
+      const toolTokens = /* @__PURE__ */ new Map([[m.tool, m.tokens]]);
+      merged.push({ startRef: m.ref, endRef: m.ref, startNum: num, count: 1, tokens: m.tokens, toolTokens });
     }
   }
   for (const r of merged.slice(0, 30)) {
     const range = r.count === 1 ? r.startRef : `${r.startRef}\u2013${r.endRef}`;
-    lines.push(`  ${range}  (${r.count} msgs, ${formatTokens2(r.tokens)}${r.count > 1 ? ` (${Math.round(r.tokens / r.count)}/msg)` : ""}) ${r.tool}`);
+    lines.push(`  ${range}  (${r.count} msgs, ${formatTokens2(r.tokens)}${r.count > 1 ? ` (${Math.round(r.tokens / r.count)}/msg)` : ""}) ${dominantTool(r.toolTokens)}`);
   }
   if (merged.length > 30) {
     lines.push(`  ... and ${merged.length - 30} more ranges`);
@@ -2738,10 +3458,16 @@ function buildToolCallIndex(events) {
   }
   return index;
 }
+var SUMMARY_FRAME_PREFIX = "[Model-written summary \u2014 not user words; re-verify any obligations before relying on them]";
+function withSummaryFramePrefix(text) {
+  return text.startsWith(SUMMARY_FRAME_PREFIX) ? text : `${SUMMARY_FRAME_PREFIX}
+${text}`;
+}
 function projectEvent(event, toolNames) {
   switch (event.type) {
     case "user/message": {
-      const text = extractText(event.data.content);
+      const raw = extractText(event.data.content);
+      const text = isCheckpointNode(event) ? withSummaryFramePrefix(raw) : raw;
       return text.length > 0 ? [{ id: String(event.seq), role: "user", contentType: "text", text }] : [];
     }
     case "assistant/message": {
@@ -2961,6 +3687,9 @@ function encodeAcpBlockLedger(payload) {
   }
   if (payload.directMessageIds !== void 0) obj.directMessageIds = [...payload.directMessageIds];
   if (payload.effectiveMessageIds !== void 0) obj.effectiveMessageIds = [...payload.effectiveMessageIds];
+  if (payload.verifiedReadings !== void 0 && payload.verifiedReadings.length > 0) {
+    obj.verifiedReadings = [...payload.verifiedReadings];
+  }
   return [{ type: "text", text: JSON.stringify(obj) }];
 }
 function decodeAcpBlockLedger(rawOutput) {
@@ -2986,6 +3715,7 @@ function decodeAcpBlockLedger(rawOutput) {
       if (isStringArray(record.parentBlockIds)) result.parentBlockIds = [...record.parentBlockIds];
       if (isStringArray(record.directMessageIds)) result.directMessageIds = [...record.directMessageIds];
       if (isStringArray(record.effectiveMessageIds)) result.effectiveMessageIds = [...record.effectiveMessageIds];
+      if (isStringArray(record.verifiedReadings)) result.verifiedReadings = [...record.verifiedReadings];
       return result;
     }
     return {};
@@ -3145,6 +3875,15 @@ function shadowedSeqsOf(session, start, end) {
 function readCompactionSummary(event) {
   return event.data;
 }
+function prefixSummaryBlocks(blocks) {
+  let done = false;
+  return blocks.map((block) => {
+    if (done || block.type !== "text") return block;
+    done = true;
+    const textBlock = block;
+    return { ...textBlock, text: withSummaryFramePrefix(textBlock.text) };
+  });
+}
 function runCompactionTransaction(session, input) {
   assertNoActiveCompaction(sessionEventsOf(session));
   const turn = findOpenTurn(sessionEventsOf(session));
@@ -3167,11 +3906,13 @@ function runCompactionTransaction(session, input) {
       ...input.topic === void 0 ? {} : { topic: input.topic },
       ...input.parentBlockIds === void 0 || input.parentBlockIds.length === 0 ? {} : { parentBlockIds: [...input.parentBlockIds] },
       ...input.directMessageIds === void 0 ? {} : { directMessageIds: [...input.directMessageIds] },
-      ...input.effectiveMessageIds === void 0 ? {} : { effectiveMessageIds: [...input.effectiveMessageIds] }
+      ...input.effectiveMessageIds === void 0 ? {} : { effectiveMessageIds: [...input.effectiveMessageIds] },
+      ...input.verifiedReadings === void 0 || input.verifiedReadings.length === 0 ? {} : { verifiedReadings: [...input.verifiedReadings] }
     };
+    const framedSummary = prefixSummaryBlocks(input.summary);
     seqs.push(session.append("compaction/summary", {
       compactionId,
-      summary: input.summary,
+      summary: framedSummary,
       shadowedRange: { start: input.start, end: input.end },
       shadowedSeqs: [...input.shadowedSeqs],
       shadowedTokenCount: input.shadowedTokenCount,
@@ -3180,7 +3921,7 @@ function runCompactionTransaction(session, input) {
       rawOutput: encodeAcpBlockLedger(ledgerPayload)
     }).seq);
     const message = createUserMessage({
-      content: input.summary,
+      content: framedSummary,
       source: compactCheckpointSource(compactionId)
     });
     seqs.push(session.append("user/message", message, {
@@ -3232,6 +3973,7 @@ function rebuildBlockLedger(events) {
     const effectiveMessageIds = embedded.effectiveMessageIds ? [...embedded.effectiveMessageIds] : Array.isArray(data.effectiveMessageIds) ? [...data.effectiveMessageIds] : void 0;
     const topic = embedded.topic ?? (typeof data.topic === "string" ? data.topic : void 0);
     const kernelBlockId = embedded.kernelBlockId ?? (typeof data.kernelBlockId === "string" ? data.kernelBlockId : void 0);
+    const verifiedReadings = embedded.verifiedReadings ? [...embedded.verifiedReadings] : Array.isArray(data.verifiedReadings) ? [...data.verifiedReadings] : void 0;
     const summarySeq = summarySeqs.get(data.compactionId) ?? null;
     ledger.push({
       blockId: data.compactionId,
@@ -3247,6 +3989,7 @@ function rebuildBlockLedger(events) {
       ...summarySeq === null ? {} : { summarySeq },
       ...directMessageIds === void 0 ? {} : { directMessageIds },
       ...effectiveMessageIds === void 0 ? {} : { effectiveMessageIds },
+      ...verifiedReadings === void 0 ? {} : { verifiedReadings },
       createdAt: event.time
     });
   }
@@ -3450,10 +4193,14 @@ function guardedSurfaceSeqsOf(session) {
   }
   return guarded;
 }
-function buildCompressibleSeqRanges(session, opts = {}) {
-  stripOrphanedSurfaceToolMessages(session);
+function seqOfKernelRef(refs, ref) {
+  const id = refs.byRef[ref];
+  if (id === void 0) return null;
+  const seq = Number(id);
+  return Number.isInteger(seq) ? seq : null;
+}
+function protectedSurfaceSeqs(session, preserve) {
   const nodes = session.surface.nodes;
-  const preserve = opts.preserveRecent ?? 5;
   const protectedSeqs = /* @__PURE__ */ new Set();
   if (preserve > 0) {
     for (const seq of nodes.slice(-preserve)) protectedSeqs.add(seq);
@@ -3466,48 +4213,65 @@ function buildCompressibleSeqRanges(session, opts = {}) {
     }
   }
   for (const seq of newestInstructionSeqsOf(session)) protectedSeqs.add(seq);
-  const raw = [];
-  let cur = null;
+  return protectedSeqs;
+}
+function compressibleSegmentsOf(session, fromIndex, toIndex, protectedSeqs) {
+  const nodes = session.surface.nodes;
+  const segments = [];
+  let current = null;
   const flush = () => {
-    if (cur !== null) raw.push(cur);
-    cur = null;
+    if (current !== null) segments.push(current);
+    current = null;
   };
-  for (const seq of nodes) {
+  for (let index = fromIndex; index <= toIndex; index += 1) {
+    const seq = nodes[index];
+    if (seq === void 0) continue;
     const event = eventAtOf(session, seq);
-    if (event === void 0 || protectedSeqs.has(seq) || isCheckpointNode(event) || isSystemNode(event)) {
+    if (event === void 0 || protectedSeqs.has(seq) || isCheckpointNode(event) || isSystemNode(event) || classifySurfaceEvent(event) === "instruction") {
       flush();
       continue;
-    }
-    if (classifySurfaceEvent(event) === "instruction") {
-      flush();
-      continue;
-    }
-    if (cur !== null && seq < cur.start) {
-      flush();
-      cur = null;
     }
     const tokens = defaultCountTokens(extractEventText(event));
     const isTool = isToolEvent(event);
-    if (cur === null) {
-      cur = { start: seq, end: seq, count: 1, tokens, toolCount: isTool ? 1 : 0 };
+    if (current === null) {
+      current = { start: seq, end: seq, count: 1, tokens, toolCount: isTool ? 1 : 0 };
     } else {
-      cur = { start: cur.start, end: seq, count: cur.count + 1, tokens: cur.tokens + tokens, toolCount: cur.toolCount + (isTool ? 1 : 0) };
+      current.start = Math.min(current.start, seq);
+      current.end = Math.max(current.end, seq);
+      current.count += 1;
+      current.tokens += tokens;
+      current.toolCount += isTool ? 1 : 0;
     }
   }
   flush();
+  return segments;
+}
+function buildCompressibleSeqRanges(session, kernelView, opts = {}) {
+  stripOrphanedSurfaceToolMessages(session);
+  const nodes = session.surface.nodes;
+  const indexOfSeq = /* @__PURE__ */ new Map();
+  for (let index = 0; index < nodes.length; index += 1) indexOfSeq.set(nodes[index], index);
+  const protectedSeqs = protectedSurfaceSeqs(session, opts.preserveRecent ?? 5);
   const out = [];
-  for (const range of raw) {
-    try {
-      const { start, end } = resolveSurfaceRange(session, range.start, range.end);
-      const count = range.count;
-      out.push({
-        start,
-        end,
-        count,
-        tokens: range.tokens,
-        toolPct: count > 0 ? Math.round(range.toolCount / count * 100) : 0
-      });
-    } catch {
+  for (const range of kernelView.ranges) {
+    const startSeq = seqOfKernelRef(kernelView.refs, range.startRef);
+    const endSeq = seqOfKernelRef(kernelView.refs, range.endRef);
+    const from = startSeq === null ? void 0 : indexOfSeq.get(startSeq);
+    const to = endSeq === null ? void 0 : indexOfSeq.get(endSeq);
+    if (from === void 0 || to === void 0) continue;
+    const segments = compressibleSegmentsOf(session, Math.min(from, to), Math.max(from, to), protectedSeqs);
+    for (const segment of segments) {
+      try {
+        const { start, end } = resolveSurfaceRange(session, segment.start, segment.end);
+        out.push({
+          start,
+          end,
+          count: segment.count,
+          tokens: segment.tokens,
+          toolPct: segment.count > 0 ? Math.round(segment.toolCount / segment.count * 100) : 0
+        });
+      } catch {
+      }
     }
   }
   return out.sort((a, b) => a.start - b.start);
@@ -3812,7 +4576,7 @@ function mergeGroup(defaults, override, allowed, path) {
   }
   return out;
 }
-function resolvePrompts(input) {
+function resolvePrompts2(input) {
   if (input === void 0) return DEFAULT_RESOLVED;
   return {
     nudge: mergeGroup(DEFAULT_PROMPTS.nudge, input.nudge, NUDGE_ALLOWED, "prompts.nudge"),
@@ -3833,8 +4597,10 @@ var DEFAULT_PROMPTS = {
   nudge: {
     // 与 kernel nudge-text.ts EFFICIENCY_NOTE 逐字对齐——不含 "Context usage is at X%"
     // 陈述(usage 只通过 breakdown 传达);{pct} 仍可用作自定义占位符。
-    normal: "This is an efficiency nudge to compress early and keep context lean \u2014 not an overflow warning. A separate, stronger alert will appear if the context is actually full.\n\n{philosophy}",
-    emergency: "\u26A0\uFE0F Context limit reached \u2014 compress now. Prioritize consumed tool outputs.\n\n{philosophy}",
+    // B6（2026-09-08）：正文 ≤300 B——philosophy 段移出 nudge（已住系统提示与工具描述），
+    // 每拍复读同一份 6 KB 文本=重复计费。
+    normal: "Efficiency nudge: compress consumed ranges early to keep context lean \u2014 not an overflow warning. A stronger alert appears only if the context is actually full.",
+    emergency: "\u26A0\uFE0F Context limit reached \u2014 compress now. Prioritize consumed tool outputs.",
     guidance: HOW_TO_COMPRESS_RULES,
     tier: "Tier {tier}: {count} tier-{prevTier} block(s) distillable ({tokens} tokens) \u2014 distill them by compressing their checkpoint seq(s) [seqs {seqs}] as one range: compress({ content: [{ startSeq: {firstSeq}, endSeq: {lastSeq}, summary }] }).",
     breakdown: "Context breakdown: {system}K system | {tool}K tool | {summaries}K summaries | {code}K code | {text}K text",
@@ -3848,7 +4614,7 @@ var DEFAULT_PROMPTS = {
     footer: "Compress with: compress({ content: [{ startSeq, endSeq, summary }] }) \u2014 content is an array: batch multiple unrelated segments in one call, each entry its own block. Keep ranges disjoint.\nSnapshot taken at nudge time: the seqs go stale once the surface moves (a later compress shadows them), so re-run acp_status for fresh refs before compressing."
   },
   tools: {
-    compress: "Replace older conversation ranges with dense summaries you write. Each message seq is a surface reference. Single range: compress({ content: [{ startSeq, endSeq, summary }] }). Batch multiple unrelated ranges in one call (each content entry becomes its own block); keep ranges disjoint. Never compress content the current step is actively using. Compress boundaries are SURFACE SEQS (acp_status Surface: row, latest nudge table) \u2014 NOT the block refs (bN, e.g. b1) that acp_status COMPRESSED BLOCKS shows, which are for decompress only. Drilldown mN refs (e.g. m00306) are ALSO accepted as startSeq/endSeq \u2014 they are auto-mapped to the live surface seq; an unknown mN (never assigned on the current surface) fails with guidance. Seq refs must come from the CURRENT surface (acp_status or the latest nudge): a span whose edges were shadowed by an earlier compress is auto-remapped to its still-live content, a fully compressed span is reported as already compressed, and invented/other-session seqs fail with guidance. Good compression moments: stage or subtask completion whose details you have fully consumed and will not re-check, strategy switches, intermediate milestones, and wrapping up failed exploration \u2014 when the details are consumed and no longer critical for the task ahead. Before compressing, ask: will I need to re-verify any detail from this range in this task? If yes, keep it live. When you write a summary, turn dead-end exploration into a conclusion (what was tried, why it failed, the next step) \u2014 not a blow-by-blow; and keep the summary the ONLY record: self-contained, so a later reader (or you, after decompress) can continue without the original.",
+    compress: 'Replace older conversation ranges with dense summaries you write. Each message seq is a surface reference. Single range: compress({ content: [{ startSeq, endSeq, summary }] }). Batch multiple unrelated ranges in one call (each content entry becomes its own block); keep ranges disjoint. Never compress content the current step is actively using. Compress boundaries are SURFACE SEQS (acp_status Surface: row, latest nudge table) \u2014 NOT the block refs (bN, e.g. b1) that acp_status COMPRESSED BLOCKS shows, which are for decompress only. Drilldown mN refs (e.g. m00306) are ALSO accepted as startSeq/endSeq \u2014 they are auto-mapped to the live surface seq; an unknown mN (never assigned on the current surface) fails with guidance. Seq refs must come from the CURRENT surface (acp_status or the latest nudge): a span whose edges were shadowed by an earlier compress is auto-remapped to its still-live content, a fully compressed span is reported as already compressed, and invented/other-session seqs fail with guidance. Good compression moments: stage or subtask completion whose details you have fully consumed and will not re-check, strategy switches, intermediate milestones, and wrapping up failed exploration \u2014 when the details are consumed and no longer critical for the task ahead. Before compressing, ask: will I need to re-verify any detail from this range in this task? If yes, keep it live. When you write a summary, turn dead-end exploration into a conclusion (what was tried, why it failed, the next step) \u2014 not a blow-by-blow; and keep the summary the ONLY record: self-contained, so a later reader (or you, after decompress) can continue without the original. Optional verifiedReadings: string[] per content entry records acceptance readings that are already green (e.g. "t0-fastpath 8/8") \u2014 stored structurally on the compaction event so later steps need not re-run them.',
     decompress: "Recover the original content of a compressed block by its blockId \u2014 the kernel block ref `bN` shown by acp_status (e.g. b1), or a compaction id from search_context (read-only; does not unshadow the range). Large blocks are paged so each page stays under the host tool-result trim budget (up to 100 messages per call): pass offset/limit to walk them and follow the continue hint in the result.",
     searchContext: "Search inside compressed blocks (summaries and original content) for information the model no longer sees in context. When a summary lacks a detail you need (exact values, error strings, decisions, verbatim code), SEARCH the compressed blocks FIRST \u2014 never guess or reconstruct from memory: search_context(query) locates the right block, then decompress only that block to recover the original.",
     acpStatus: 'Context status: overview of the current context \u2014 CONTEXT BREAKDOWN (tool/text/summaries token shares of the visible total), COMPRESSED BLOCKS ledger, and the nudge decision. No args = overview. Percentages are shares of the visible content, not the context window. Note: the block refs in COMPRESSED BLOCKS (bN, e.g. b1) are for decompress; compress uses the Surface: seq range, not bN. Drilldown: pass scope:"compressed" for a per-block list, or scope:"uncompressed" with view:"messages" (every visible message) / view:"ranges" (merged ranges); tool filters to one tool name, sort reorders (size/time/tool; age for compressed), limit caps rows (default 30). Drilldown row refs are kernel ids (mN) \u2014 feed them straight to compress as startSeq/endSeq (auto-mapped to the live surface seq); bN is for decompress, Surface: seqs also work in compress.'
@@ -3893,6 +4659,12 @@ When you write a summary, it becomes the ONLY record of that range: keep file pa
 var DEFAULT_RESOLVED = DEFAULT_PROMPTS;
 
 // src/nudge.ts
+var GUIDANCE_BLOCKS = [COMPRESS_PHILOSOPHY, HOW_TO_COMPRESS_RULES, TIER2_DISTILL_RULES, TIER3_CONDENSE_RULES];
+function stripNudgeGuidance(text) {
+  let out = text;
+  for (const block of GUIDANCE_BLOCKS) out = out.split(block).join("");
+  return out.replace(/\n{3,}/g, "\n\n").trim();
+}
 function resolveTokenCount(agent, coreMessages) {
   const projections = agent.ctx?.get?.("sessionProjections");
   const projected = projections?.snapshot?.(agent.session)?.values?.contextPressure?.projectedTokens;
@@ -3902,8 +4674,11 @@ function resolveTokenCount(agent, coreMessages) {
   if (typeof surface === "number" && surface > 0) return surface;
   return coreMessages.reduce((sum, message) => sum + defaultCountTokens(message.text ?? ""), 0);
 }
-function rangeTable(session, prompts = DEFAULT_RESOLVED) {
-  const ranges = buildCompressibleSeqRanges(session).slice(0, 6);
+function kernelRangeViewOf(nudge, state) {
+  return { ranges: nudge.compressibleRanges ?? [], refs: state.messageRefs };
+}
+function rangeTable(session, kernelView, prompts = DEFAULT_RESOLVED) {
+  const ranges = buildCompressibleSeqRanges(session, kernelView).slice(0, 6);
   if (ranges.length === 0) return "";
   const lines = ranges.map(
     (range) => renderTemplate(prompts.rangeTable.line, {
@@ -3984,28 +4759,28 @@ function buildNudge(agent, env, lastNudgeTurn, emergencyNudges, onEmergencyCapHi
       emergencyNudges.set(session.id, { turn: turnNumber, count: 1 });
     }
   }
-  const text = buildNudgeText(nudge, emergency, session, env.prompts);
+  const text = buildNudgeText(nudge, emergency, session, kernelRangeViewOf(nudge, turn.state), env.prompts);
   const message = createUserMessage2({
     content: [{ type: "text", text }],
     source: { kind: "plugin", plugin: "acp-nudge" }
   });
   return { message, emergency };
 }
-function buildNudgeText(nudge, emergency, session, prompts = DEFAULT_RESOLVED) {
+function buildNudgeText(nudge, emergency, session, kernelView, prompts = DEFAULT_RESOLVED) {
   if (prompts.nudge !== DEFAULT_RESOLVED.nudge) {
-    return renderNudgeFromTemplates(nudge, emergency, session, prompts);
+    return renderNudgeFromTemplates(nudge, emergency, session, kernelView, prompts);
   }
   const rendered = renderNudgeText(nudge);
-  return adaptKernelNudgeToSeq(rendered.text, nudge, session, prompts);
+  return adaptKernelNudgeToSeq(rendered.text, nudge, session, kernelView, prompts);
 }
-function adaptKernelNudgeToSeq(text, nudge, session, prompts) {
-  let out = text;
+function adaptKernelNudgeToSeq(text, nudge, session, kernelView, prompts) {
+  let out = stripNudgeGuidance(text);
   if ((nudge.tier === 2 || nudge.tier === 3) && (nudge.tierTargetBlocks?.length ?? 0) > 0) {
     out = replaceTierTrigger(out, nudge, session, prompts);
   } else if (out.includes('"startId"')) {
     out = replaceEmergencyExample(out);
   }
-  const seqTable = rangeTable(session, prompts);
+  const seqTable = rangeTable(session, kernelView, prompts);
   if (seqTable !== "") out = replaceRangesStr(out, seqTable);
   return out;
 }
@@ -4050,7 +4825,7 @@ function replaceEmergencyExample(text) {
   const end = next !== null ? start + 2 + next.index : text.length;
   return text.slice(0, start) + "\n\ncompress({ content: [{ startSeq, endSeq, summary }] }) \u2014 use the seqs from the range table above." + text.slice(end);
 }
-function renderNudgeFromTemplates(nudge, emergency, session, prompts) {
+function renderNudgeFromTemplates(nudge, emergency, session, kernelView, prompts) {
   const pct2 = Math.round(Math.min(nudge.contextUsage, 1) * 100);
   const frame = renderTemplate(
     emergency ? prompts.nudge.emergency : prompts.nudge.normal,
@@ -4091,10 +4866,10 @@ function renderNudgeFromTemplates(nudge, emergency, session, prompts) {
     const tierRules = nudge.tier === 2 ? TIER2_DISTILL_RULES : TIER3_CONDENSE_RULES;
     parts.push("", tierRules);
   } else {
-    parts.push(rangeTable(session, prompts));
+    parts.push(rangeTable(session, kernelView, prompts));
   }
   if (prompts.nudge.tip !== "") parts.push("", prompts.nudge.tip);
-  return parts.join("\n");
+  return stripNudgeGuidance(parts.join("\n"));
 }
 
 // src/window.ts
@@ -4107,7 +4882,7 @@ function windowSourceLabel(window) {
   if (window.source === "auto") {
     return `auto-detected from ${window.provider ?? "?"}/${window.model ?? "?"}`;
   }
-  if (window.probeFailed === true) return "default (auto-detection failed \u2014 restart to re-probe)";
+  if (window.probeFailed === true) return "default (auto-detection failed \u2014 see /acp config)";
   return "default (auto-detection unavailable)";
 }
 function projectedContextWindow(agent) {
@@ -4220,7 +4995,20 @@ var compressParameters = {
           ]
         },
         summary: { type: "string", required: true, description: "Complete technical summary replacing the range; keep paths, decisions, values verbatim. Minimum 50 characters." },
-        topic: { type: "string", description: "Short label (3-5 words) for this range." }
+        topic: { type: "string", description: "Short label (3-5 words) for this range." },
+        // B3 (2026-09-08 governance plan): the handler and region.ts have
+        // accepted verifiedReadings since the plan landed, but the declared
+        // parameter schema did not list it — `additionalProperties: false`
+        // then rejected every live call that carried it
+        // (`invalid arguments: "content[0].verifiedReadings" is not a declared
+        // property`), so the structured-loss-stopping field was unreachable
+        // from the model's tool interface. Declared here; additionalProperties
+        // stays false so unknown fields are still rejected.
+        verifiedReadings: {
+          type: "array",
+          items: { type: "string" },
+          description: 'Optional: acceptance readings that are already green before this compression (e.g. "t0-fastpath 8/8", "closedloop 414/414"). Stored structurally on the compaction/summary event and recovered by verifiedReadingsOf, so later steps need not re-run the checks.'
+        }
       },
       additionalProperties: false
     }
@@ -4381,6 +5169,8 @@ async function handleCompress(env, args, exec) {
       endSeq,
       startRef,
       endRef,
+      // B3：把该段声明的已绿验收读数带上（缺位=不写键）
+      ...Array.isArray(range.verifiedReadings) && range.verifiedReadings.length > 0 ? { verifiedReadings: range.verifiedReadings.map(String) } : {},
       summary: range.summary,
       ...(range.topic ?? args.topic) === void 0 ? {} : { topic: range.topic ?? args.topic }
     });
@@ -4460,13 +5250,16 @@ async function handleCompress(env, args, exec) {
       // rehydrates the SAME effective messages (a tier-2 block's coverage is
       // its parents' originals, not the checkpoint node).
       directMessageIds: block.directMessageIds,
-      effectiveMessageIds: block.effectiveMessageIds
+      effectiveMessageIds: block.effectiveMessageIds,
+      // B3：已绿验收读数随压缩块落盘（缺位=不写键）
+      ...range.verifiedReadings === void 0 ? {} : { verifiedReadings: range.verifiedReadings }
     });
     const adjusted = start !== range.startSeq || end !== range.endSeq;
     const tierLabel2 = `, tier ${tier}`;
+    const readingsLabel = range.verifiedReadings !== void 0 && range.verifiedReadings.length > 0 ? `, verified: ${range.verifiedReadings.join("; ")}` : "";
     const note = range.recovered === true ? ` (seqs ${range.startSeq}..${range.endSeq} were already shadowed \u2014 compressed the live remainder ${start}..${end})` : adjusted ? ` (adjusted from ${range.startSeq}..${range.endSeq} to balanced edges)` : "";
     lines.push(
-      `  block ${compactionId.slice(0, 8)}: seqs ${start}..${end}, ${shadowed.length} messages shadowed${tierLabel2}${note}`
+      `  block ${compactionId.slice(0, 8)}: seqs ${start}..${end}, ${shadowed.length} messages shadowed${tierLabel2}${readingsLabel}${note}`
     );
   }
   const summaryLine = `Compressed ${applied.result.blocksCreated} block(s), ~${applied.result.tokensCompressed} tokens reclaimed.`;
@@ -4721,6 +5514,111 @@ function makeTools(env) {
 }
 
 // src/commands.ts
+import { SettingsConflictError } from "@deepseek-ai/dsh-settings";
+
+// src/settings.ts
+import z from "@deepseek-ai/schemastery";
+var ACP_SETTINGS_NAMESPACE = "compaction-acp";
+var SETTINGS_KEYS = [
+  "modelContextLimit",
+  "autoModelContextLimit",
+  "nudgeMinContextLimitPct",
+  "nudgeMaxContextLimitPct",
+  "nudgeEmergencyThresholdPct",
+  "autoNudge"
+];
+var SETTING_DEFAULTS = {
+  autoModelContextLimit: true,
+  nudgeMaxContextLimitPct: 0.7,
+  nudgeEmergencyThresholdPct: 0.85,
+  autoNudge: true
+};
+function filterSettingsEntry(entry) {
+  return {
+    ...entry.modelContextLimit !== void 0 ? { modelContextLimit: entry.modelContextLimit } : {},
+    ...entry.autoModelContextLimit !== void 0 ? { autoModelContextLimit: entry.autoModelContextLimit } : {},
+    ...entry.nudgeMinContextLimitPct !== void 0 ? { nudgeMinContextLimitPct: entry.nudgeMinContextLimitPct } : {},
+    ...entry.nudgeMaxContextLimitPct !== void 0 ? { nudgeMaxContextLimitPct: entry.nudgeMaxContextLimitPct } : {},
+    ...entry.nudgeEmergencyThresholdPct !== void 0 ? { nudgeEmergencyThresholdPct: entry.nudgeEmergencyThresholdPct } : {},
+    ...entry.autoNudge !== void 0 ? { autoNudge: entry.autoNudge } : {}
+  };
+}
+function resolveAcpSettings(input) {
+  return {
+    modelContextLimit: input.modelContextLimit,
+    autoModelContextLimit: input.autoModelContextLimit ?? SETTING_DEFAULTS.autoModelContextLimit,
+    nudgeMinContextLimitPct: input.nudgeMinContextLimitPct,
+    nudgeMaxContextLimitPct: input.nudgeMaxContextLimitPct ?? SETTING_DEFAULTS.nudgeMaxContextLimitPct,
+    nudgeEmergencyThresholdPct: input.nudgeEmergencyThresholdPct ?? SETTING_DEFAULTS.nudgeEmergencyThresholdPct,
+    autoNudge: input.autoNudge ?? SETTING_DEFAULTS.autoNudge
+  };
+}
+var AcpSettingsSchema = z.object({
+  modelContextLimit: z.number().step(1).min(1),
+  autoModelContextLimit: z.boolean().default(SETTING_DEFAULTS.autoModelContextLimit),
+  nudgeMinContextLimitPct: z.number().min(0).max(1),
+  nudgeMaxContextLimitPct: z.number().min(0).max(1).default(SETTING_DEFAULTS.nudgeMaxContextLimitPct),
+  nudgeEmergencyThresholdPct: z.number().min(0).max(1).default(SETTING_DEFAULTS.nudgeEmergencyThresholdPct),
+  autoNudge: z.boolean().default(SETTING_DEFAULTS.autoNudge)
+});
+function describeSettingsChange(prev, next) {
+  const warnings = [];
+  if (next.nudgeMinContextLimitPct !== void 0 && next.nudgeMinContextLimitPct >= next.nudgeMaxContextLimitPct) {
+    warnings.push(
+      `nudgeMinContextLimitPct (${next.nudgeMinContextLimitPct}) >= nudgeMaxContextLimitPct (${next.nudgeMaxContextLimitPct}) \u2014 the lower bound never engages`
+    );
+  }
+  if (next.nudgeMaxContextLimitPct >= next.nudgeEmergencyThresholdPct) {
+    warnings.push(
+      `nudgeMaxContextLimitPct (${next.nudgeMaxContextLimitPct}) >= nudgeEmergencyThresholdPct (${next.nudgeEmergencyThresholdPct}) \u2014 the emergency tier loses its headroom`
+    );
+  }
+  return {
+    clearWindowCache: prev.modelContextLimit !== next.modelContextLimit || prev.autoModelContextLimit !== next.autoModelContextLimit,
+    clearNudgeDedup: prev.autoNudge === false && next.autoNudge === true,
+    warnings
+  };
+}
+function parseSettingValue(raw) {
+  const text = raw.trim();
+  if (text === "true") return { ok: true, value: true };
+  if (text === "false") return { ok: true, value: false };
+  const num = Number(text);
+  if (text !== "" && Number.isFinite(num)) return { ok: true, value: num };
+  if (text === "null") return { ok: true, value: null };
+  return {
+    ok: false,
+    reason: `"${text}" is not a valid value \u2014 use a number (0.65), true/false, or null to reset the key`
+  };
+}
+function requireService(getService) {
+  const service = getService();
+  if (service === void 0) {
+    throw new Error("runtime settings are not available in this process");
+  }
+  return service;
+}
+function makeSettingsCommandSurface(getService, getSnapshot) {
+  return {
+    get available() {
+      return getService() !== void 0;
+    },
+    snapshot: getSnapshot,
+    describe() {
+      const service = getService();
+      if (service === void 0) return void 0;
+      return service.describe().find((descriptor) => String(descriptor.ns) === ACP_SETTINGS_NAMESPACE);
+    },
+    async update(patch) {
+      await requireService(getService).update(ACP_SETTINGS_NAMESPACE, patch);
+    },
+    async replaceSection(section) {
+      await requireService(getService).replace(ACP_SETTINGS_NAMESPACE, section);
+    }
+  };
+}
+
+// src/commands.ts
 async function statusText(env, agent) {
   const session = agent.session;
   const ledger = rebuildBlockLedger(sessionEventsOf(session));
@@ -4739,7 +5637,7 @@ async function statusText(env, agent) {
     windowLine
   ];
   if (window.probeFailed === true) {
-    lines.push(`  \u26A0 window auto-detection failed \u2014 using the ${limit} fallback (restart to re-probe, or set modelContextLimit explicitly)`);
+    lines.push(`  \u26A0 window auto-detection failed \u2014 using the ${limit} fallback (change modelContextLimit or autoModelContextLimit via /acp config \u2014 or restart \u2014 to re-probe)`);
   }
   const state = structuredClone(env.store.stateFor(session));
   const config = kernelConfigFor({ ...env, modelContextLimit: limit });
@@ -4831,11 +5729,14 @@ function decompressText(_env, agent, args) {
 function acpCommand(env) {
   return {
     name: "acp",
-    description: "Active Context Pruning \u2014 model-driven context compression. Usage: /acp status | /acp compress <startSeq> <endSeq> <summary> | /acp decompress <blockId> [offset] [limit]",
+    description: "Active Context Pruning \u2014 model-driven context compression. Usage: /acp status | /acp compress <startSeq> <endSeq> <summary> | /acp decompress <blockId> [offset] [limit] | /acp config [list|set <key> <value>|reset <key>|all]",
     handler: async (invocation) => {
       const raw = invocation.rawInput.trim();
       if (raw === "" || raw === "status") {
         return { kind: "success", text: await statusText(env, invocation.agent) };
+      }
+      if (raw === "config" || raw.startsWith("config ")) {
+        return { kind: "success", text: await configText(env, raw.slice("config".length).trim()) };
       }
       if (raw.startsWith("compress")) {
         return { kind: "success", text: compressText(env, invocation.agent, raw.slice("compress".length).trim().split(/\s+/)) };
@@ -4843,9 +5744,115 @@ function acpCommand(env) {
       if (raw.startsWith("decompress")) {
         return { kind: "success", text: decompressText(env, invocation.agent, raw.slice("decompress".length).trim().split(/\s+/)) };
       }
-      return { kind: "error", text: `unknown /acp subcommand "${raw.split(/\s+/)[0]}" \u2014 use status | compress | decompress` };
+      return { kind: "error", text: `unknown /acp subcommand "${raw.split(/\s+/)[0]}" \u2014 use status | compress | decompress | config` };
     }
   };
+}
+function isRecord(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+function isSettingsKey(key) {
+  return SETTINGS_KEYS.includes(key);
+}
+function settingsWriteFailure(error) {
+  if (error instanceof SettingsConflictError) {
+    return "conflict: another writer changed this setting at the same time \u2014 run /acp config again";
+  }
+  return `rejected: ${String(error)}`;
+}
+function formatSettingsValue(key, value) {
+  if (value === void 0) {
+    if (key === "modelContextLimit") return "auto";
+    if (key === "nudgeMinContextLimitPct") return "0.45 (kernel)";
+    return "\u2014";
+  }
+  return String(value);
+}
+function configListText(surface) {
+  if (surface === void 0) return "runtime settings are not wired in this engine build";
+  const snapshot = surface.snapshot();
+  const descriptor = surface.describe();
+  const lines = [
+    'ACP runtime settings \u2014 namespace "compaction-acp"',
+    "  key                         value        source"
+  ];
+  for (const key of SETTINGS_KEYS) {
+    const userSection = isRecord(descriptor?.user) ? descriptor.user : {};
+    const baseSection = isRecord(descriptor?.base) ? descriptor.base : {};
+    const source = key in userSection ? "user" : key in baseSection ? "base" : "default";
+    lines.push(`  ${key.padEnd(27)} ${formatSettingsValue(key, snapshot[key]).padEnd(12)} ${source}`);
+  }
+  lines.push("", "  changes apply to running sessions immediately (no restart)");
+  lines.push("  coreOverrides (composition layer) merge LAST and beat these values on same-name keys");
+  lines.push("  /acp config reset <key> returns the key to the composition row / engine default");
+  return lines.join("\n");
+}
+async function configSetText(surface, key, rawValue) {
+  if (!isSettingsKey(key)) {
+    return `unknown key "${key}" \u2014 keys: ${SETTINGS_KEYS.join(", ")}`;
+  }
+  if (surface === void 0) return "runtime settings are not wired in this engine build";
+  if (!surface.available) {
+    return "no settings provider in this process \u2014 edit the compaction-acp row in cordis.patch.yml instead (a restart applies it)";
+  }
+  const parsed = parseSettingValue(rawValue);
+  if (!parsed.ok) return parsed.reason;
+  if (parsed.value === null) {
+    return configResetText(surface, key);
+  }
+  if ((key === "autoNudge" || key === "autoModelContextLimit") && typeof parsed.value !== "boolean") {
+    return `${key} takes true or false (got "${String(parsed.value)}")`;
+  }
+  const patch = key === "autoNudge" || key === "autoModelContextLimit" ? { [key]: parsed.value } : { [key]: parsed.value };
+  try {
+    await surface.update(patch);
+  } catch (error) {
+    return settingsWriteFailure(error);
+  }
+  const windowNote = key === "modelContextLimit" || key === "autoModelContextLimit" ? "\n  window cache cleared \u2014 the next step re-resolves the context window" : "";
+  return `\u2713 ${key} = ${String(parsed.value)} \u2014 applied to running sessions${windowNote}`;
+}
+async function configResetText(surface, target) {
+  if (surface === void 0) return "runtime settings are not wired in this engine build";
+  if (!surface.available) {
+    return "no settings provider in this process \u2014 edit the compaction-acp row in cordis.patch.yml instead (a restart applies it)";
+  }
+  if (target === "all") {
+    try {
+      await surface.replaceSection({});
+    } catch (error) {
+      return settingsWriteFailure(error);
+    }
+    return "\u2713 all runtime settings reset \u2014 values now come from the composition row / engine defaults";
+  }
+  if (!isSettingsKey(target)) {
+    return `unknown key "${target}" \u2014 keys: ${SETTINGS_KEYS.join(", ")}`;
+  }
+  const descriptor = surface.describe();
+  const userSection = isRecord(descriptor?.user) ? { ...descriptor.user } : {};
+  delete userSection[target];
+  try {
+    await surface.replaceSection(userSection);
+  } catch (error) {
+    return settingsWriteFailure(error);
+  }
+  const baseSection = isRecord(descriptor?.base) ? descriptor.base : {};
+  const baseValue = baseSection[target];
+  return `\u2713 ${target} reset \u2014 it now reads ${baseValue === void 0 ? "the engine default" : `the composition value ${String(baseValue)}`}`;
+}
+async function configText(env, rest) {
+  const surface = env.settingsCommand;
+  const args = rest.split(/\s+/).filter((part) => part.length > 0);
+  const verb = args[0] ?? "list";
+  if (verb === "list") return configListText(surface);
+  if (verb === "set") {
+    if (args.length < 3) return "usage: /acp config set <key> <value> (e.g. /acp config set nudgeMaxContextLimitPct 0.72)";
+    return configSetText(surface, args[1], args.slice(2).join(" "));
+  }
+  if (verb === "reset") {
+    return configResetText(surface, args[1] ?? "all");
+  }
+  return `unknown /acp config verb "${verb}" \u2014 use list | set <key> <value> | reset <key>|all`;
 }
 
 // src/system-prompt.ts
@@ -4895,28 +5902,80 @@ var AcpCompactionEngine = class extends CompactionEngine {
   compressCallIdsToHide = /* @__PURE__ */ new Set();
   /** Per provider/model route the resolved window (probe failures cached too). */
   windowCache = /* @__PURE__ */ new Map();
+  /** Live settings snapshot thunk (composition → user settings layer); swapped when the settings provider attaches (SettingsProvider.installSection). */
+  readSettingsSource = () => resolveAcpSettings({});
+  /** The settings service, captured lazily for /acp config (undefined in provider-less processes). */
+  settingsService;
+  /** /acp config read/write surface. */
+  settingsCommand;
   /** Per route the adapter's per-request output cap (the output reservation); null = undisclosed. */
   outputReservationCache = /* @__PURE__ */ new Map();
   constructor(ctx, config = {}) {
     super(ctx);
     this.config = resolveAcpConfig(config);
-    this.prompts = resolvePrompts(config.prompts);
+    this.prompts = resolvePrompts2(config.prompts);
     const ports = this.config.countTokens !== void 0 ? { countTokens: this.config.countTokens } : {};
     this.kernel = createCore(ports);
     setDocCacheCap(128 * 1024 * 1024);
     this.store = new AcpStateStore();
+    const compositionEntry = filterSettingsEntry(config);
+    let current = resolveAcpSettings(compositionEntry);
+    this.readSettingsSource = () => current;
+    const engine = this;
+    const applySettings = () => {
+      const next = this.readSettingsSource();
+      const prev = current;
+      current = next;
+      try {
+        engine.onSettingsChanged(prev, next);
+      } catch (error) {
+        this.ctx.logger.warn(`billion-context-dsh: applying settings change failed: ${String(error)}`);
+      }
+    };
+    this.settingsCommand = makeSettingsCommandSurface(() => this.settingsService, () => current);
+    if (this.config.settingsEnabled !== false) {
+      ctx.inject(["settings"], (settingsCtx) => {
+        settingsCtx.settings.installSection(ctx, ACP_SETTINGS_NAMESPACE, AcpSettingsSchema, compositionEntry, {
+          // The seam's source type follows the entry it registered, so `source`
+          // is a partial view of the settings; re-resolve it into a
+          // fully-defaulted snapshot so every reader sees the same shape the
+          // composition path produced.
+          setSource: (source) => {
+            this.readSettingsSource = () => resolveAcpSettings(source());
+          },
+          onChange: applySettings
+        });
+        this.settingsService = settingsCtx.settings;
+        return () => {
+          this.settingsService = void 0;
+          this.readSettingsSource = () => current;
+        };
+      });
+    }
     const env = {
       kernel: this.kernel,
       store: this.store,
-      // Initial value before any probe; windowFor() replaces it per pre-step.
-      modelContextLimit: this.config.modelContextLimit ?? DEFAULT_CONTEXT_WINDOW,
-      nudgeMinContextLimitPct: this.config.nudgeMinContextLimitPct,
-      nudgeMaxContextLimitPct: this.config.nudgeMaxContextLimitPct,
-      nudgeEmergencyThresholdPct: this.config.nudgeEmergencyThresholdPct,
+      // The settings-exposed knobs read LIVE from the settings source, so a
+      // settings.yaml edit (or /acp config set) hot-applies to every
+      // subsequent call — consumers never see stale numbers. (ToolEnvironment
+      // fields are readonly properties; getters satisfy them.)
+      get modelContextLimit() {
+        return engine.readSettingsSource().modelContextLimit ?? DEFAULT_CONTEXT_WINDOW;
+      },
+      get nudgeMinContextLimitPct() {
+        return engine.readSettingsSource().nudgeMinContextLimitPct;
+      },
+      get nudgeMaxContextLimitPct() {
+        return engine.readSettingsSource().nudgeMaxContextLimitPct;
+      },
+      get nudgeEmergencyThresholdPct() {
+        return engine.readSettingsSource().nudgeEmergencyThresholdPct;
+      },
       coreOverrides: this.config.coreOverrides,
       windowFor: (agent) => this.windowFor(agent),
       prompts: this.prompts,
-      compressCallIdsToHide: this.compressCallIdsToHide
+      compressCallIdsToHide: this.compressCallIdsToHide,
+      settingsCommand: this.settingsCommand
     };
     this.env = env;
     const tools = ctx.get("tools");
@@ -4964,7 +6023,7 @@ var AcpCompactionEngine = class extends CompactionEngine {
     });
     ctx.on("agent/pre-step", async (payload, next) => {
       stripOrphanedSurfaceToolMessages(payload.agent.session);
-      if (!this.config.autoNudge) return next();
+      if (!engine.readSettingsSource().autoNudge) return next();
       const decision = await next();
       if (decision.kind === "reject") return decision;
       const window = await this.windowFor(payload.agent);
@@ -5027,12 +6086,13 @@ var AcpCompactionEngine = class extends CompactionEngine {
    * fallback.
    */
   async windowFor(agent) {
-    if (this.config.modelContextLimit !== void 0) {
-      return { limit: this.config.modelContextLimit, source: "explicit" };
+    const live = this.readSettingsSource();
+    if (live.modelContextLimit !== void 0) {
+      return { limit: live.modelContextLimit, source: "explicit" };
     }
     const { provider, model } = routeFor(agent);
     const key = `${provider}\0${model}`;
-    if (this.config.autoModelContextLimit) {
+    if (live.autoModelContextLimit) {
       const projected = projectedContextWindow(agent);
       if (projected !== null) {
         const cap2 = await this.outputCapFor(agent, provider, model);
@@ -5043,14 +6103,14 @@ var AcpCompactionEngine = class extends CompactionEngine {
     if (cached !== void 0) return cached;
     let window;
     let cap = null;
-    if (!this.config.autoModelContextLimit) {
+    if (!live.autoModelContextLimit) {
       window = { limit: DEFAULT_CONTEXT_WINDOW, source: "default", provider, model };
     } else {
       const probe = await probeModelWindow(agent, provider, model);
       cap = probe.outputReservation;
       if (probe.contextWindow === null) {
         this.ctx.logger.warn(
-          `billion-context-dsh: context-window auto-detection failed for ${provider}/${model} \u2014 using the ${DEFAULT_CONTEXT_WINDOW} fallback (restart to re-probe, or set modelContextLimit explicitly)`
+          `billion-context-dsh: context-window auto-detection failed for ${provider}/${model} \u2014 using the ${DEFAULT_CONTEXT_WINDOW} fallback (change modelContextLimit or autoModelContextLimit via /acp config \u2014 or restart \u2014 to re-probe)`
         );
         window = { limit: DEFAULT_CONTEXT_WINDOW, source: "default", provider, model, probeFailed: true };
         cap = null;
@@ -5061,6 +6121,23 @@ var AcpCompactionEngine = class extends CompactionEngine {
     window = this.applyReservation(window, cap);
     this.windowCache.set(key, window);
     return window;
+  }
+  /**
+   * Diff handler for runtime settings changes: drop the window cache when a
+   * window-related key changed (probe FAILURES are cached too — clearing is
+   * what lets the next pre-step re-probe after a fix), clear the per-turn
+   * nudge dedup when nudges come back on, and warn on order anomalies
+   * (accepted, never rejected — rejecting a write cannot fix an externally
+   * edited settings.yaml, and an invalid stored section would fail the next
+   * boot loud anyway).
+   */
+  onSettingsChanged(prev, next) {
+    const effect = describeSettingsChange(prev, next);
+    for (const warning of effect.warnings) {
+      this.ctx.logger.warn(`billion-context-dsh: ${warning}`);
+    }
+    if (effect.clearWindowCache) this.windowCache.clear();
+    if (effect.clearNudgeDedup) this.lastNudgeTurn.clear();
   }
   /**
    * The adapter's per-request output cap for a route, from one
@@ -5112,15 +6189,19 @@ var AcpCompactionEngine = class extends CompactionEngine {
 };
 var index_default = AcpCompactionEngine;
 export {
+  ACP_SETTINGS_NAMESPACE,
   ACP_SYSTEM_PROMPT,
   ACP_SYSTEM_PROMPT_ORDER,
   AcpCompactionEngine,
+  AcpSettingsSchema,
   AcpStateStore,
   AlreadyCompressedRangeError,
   DEFAULT_CONTEXT_WINDOW,
   DEFAULT_PROMPTS,
   DEFAULT_RESOLVED,
   EMERGENCY_NUDGE_MAX_PER_TURN,
+  SETTINGS_KEYS,
+  SETTING_DEFAULTS,
   acpCommand,
   assertNoActiveCompaction,
   blockRefForSummarySeq,
@@ -5128,21 +6209,26 @@ export {
   buildNudge,
   compactionIdsOfKernelBlocks,
   index_default as default,
+  describeSettingsChange,
   detectContextWindow,
   eventsToCoreMessages,
   expandShadowedSeqs,
   extractEventText,
+  filterSettingsEntry,
   findOpenTurn,
   hideCompressToolPair,
   kernelConfigFor,
+  makeSettingsCommandSurface,
   makeTools,
+  parseSettingValue,
   projectEvent,
   projectedContextWindow,
   rebuildBlockLedger,
   renderSystemPrompt,
   renderTemplate,
   resolveAcpConfig,
-  resolvePrompts,
+  resolveAcpSettings,
+  resolvePrompts2 as resolvePrompts,
   resolveSurfaceRange,
   resolveTokenCount,
   runCompactionTransaction,

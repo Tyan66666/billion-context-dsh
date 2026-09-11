@@ -11,7 +11,7 @@ mkdir -p ~/.dsh/profiles/web/node_modules
 ln -s /Users/yintianan/GitHub/billion-context-dsh ~/.dsh/profiles/web/node_modules/billion-context-dsh
 ```
 
-依赖说明：`dist/index.js` 内联了 acp-kernel，运行时把四个 seam 包 `@deepseek-ai/dsh-compaction`、`@deepseek-ai/dsh-session`、`@deepseek-ai/dsh-llm`、`@deepseek-ai/dsh-tools` 作为**外部依赖**（由 `devDependencies` 提供并同时声明为 `peerDependencies`，`billion-context-dsh/node_modules` 已在解析链上）；`@deepseek-ai/cordis` 同为 peer。这四个 seam 包共享同一个 **peer 范围** `>=0.1.5-alpha.1 <0.1.6-0`——恰好是整条 `0.1.5` 线（所有预发布加最终 `0.1.5`）。从 `0.1.5` 线起，会话 replace 操作的协议字段由 `{ op, start, end }` 改名为 `{ op, startSeq, endSeq }` 且校验严格（只接受这三个字段）；本引擎只输出新形态，在更旧的 DSH（< 0.1.5）上每次 compress 都会被宿主在运行时拒绝（issue #136），因此旧版本不在兼容范围内——请先升级 DSH 再安装。显式区间（而非 caret）是有意为之：caret 会悄悄放进未经验证的 0.1.6+ 线。四个包一并声明为 peer（而非只声明 `dsh-compaction`），是为了让安装在 pnpm 的集成/封存布局下仍能把它们解析到**宿主自己的副本**，而不是某个与宿主不一致的陈旧嵌套副本。
+依赖说明：`dist/index.js` 内联了 acp-kernel，运行时把五个 seam 包 `@deepseek-ai/dsh-compaction`、`@deepseek-ai/dsh-session`、`@deepseek-ai/dsh-llm`、`@deepseek-ai/dsh-tools`、`@deepseek-ai/dsh-settings` 作为**外部依赖**（由 `devDependencies` 提供并同时声明为 `peerDependencies`，`billion-context-dsh/node_modules` 已在解析链上）；`@deepseek-ai/cordis` 与 `@deepseek-ai/schemastery` 同为 peer。这五个 seam 包共享同一个 **peer 范围** `>=0.1.5-alpha.1 <0.1.6-0`——恰好是整条 `0.1.5` 线（所有预发布加最终 `0.1.5`）。从 `0.1.5` 线起，会话 replace 操作的协议字段由 `{ op, start, end }` 改名为 `{ op, startSeq, endSeq }` 且校验严格（只接受这三个字段）；本引擎只输出新形态，在更旧的 DSH（< 0.1.5）上每次 compress 都会被宿主在运行时拒绝（issue #136），因此旧版本不在兼容范围内——请先升级 DSH 再安装。显式区间（而非 caret）是有意为之：caret 会悄悄放进未经验证的 0.1.6+ 线。五个包一并声明为 peer（而非只声明 `dsh-compaction`），是为了让安装在 pnpm 的集成/封存布局下仍能把它们解析到**宿主自己的副本**，而不是某个与宿主不一致的陈旧嵌套副本。
 
 ### 方式 B：打包安装（发布前验证）
 
@@ -44,6 +44,10 @@ dsh plugin --profile web add billion-context-dsh
 窗口自动探测默认全开，**无需手写任何组合行**。需要自定义 `config`（`modelContextLimit`
 / `prompts` / nudge 阈值）时，在 profile 的 `cordis.patch.yml` 里写一个**同 id**
 （`compaction-acp`）的行并附 `config:` 即可覆盖 bundle 默认行（见 §2 的例子）。
+六个标量键（`modelContextLimit` / `autoModelContextLimit` / nudge 三阈值 / `autoNudge`）
+还可以**运行时热调**：编辑 `~/.dsh/settings.yaml` 的 `compaction-acp` 段或用 `/acp config`
+子命令，改动立即生效、无需重启（`settingsEnabled: false` 可整体关闭该集成——见 README
+「运行时设置」）。
 
 ### 方式 D：git 源安装（`github:` 规格，商店条目展示的形态）
 
