@@ -3,11 +3,15 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import semver from 'semver'
 
-// The peer contract spans FOUR seam packages the plugin VALUE-imports at
+// The peer contract spans FIVE seam packages the plugin VALUE-imports at
 // runtime (not type-only, so they must resolve to the host's copy, not a
-// stale nested copy): dsh-compaction, dsh-session, dsh-llm, dsh-tools. All
-// four publish the SAME version line (in lockstep because DSH releases them
-// together), so one shared range guards them all.
+// stale nested copy): dsh-compaction, dsh-session, dsh-llm, dsh-tools and
+// dsh-settings. The first four publish the SAME version line (in lockstep
+// because DSH releases them together) and so share one range. dsh-settings
+// historically moved on its own cadence, but the plugin now enters the
+// settings seam through `SettingsProvider.installSection` — a method that
+// only exists on the 0.1.5 line — so it shares the 0.1.5 floor too, and the
+// two-clause rule (plus its dedicated test block) is gone.
 //
 // ISSUE #136 — the range now floors at the 0.1.5 line. The replace surfaceOp
 // protocol is DRAFTED per session version by a strict validator that accepts
@@ -42,7 +46,17 @@ const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url),
 // in). cordis is also a peer but ships on a 4.x line and is NOT part of this
 // seam version band, so it is excluded — these four move in lockstep with the
 // DSH host.
-const seamPeers = ['@deepseek-ai/dsh-compaction', '@deepseek-ai/dsh-session', '@deepseek-ai/dsh-llm', '@deepseek-ai/dsh-tools']
+// dsh-settings joined this list with the 0.1.5 seam: the plugin calls
+// `settingsProvider.installSection(...)`, which the older standalone
+// `installSettingsSection(ctx, ns, schema, entry, hooks)` helper does not
+// provide, so a host on the old line cannot work.
+const seamPeers = [
+	'@deepseek-ai/dsh-compaction',
+	'@deepseek-ai/dsh-session',
+	'@deepseek-ai/dsh-llm',
+	'@deepseek-ai/dsh-tools',
+	'@deepseek-ai/dsh-settings',
+]
 
 for (const peerName of seamPeers) {
 	const peerRange = pkg.peerDependencies[peerName]
@@ -82,6 +96,7 @@ for (const peerName of seamPeers) {
 		}
 	})
 }
+
 
 test('every runtime VALUE-imported seam package is declared as a peer', () => {
 	// dist/index.js must never carry a VALUE import of a @deepseek-ai seam
