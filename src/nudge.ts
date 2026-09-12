@@ -122,9 +122,12 @@ function kernelRangeViewOf(nudge: NudgeDecision, state: CompressionState): Kerne
 function mediaSuffixOf(range: SeqCompressibleRange): string {
   if (range.images === 0 && range.files === 0) return ''
   const parts: string[] = []
-  if (range.images > 0) parts.push(`${range.images} image${range.images === 1 ? '' : 's'}`)
-  if (range.files > 0) parts.push(`${range.files} file${range.files === 1 ? '' : 's'}`)
-  return ` [+${parts.join(', ')}]`
+  if (range.images > 0) parts.push(`+${range.images} image${range.images === 1 ? '' : 's'}`)
+  if (range.files > 0) parts.push(`+${range.files} file${range.files === 1 ? '' : 's'}`)
+  // ` | ` is the separator the same row already uses for the tool/text share
+  // column (`[tool X% | text Y%]`) and the one AGENTS.md rule 19 documents; a
+  // comma inside the bracket reads as prose.
+  return ` [${parts.join(' | ')}]`
 }
 
 /**

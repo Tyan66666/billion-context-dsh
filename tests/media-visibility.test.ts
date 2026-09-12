@@ -96,13 +96,14 @@ function appendImageUser(session: Session): void {
  * of this test silently produced zero ranges). Everything here is text except
  * the tool-result pair at the middle, which carries one image.
  */
-function buildMediaSession(id: string): Session {
+function buildMediaSession(id: string, result: 'image' | 'mixed' = 'image'): Session {
   const session = Session.create(id)
   appendTurn(session, 1)
   for (let index = 0; index < 14; index += 1) {
     if (index === 4) {
       appendToolCall(session, longText('call', index), 'c1', 1, index)
-      appendImageToolResult(session, 'c1')
+      if (result === 'mixed') appendMixedToolResult(session, 'c1')
+      else appendImageToolResult(session, 'c1')
       continue
     }
     if (index % 2 === 0) appendUser(session, longText('q', index))
@@ -120,6 +121,20 @@ function appendImageToolResult(session: Session, callId: string): void {
       id: `res-${callId}`,
       role: 'user',
       content: [{ type: 'tool-result', toolCallId: callId, content: [IMAGE_BLOCK] }],
+      source: { kind: 'tool', callId },
+    },
+  }, { surfaceOp: 'append' })
+}
+
+/** A tool result carrying BOTH an image and a file — the mixed range row. */
+function appendMixedToolResult(session: Session, callId: string): void {
+  session.append('tool/result', {
+    turn: 1,
+    step: 2,
+    message: {
+      id: `res-${callId}`,
+      role: 'user',
+      content: [{ type: 'tool-result', toolCallId: callId, content: [IMAGE_BLOCK, FILE_BLOCK] }],
       source: { kind: 'tool', callId },
     },
   }, { surfaceOp: 'append' })
@@ -403,4 +418,22 @@ test('#117: search still finds a screenshot after its span was compressed', asyn
     'the screenshot message stays searchable (before the fix its text was empty, so it was skipped entirely)',
   )
   assert.match(mediaDoc.text, /\[image image\/png shot\.png 800x600 4\.2KB\]/, 'the indexed text is the placeholder')
+})
+
+test('#117: a mixed span row names both counts with the documented separator', () => {
+  const session = buildMediaSession('media-mixed', 'mixed')
+  const view = wholeSurfaceRangeView(session)
+
+  const mixed = buildCompressibleSeqRanges(session, view).find((range) => range.images > 0 && range.files > 0)
+  assert.ok(mixed, 'the span carrying a screenshot AND a file is offered to the model')
+  assert.equal(mixed.images, 1, 'one image on the row')
+  assert.equal(mixed.files, 1, 'one file on the row')
+
+  // `rangeTable` is the text the model actually reads, so the separator is
+  // asserted there, not on the row struct. Before this fix the row rendered
+  // `[+1 image, 1 file]` while AGENTS.md rule 19 and the design doc documented
+  // `[+N images | +M files]`.
+  const table = rangeTable(session, view, DEFAULT_RESOLVED, () => 1500)
+  assert.match(table, /\[\+1 image \| \+1 file\]/, 'the mixed row uses the documented ` | ` separator')
+  assert.doesNotMatch(table, /\+1 image,/, 'the comma form is gone')
 })
