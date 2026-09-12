@@ -22,7 +22,7 @@
 
 ## 2. 关键依赖事实（已验证）
 
-- **#75 Phase 1 尚未合入 main。** main = `bb9f2f6`（release v0.2.21），无 `src/settings.ts`；分支 `feat/runtime-settings-75` 有该文件但未合并，且基于 v0.2.20 之前。PR 合并仅人工，无法拉进一个以 main 为基的 PR。
+- **#75 Phase 1 已合入 main（随 v0.2.22 发布）。** 本段记录的是合入前的状态：当时 main = `bb9f2f6`（release v0.2.21），无 `src/settings.ts`；分支 `feat/runtime-settings-75` 有该文件但未合并，且基于 v0.2.20 之前。PR 合并仅人工，无法拉进一个以 main 为基的 PR。
 - **因此预设先落在组合配置层**：引擎构造时读 `config.preset`，随 bundle 安装或 `cordis.patch.yml` 的 `config:` 生效，今天就能用。等 #75 把六个标量键接进 settings 命名空间后，再把 `preset` 别名暴露到同一通道是个小跟进（不与 #75 冲突——#75 加的是六个标量键，不是预设别名，两者正交）。
 - **拼错 preset 会让 profile 起不来**：bundle 行本身刻意不带 `config`（AGENTS.md 硬性规则 8），所以 `preset` 只能来自用户自己写的同 id `compaction-acp` 行；该行构造抛错即挂载失败，profile 会在配置修好前一直无法启动。这是 fail-fast 的既定行为（与自定义提示词模板同一类），值得在 README 里说明，避免用户把它当成崩溃。
 
