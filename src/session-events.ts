@@ -35,9 +35,14 @@ export function sessionEventsOf(session: Session): readonly SessionEvent[] {
   return (session as SessionWithEvents).events
 }
 
-/** The event at one exact seq, or undefined when the log has no such seq. */
+/**
+ * The event at one exact seq, or undefined when the log has no such seq.
+ * Falls back through `sessionEventsOf` (snapshotEvents → events) so a
+ * snapshot-only handle stays readable; yields undefined, never throws,
+ * when a handle exposes neither read method.
+ */
 export function eventAtOf(session: Session, seq: number): SessionEvent | undefined {
   const eventAt = (session as SessionWithSnapshot).eventAt
   if (typeof eventAt === 'function') return eventAt.call(session, seq)
-  return (session as SessionWithEvents).events[seq]
+  return sessionEventsOf(session)?.[seq]
 }
