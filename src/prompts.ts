@@ -90,7 +90,7 @@ const NUDGE_ALLOWED: { [K in keyof NudgePrompts]: ReadonlySet<string> } = {
 const RANGE_TABLE_ALLOWED: { [K in keyof RangeTablePrompts]: ReadonlySet<string> } = {
   header: new Set(['surface']),
   title: new Set(['count']),
-  line: new Set(['start', 'end', 'count', 'tokens']),
+  line: new Set(['start', 'end', 'count', 'tokens', 'toolPct', 'textPct', 'media']),
   footer: new Set(),
 }
 const TOOLS_ALLOWED: { [K in keyof ToolPrompts]: ReadonlySet<string> } = {
@@ -203,7 +203,7 @@ export const DEFAULT_PROMPTS: ResolvedPrompts = {
   rangeTable: {
     header: 'Surface: {surface}',
     title: 'Compressible ranges ({count}, oldest first; exact surface seqs — usable as-is):',
-    line: '  - seq {start}..{end} — {count} messages, ~{tokens} tokens [tool {toolPct}% | text {textPct}%]',
+    line: '  - seq {start}..{end} — {count} messages, ~{tokens} tokens [tool {toolPct}% | text {textPct}%]{media}',
     footer: 'Compress with: compress({ content: [{ startSeq, endSeq, summary }] }) — content is an array: batch multiple unrelated segments in one call, each entry its own block. Keep ranges disjoint.\n'
       + 'Snapshot taken at nudge time: the seqs go stale once the surface moves (a later compress shadows them), so re-run acp_status for fresh refs before compressing.',
   },

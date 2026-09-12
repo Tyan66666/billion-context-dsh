@@ -38,7 +38,7 @@ import {
   DEFAULT_DECOMPRESS_PAGE_CHARS,
   type ResolvedSurfaceRange,
 } from './region.ts'
-import { allLogMessages, buildToolCallIndex, eventsToCoreMessages, extractEventText, isCheckpointNode, surfaceEventsOf } from './messages.ts'
+import { allLogMessages, attachmentsOfEvent, buildToolCallIndex, eventsToCoreMessages, extractEventText, isCheckpointNode, surfaceEventsOf } from './messages.ts'
 import { shadowedTokensViaMeter } from './host-tokens.ts'
 import { eventAtOf, sessionEventsOf } from './session-events.ts'
 import { DEFAULT_RESOLVED, type ResolvedPrompts } from './prompts.ts'
@@ -923,6 +923,23 @@ async function handleStatus(env: ToolEnvironment, rawArgs: StatusArgs, exec: Too
       .map((entry) => `${entry.kernelBlockId} → seq ${entry.summarySeq}`)
     if (checkpointRows.length > 0) {
       lines.push('', `Checkpoint seqs (active blocks — compress a checkpoint seq to distill it): ${checkpointRows.join(', ')}`)
+    }
+    // Two calibers meet in this report: the pressure/nudge line is
+    // provider-anchored (the session projection, where images and files carry
+    // the live route's price) while the breakdown above is a text-only
+    // estimate. They legitimately disagree on media-heavy sessions, and a model
+    // reads that disagreement as a broken number unless it is told which is
+    // which (issue #117). Emitted only when the surface actually carries media,
+    // so a text-only session keeps the kernel report untouched.
+    const mediaOnSurface = surface.some((event) => {
+      const counts = attachmentsOfEvent(event)
+      return counts.images + counts.files > 0
+    })
+    if (mediaOnSurface) {
+      lines.push(
+        '',
+        'Note: the pressure line is provider-anchored (images/files priced by the live route); the breakdown above is a text-only estimate. They can differ on media-heavy sessions.',
+      )
     }
   }
   lines.push('', `Surface: ${surfaceSummary(session)}`)

@@ -123,11 +123,105 @@ export function shadowedHostTokens(session: Session, seqs: readonly number[]): n
   return total
 }
 
+/**
+ * Fixed-heuristic price of the media blocks reachable in `blocks` (any nesting
+ * depth, tool results included) — an exact mirror of the host's
+ * `estimateStructuralBlock`
+ * (`@deepseek-ai/dsh-token-meter/lib/types/estimate.js`), the arm the host's own
+ * pricing takes for an image/file reference, "whose request price is route-owned
+ * rather than fixed".
+ *
+ * Used as the media price whenever the meter reports no routed surcharge for the
+ * seq — which is every host today — so a media-bearing span is never priced as
+ * if the picture were free. It is a DISPLAY price only; it must never reach a
+ * `shadowedTokenCount` claim (rule 12).
+ *
+ * UPSTREAM: drop this mirror the moment dsh-token-meter exports
+ * `estimateStructuralBlock` (same tracker entry as `estimateContent`, see
+ * docs/dsh-porting-verification.md).
+ */
+export function hostMediaStructuralPrice(blocks: unknown): number {
+  if (!Array.isArray(blocks)) return 0
+  let tokens = 0
+  for (const block of blocks) {
+    if (block === null || typeof block !== 'object') continue
+    const b = block as { type?: unknown; content?: unknown }
+    if (b.type === 'image' || b.type === 'file') {
+      tokens += BLOCK_OVERHEAD + Math.ceil(JSON.stringify(block).length / CHARS_PER_TOKEN)
+    } else if (Array.isArray(b.content)) {
+      tokens += hostMediaStructuralPrice(b.content)
+    }
+  }
+  return tokens
+}
+
 /** The slice of the live meter's measurement the engine may price from. */
 interface TokenMeterLike {
   measure(session: Session): {
-    nodes: ReadonlyArray<{ seq: number; tokens: number; heuristicTokens?: number }>
+    nodes: ReadonlyArray<{
+      seq: number
+      /**
+       * Request pressure for the exact projected message under the measured
+       * route: a media occurrence carries the route's declared visual price
+       * when the routed adapter declares one, the fixed heuristic otherwise.
+       * The host reads THIS field for trigger, retention and range selection.
+       */
+      tokens: number
+      /**
+       * Fixed-heuristic price of the same message, independent of any route
+       * (the shadow-price ledger basis). Together with `tokens` it is the only
+       * media signal the public node exposes — see `mediaPriceViaMeter`.
+       */
+      heuristicTokens?: number
+    }>
   }
+}
+
+/**
+ * Provider-anchored MEDIA price per surface seq, read from the host meter.
+ *
+ * An `image`/`file` block carries no characters, so every text-based estimator
+ * prices it at zero while the provider still bills it. The only media signal the
+ * meter's public node exposes is the gap between its two prices: `tokens` is the
+ * route-priced request pressure — a media occurrence carries the adapter's
+ * declared visual price when there is one, which is why the host itself reads
+ * this field for range selection — and `heuristicTokens` is the route-independent
+ * fixed heuristic. Their difference is exactly the routed surcharge the host
+ * already charged the route.
+ *
+ * That difference is ZERO on every adapter that declares no visual price (all
+ * production adapters today, and the pinned test meter), so callers ADD the
+ * fixed-heuristic `hostMediaStructuralPrice` on top instead of reading an absent
+ * surcharge as a free image. Without this pair a picture-heavy span looked free
+ * in the compressible-range table and the model ranked it last (issue #117).
+ *
+ * Where this price may be used: USAGE accounting only (range-table tokens,
+ * display). It must NEVER feed a `shadowedTokenCount` claim — the host's
+ * projection folds those with its own fixed heuristic and a routed price
+ * overstates the claim, folding the projection negative on image ranges
+ * (issue #103, the image-route channel of the #54 brick; rule 12).
+ *
+ * Returns an empty map when the meter is absent, when a measurement throws
+ * (step-less logs), or when the meter exposes no media fields (older line) —
+ * which degrades to the previous text-only behaviour.
+ */
+export function mediaPriceViaMeter(
+  session: Session,
+  ctx?: { get?(name: string): unknown } | null,
+): ReadonlyMap<number, number> {
+  const prices = new Map<number, number>()
+  try {
+    const meter = ctx?.get?.('tokenMeter') as TokenMeterLike | undefined
+    if (meter?.measure === undefined) return prices
+    for (const node of meter.measure(session).nodes) {
+      const heuristic = node.heuristicTokens ?? node.tokens
+      const routed = node.tokens - heuristic
+      if (routed > 0) prices.set(node.seq, routed)
+    }
+  } catch {
+    // Older meter shapes and step-less logs: no media surcharge available.
+  }
+  return prices
 }
 
 /**

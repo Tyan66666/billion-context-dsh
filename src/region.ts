@@ -23,6 +23,8 @@ import { defaultCountTokens } from 'acp-kernel'
 import {
   classifySurfaceEvent,
   extractEventText,
+  attachmentsOfEvent,
+  mediaBlocksOfEvent,
   extractText,
   isAgentInstructionsRow,
   isCheckpointNode,
@@ -30,7 +32,7 @@ import {
   toolCallIdOfResultEvent,
   withSummaryFramePrefix,
 } from './messages.ts'
-import { hostPriceEvent } from './host-tokens.ts'
+import { hostMediaStructuralPrice, hostPriceEvent } from './host-tokens.ts'
 import { eventAtOf, sessionEventsOf } from './session-events.ts'
 import { decodeAcpBlockLedger, encodeAcpBlockLedger, type AcpBlockLedgerPayload } from './block-ledger.ts'
 
@@ -621,7 +623,19 @@ export interface SeqCompressibleRange {
   readonly tokens: number
   /** Share of messages that are tool messages (tool-call or tool-result), 0-100 — kernel `toolPct` parity. */
   readonly toolPct: number
+  /** Image blocks reachable inside the span (directly or through a tool result). */
+  readonly images: number
+  /** File blocks reachable inside the span. */
+  readonly files: number
 }
+
+/**
+ * Per-seq provider-anchored price for non-text blocks (see `mediaPriceViaMeter`
+ * in host-tokens.ts). A callback, not a map, so a media-free session never pays
+ * for a meter measurement: the range walk only asks about seqs it already knows
+ * carry an image/file block.
+ */
+export type MediaPriceOf = (seq: number) => number
 
 /** Whether a surface message event is a tool message (tool-call or tool-result) — kernel `isToolMessage` parity. */
 function isToolEvent(event: SessionEvent): boolean {
@@ -1047,6 +1061,8 @@ interface CompressibleSegment {
   count: number
   tokens: number
   toolCount: number
+  images: number
+  files: number
 }
 
 /**
@@ -1065,6 +1081,7 @@ function compressibleSegmentsOf(
   fromIndex: number,
   toIndex: number,
   protectedSeqs: ReadonlySet<number>,
+  mediaPriceOf?: MediaPriceOf,
 ): CompressibleSegment[] {
   const nodes = session.surface.nodes
   const segments: CompressibleSegment[] = []
@@ -1098,16 +1115,38 @@ function compressibleSegmentsOf(
       flush()
       continue
     }
-    const tokens = defaultCountTokens(extractEventText(event))
+    // Text is priced with the kernel's CJK-aware counter; image/file blocks add
+    // a media price on top, because no text estimator can see them and a span
+    // that looked free was ranked last by the model (issue #117). The routed
+    // surcharge (meter) and the fixed structural estimate (host heuristic) are
+    // ADDED: the meter reports no surcharge at all on every adapter that
+    // declares no visual price, and an absent surcharge must never make a
+    // picture look free. The callback is only consulted for a seq that really
+    // carries an attachment.
+    const attachments = attachmentsOfEvent(event)
+    const mediaPrice = attachments.images + attachments.files > 0
+      ? (mediaPriceOf?.(seq) ?? 0) + hostMediaStructuralPrice(mediaBlocksOfEvent(event))
+      : 0
+    const tokens = defaultCountTokens(extractEventText(event)) + mediaPrice
     const isTool = isToolEvent(event)
     if (current === null) {
-      current = { start: seq, end: seq, count: 1, tokens, toolCount: isTool ? 1 : 0 }
+      current = {
+        start: seq,
+        end: seq,
+        count: 1,
+        tokens,
+        toolCount: isTool ? 1 : 0,
+        images: attachments.images,
+        files: attachments.files,
+      }
     } else {
       current.start = Math.min(current.start, seq)
       current.end = Math.max(current.end, seq)
       current.count += 1
       current.tokens += tokens
       current.toolCount += isTool ? 1 : 0
+      current.images += attachments.images
+      current.files += attachments.files
     }
   }
   flush()
@@ -1146,7 +1185,7 @@ function compressibleSegmentsOf(
 export function buildCompressibleSeqRanges(
   session: Session,
   kernelView: KernelRangeView,
-  opts: { preserveRecent?: number } = {},
+  opts: { preserveRecent?: number; mediaPriceOf?: MediaPriceOf } = {},
 ): SeqCompressibleRange[] {
   // Orphan tool messages corrupt the pairing balance cache and fragment every
   // large span. Prune them before mapping so the table reflects the surface
@@ -1165,7 +1204,13 @@ export function buildCompressibleSeqRanges(
     const from = startSeq === null ? undefined : indexOfSeq.get(startSeq)
     const to = endSeq === null ? undefined : indexOfSeq.get(endSeq)
     if (from === undefined || to === undefined) continue
-    const segments = compressibleSegmentsOf(session, Math.min(from, to), Math.max(from, to), protectedSeqs)
+    const segments = compressibleSegmentsOf(
+      session,
+      Math.min(from, to),
+      Math.max(from, to),
+      protectedSeqs,
+      opts.mediaPriceOf,
+    )
     for (const segment of segments) {
       try {
         const { start, end } = resolveSurfaceRange(session, segment.start, segment.end)
@@ -1175,6 +1220,8 @@ export function buildCompressibleSeqRanges(
           count: segment.count,
           tokens: segment.tokens,
           toolPct: segment.count > 0 ? Math.round((segment.toolCount / segment.count) * 100) : 0,
+          images: segment.images,
+          files: segment.files,
         })
       } catch {
         // Cannot be balanced into a compressible span — skip.
