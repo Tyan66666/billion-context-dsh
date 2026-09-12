@@ -70,6 +70,55 @@ export declare function hostPriceEvent(event: SessionEvent): number;
 /** Mirror price of a set of surface seqs (the fallback claim computation). */
 export declare function shadowedHostTokens(session: Session, seqs: readonly number[]): number;
 /**
+ * Fixed-heuristic price of the media blocks reachable in `blocks` (any nesting
+ * depth, tool results included) — an exact mirror of the host's
+ * `estimateStructuralBlock`
+ * (`@deepseek-ai/dsh-token-meter/lib/types/estimate.js`), the arm the host's own
+ * pricing takes for an image/file reference, "whose request price is route-owned
+ * rather than fixed".
+ *
+ * Used as the media price whenever the meter reports no routed surcharge for the
+ * seq — which is every host today — so a media-bearing span is never priced as
+ * if the picture were free. It is a DISPLAY price only; it must never reach a
+ * `shadowedTokenCount` claim (rule 12).
+ *
+ * UPSTREAM: drop this mirror the moment dsh-token-meter exports
+ * `estimateStructuralBlock` (same tracker entry as `estimateContent`, see
+ * docs/dsh-porting-verification.md).
+ */
+export declare function hostMediaStructuralPrice(blocks: unknown): number;
+/**
+ * Provider-anchored MEDIA price per surface seq, read from the host meter.
+ *
+ * An `image`/`file` block carries no characters, so every text-based estimator
+ * prices it at zero while the provider still bills it. The only media signal the
+ * meter's public node exposes is the gap between its two prices: `tokens` is the
+ * route-priced request pressure — a media occurrence carries the adapter's
+ * declared visual price when there is one, which is why the host itself reads
+ * this field for range selection — and `heuristicTokens` is the route-independent
+ * fixed heuristic. Their difference is exactly the routed surcharge the host
+ * already charged the route.
+ *
+ * That difference is ZERO on every adapter that declares no visual price (all
+ * production adapters today, and the pinned test meter), so callers ADD the
+ * fixed-heuristic `hostMediaStructuralPrice` on top instead of reading an absent
+ * surcharge as a free image. Without this pair a picture-heavy span looked free
+ * in the compressible-range table and the model ranked it last (issue #117).
+ *
+ * Where this price may be used: USAGE accounting only (range-table tokens,
+ * display). It must NEVER feed a `shadowedTokenCount` claim — the host's
+ * projection folds those with its own fixed heuristic and a routed price
+ * overstates the claim, folding the projection negative on image ranges
+ * (issue #103, the image-route channel of the #54 brick; rule 12).
+ *
+ * Returns an empty map when the meter is absent, when a measurement throws
+ * (step-less logs), or when the meter exposes no media fields (older line) —
+ * which degrades to the previous text-only behaviour.
+ */
+export declare function mediaPriceViaMeter(session: Session, ctx?: {
+    get?(name: string): unknown;
+} | null): ReadonlyMap<number, number>;
+/**
  * Claim price for `seqs` in the host's vocabulary. Prefers the live meter's
  * own per-node FIXED-HEURISTIC prices when `ctx.tokenMeter` is reachable and
  * covers every shadowed seq (exact by construction — the ledger's

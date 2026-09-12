@@ -3417,11 +3417,29 @@ function extractText(content) {
     const b = block;
     if (b.type === "text" && typeof b.text === "string") {
       parts.push(b.text);
+    } else if (b.type === "image" || b.type === "file") {
+      const placeholder = attachmentPlaceholder(b.type, b.attachment);
+      if (placeholder !== null) parts.push(placeholder);
     } else if (Array.isArray(b.content)) {
       parts.push(extractText(b.content));
     }
   }
   return parts.join("\n");
+}
+function formatBytes(bytes) {
+  if (bytes < 1024) return `${bytes}B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)}KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)}MB`;
+}
+function attachmentPlaceholder(type, attachment) {
+  if (attachment === null || typeof attachment !== "object") return null;
+  const a = attachment;
+  const name = typeof a.name === "string" && a.name.length > 0 ? a.name : void 0;
+  const size = typeof a.bytes === "number" && Number.isFinite(a.bytes) ? ` ${formatBytes(a.bytes)}` : "";
+  if (type === "file") return `[file ${name ?? "attachment"}${size}]`;
+  const mediaType = typeof a.mediaType === "string" && a.mediaType.length > 0 ? a.mediaType : "image";
+  const dimensions = typeof a.width === "number" && typeof a.height === "number" ? ` ${a.width}x${a.height}` : "";
+  return `[image ${mediaType}${name ? ` ${name}` : ""}${dimensions}${size}]`;
 }
 function toolCallsOf(content) {
   if (!Array.isArray(content)) return [];
@@ -3542,6 +3560,49 @@ function extractEventText(event) {
       return "";
   }
 }
+function countAttachmentBlocks(content) {
+  const counts = { images: 0, files: 0 };
+  countAttachments(content, counts);
+  return counts;
+}
+function countAttachments(content, counts) {
+  if (!Array.isArray(content)) return;
+  for (const block of content) {
+    if (block === null || typeof block !== "object") continue;
+    const b = block;
+    if (b.type === "image") counts.images += 1;
+    else if (b.type === "file") counts.files += 1;
+    else if (Array.isArray(b.content)) countAttachments(b.content, counts);
+  }
+}
+function attachmentsOfEvent(event) {
+  return countAttachmentBlocks(contentBlocksOfEvent(event));
+}
+function mediaBlocksOfEvent(event) {
+  const blocks = [];
+  collectMediaBlocks(contentBlocksOfEvent(event), blocks);
+  return blocks;
+}
+function collectMediaBlocks(content, out) {
+  if (!Array.isArray(content)) return;
+  for (const block of content) {
+    if (block === null || typeof block !== "object") continue;
+    const b = block;
+    if (b.type === "image" || b.type === "file") out.push(block);
+    else if (Array.isArray(b.content)) collectMediaBlocks(b.content, out);
+  }
+}
+function contentBlocksOfEvent(event) {
+  switch (event.type) {
+    case "user/message":
+      return event.data.content;
+    case "assistant/message":
+    case "tool/result":
+      return event.data.message?.content;
+    default:
+      return void 0;
+  }
+}
 function isCheckpointNode(event) {
   if (event.type !== "user/message") return false;
   const source = event.data.source;
@@ -3648,6 +3709,34 @@ function shadowedHostTokens(session, seqs) {
     if (event !== void 0) total += hostPriceEvent(event);
   }
   return total;
+}
+function hostMediaStructuralPrice(blocks) {
+  if (!Array.isArray(blocks)) return 0;
+  let tokens = 0;
+  for (const block of blocks) {
+    if (block === null || typeof block !== "object") continue;
+    const b = block;
+    if (b.type === "image" || b.type === "file") {
+      tokens += BLOCK_OVERHEAD + Math.ceil(JSON.stringify(block).length / CHARS_PER_TOKEN);
+    } else if (Array.isArray(b.content)) {
+      tokens += hostMediaStructuralPrice(b.content);
+    }
+  }
+  return tokens;
+}
+function mediaPriceViaMeter(session, ctx) {
+  const prices = /* @__PURE__ */ new Map();
+  try {
+    const meter = ctx?.get?.("tokenMeter");
+    if (meter?.measure === void 0) return prices;
+    for (const node of meter.measure(session).nodes) {
+      const heuristic = node.heuristicTokens ?? node.tokens;
+      const routed = node.tokens - heuristic;
+      if (routed > 0) prices.set(node.seq, routed);
+    }
+  } catch {
+  }
+  return prices;
 }
 function shadowedTokensViaMeter(session, seqs, ctx) {
   try {
@@ -4215,7 +4304,7 @@ function protectedSurfaceSeqs(session, preserve) {
   for (const seq of newestInstructionSeqsOf(session)) protectedSeqs.add(seq);
   return protectedSeqs;
 }
-function compressibleSegmentsOf(session, fromIndex, toIndex, protectedSeqs) {
+function compressibleSegmentsOf(session, fromIndex, toIndex, protectedSeqs, mediaPriceOf) {
   const nodes = session.surface.nodes;
   const segments = [];
   let current = null;
@@ -4231,16 +4320,28 @@ function compressibleSegmentsOf(session, fromIndex, toIndex, protectedSeqs) {
       flush();
       continue;
     }
-    const tokens = defaultCountTokens(extractEventText(event));
+    const attachments = attachmentsOfEvent(event);
+    const mediaPrice = attachments.images + attachments.files > 0 ? (mediaPriceOf?.(seq) ?? 0) + hostMediaStructuralPrice(mediaBlocksOfEvent(event)) : 0;
+    const tokens = defaultCountTokens(extractEventText(event)) + mediaPrice;
     const isTool = isToolEvent(event);
     if (current === null) {
-      current = { start: seq, end: seq, count: 1, tokens, toolCount: isTool ? 1 : 0 };
+      current = {
+        start: seq,
+        end: seq,
+        count: 1,
+        tokens,
+        toolCount: isTool ? 1 : 0,
+        images: attachments.images,
+        files: attachments.files
+      };
     } else {
       current.start = Math.min(current.start, seq);
       current.end = Math.max(current.end, seq);
       current.count += 1;
       current.tokens += tokens;
       current.toolCount += isTool ? 1 : 0;
+      current.images += attachments.images;
+      current.files += attachments.files;
     }
   }
   flush();
@@ -4259,7 +4360,13 @@ function buildCompressibleSeqRanges(session, kernelView, opts = {}) {
     const from = startSeq === null ? void 0 : indexOfSeq.get(startSeq);
     const to = endSeq === null ? void 0 : indexOfSeq.get(endSeq);
     if (from === void 0 || to === void 0) continue;
-    const segments = compressibleSegmentsOf(session, Math.min(from, to), Math.max(from, to), protectedSeqs);
+    const segments = compressibleSegmentsOf(
+      session,
+      Math.min(from, to),
+      Math.max(from, to),
+      protectedSeqs,
+      opts.mediaPriceOf
+    );
     for (const segment of segments) {
       try {
         const { start, end } = resolveSurfaceRange(session, segment.start, segment.end);
@@ -4268,7 +4375,9 @@ function buildCompressibleSeqRanges(session, kernelView, opts = {}) {
           end,
           count: segment.count,
           tokens: segment.tokens,
-          toolPct: segment.count > 0 ? Math.round(segment.toolCount / segment.count * 100) : 0
+          toolPct: segment.count > 0 ? Math.round(segment.toolCount / segment.count * 100) : 0,
+          images: segment.images,
+          files: segment.files
         });
       } catch {
       }
@@ -4533,7 +4642,7 @@ var NUDGE_ALLOWED = {
 var RANGE_TABLE_ALLOWED = {
   header: /* @__PURE__ */ new Set(["surface"]),
   title: /* @__PURE__ */ new Set(["count"]),
-  line: /* @__PURE__ */ new Set(["start", "end", "count", "tokens"]),
+  line: /* @__PURE__ */ new Set(["start", "end", "count", "tokens", "toolPct", "textPct", "media"]),
   footer: /* @__PURE__ */ new Set()
 };
 var TOOLS_ALLOWED = {
@@ -4610,7 +4719,7 @@ var DEFAULT_PROMPTS = {
   rangeTable: {
     header: "Surface: {surface}",
     title: "Compressible ranges ({count}, oldest first; exact surface seqs \u2014 usable as-is):",
-    line: "  - seq {start}..{end} \u2014 {count} messages, ~{tokens} tokens [tool {toolPct}% | text {textPct}%]",
+    line: "  - seq {start}..{end} \u2014 {count} messages, ~{tokens} tokens [tool {toolPct}% | text {textPct}%]{media}",
     footer: "Compress with: compress({ content: [{ startSeq, endSeq, summary }] }) \u2014 content is an array: batch multiple unrelated segments in one call, each entry its own block. Keep ranges disjoint.\nSnapshot taken at nudge time: the seqs go stale once the surface moves (a later compress shadows them), so re-run acp_status for fresh refs before compressing."
   },
   tools: {
@@ -4677,8 +4786,26 @@ function resolveTokenCount(agent, coreMessages) {
 function kernelRangeViewOf(nudge, state) {
   return { ranges: nudge.compressibleRanges ?? [], refs: state.messageRefs };
 }
-function rangeTable(session, kernelView, prompts = DEFAULT_RESOLVED) {
-  const ranges = buildCompressibleSeqRanges(session, kernelView).slice(0, 6);
+function mediaSuffixOf(range) {
+  if (range.images === 0 && range.files === 0) return "";
+  const parts = [];
+  if (range.images > 0) parts.push(`+${range.images} image${range.images === 1 ? "" : "s"}`);
+  if (range.files > 0) parts.push(`+${range.files} file${range.files === 1 ? "" : "s"}`);
+  return ` [${parts.join(" | ")}]`;
+}
+function meterMediaPriceResolver(agent, session) {
+  let prices = null;
+  return (seq) => {
+    if (prices === null) prices = mediaPriceViaMeter(session, agent.ctx);
+    return prices.get(seq) ?? 0;
+  };
+}
+function rangeTable(session, kernelView, prompts = DEFAULT_RESOLVED, mediaPriceOf) {
+  const ranges = buildCompressibleSeqRanges(
+    session,
+    kernelView,
+    mediaPriceOf === void 0 ? {} : { mediaPriceOf }
+  ).slice(0, 6);
   if (ranges.length === 0) return "";
   const lines = ranges.map(
     (range) => renderTemplate(prompts.rangeTable.line, {
@@ -4687,7 +4814,8 @@ function rangeTable(session, kernelView, prompts = DEFAULT_RESOLVED) {
       count: range.count,
       tokens: range.tokens,
       toolPct: range.toolPct,
-      textPct: 100 - range.toolPct
+      textPct: 100 - range.toolPct,
+      media: mediaSuffixOf(range)
     })
   );
   return [
@@ -4738,6 +4866,7 @@ function buildNudge(agent, env, lastNudgeTurn, emergencyNudges, onEmergencyCapHi
   env.store.set(session, turn.state);
   const nudge = turn.nudge;
   if (nudge === void 0 || !nudge.shouldInject) return null;
+  const mediaPriceOf = meterMediaPriceResolver(agent, session);
   const statusMessages = eventsToCoreMessages(
     surfaceEvents.filter((event) => isCheckpointNode(event) === false)
   );
@@ -4759,28 +4888,35 @@ function buildNudge(agent, env, lastNudgeTurn, emergencyNudges, onEmergencyCapHi
       emergencyNudges.set(session.id, { turn: turnNumber, count: 1 });
     }
   }
-  const text = buildNudgeText(nudge, emergency, session, kernelRangeViewOf(nudge, turn.state), env.prompts);
+  const text = buildNudgeText(
+    nudge,
+    emergency,
+    session,
+    kernelRangeViewOf(nudge, turn.state),
+    env.prompts,
+    mediaPriceOf
+  );
   const message = createUserMessage2({
     content: [{ type: "text", text }],
     source: { kind: "plugin", plugin: "acp-nudge" }
   });
   return { message, emergency };
 }
-function buildNudgeText(nudge, emergency, session, kernelView, prompts = DEFAULT_RESOLVED) {
+function buildNudgeText(nudge, emergency, session, kernelView, prompts = DEFAULT_RESOLVED, mediaPriceOf) {
   if (prompts.nudge !== DEFAULT_RESOLVED.nudge) {
-    return renderNudgeFromTemplates(nudge, emergency, session, kernelView, prompts);
+    return renderNudgeFromTemplates(nudge, emergency, session, kernelView, prompts, mediaPriceOf);
   }
   const rendered = renderNudgeText(nudge);
-  return adaptKernelNudgeToSeq(rendered.text, nudge, session, kernelView, prompts);
+  return adaptKernelNudgeToSeq(rendered.text, nudge, session, kernelView, prompts, mediaPriceOf);
 }
-function adaptKernelNudgeToSeq(text, nudge, session, kernelView, prompts) {
+function adaptKernelNudgeToSeq(text, nudge, session, kernelView, prompts, mediaPriceOf) {
   let out = stripNudgeGuidance(text);
   if ((nudge.tier === 2 || nudge.tier === 3) && (nudge.tierTargetBlocks?.length ?? 0) > 0) {
     out = replaceTierTrigger(out, nudge, session, prompts);
   } else if (out.includes('"startId"')) {
     out = replaceEmergencyExample(out);
   }
-  const seqTable = rangeTable(session, kernelView, prompts);
+  const seqTable = rangeTable(session, kernelView, prompts, mediaPriceOf);
   if (seqTable !== "") out = replaceRangesStr(out, seqTable);
   return out;
 }
@@ -4825,7 +4961,7 @@ function replaceEmergencyExample(text) {
   const end = next !== null ? start + 2 + next.index : text.length;
   return text.slice(0, start) + "\n\ncompress({ content: [{ startSeq, endSeq, summary }] }) \u2014 use the seqs from the range table above." + text.slice(end);
 }
-function renderNudgeFromTemplates(nudge, emergency, session, kernelView, prompts) {
+function renderNudgeFromTemplates(nudge, emergency, session, kernelView, prompts, mediaPriceOf) {
   const pct2 = Math.round(Math.min(nudge.contextUsage, 1) * 100);
   const frame = renderTemplate(
     emergency ? prompts.nudge.emergency : prompts.nudge.normal,
@@ -4866,7 +5002,7 @@ function renderNudgeFromTemplates(nudge, emergency, session, kernelView, prompts
     const tierRules = nudge.tier === 2 ? TIER2_DISTILL_RULES : TIER3_CONDENSE_RULES;
     parts.push("", tierRules);
   } else {
-    parts.push(rangeTable(session, kernelView, prompts));
+    parts.push(rangeTable(session, kernelView, prompts, mediaPriceOf));
   }
   if (prompts.nudge.tip !== "") parts.push("", prompts.nudge.tip);
   return stripNudgeGuidance(parts.join("\n"));
@@ -5463,6 +5599,16 @@ async function handleStatus(env, rawArgs, exec) {
     const checkpointRows = blockRegistry(session).filter((entry) => entry.active && entry.summarySeq !== null).map((entry) => `${entry.kernelBlockId} \u2192 seq ${entry.summarySeq}`);
     if (checkpointRows.length > 0) {
       lines.push("", `Checkpoint seqs (active blocks \u2014 compress a checkpoint seq to distill it): ${checkpointRows.join(", ")}`);
+    }
+    const mediaOnSurface = surface.some((event) => {
+      const counts = attachmentsOfEvent(event);
+      return counts.images + counts.files > 0;
+    });
+    if (mediaOnSurface) {
+      lines.push(
+        "",
+        "Note: the pressure line is provider-anchored (images/files priced by the live route); the breakdown above is a text-only estimate. They can differ on media-heavy sessions."
+      );
     }
   }
   lines.push("", `Surface: ${surfaceSummary(session)}`);

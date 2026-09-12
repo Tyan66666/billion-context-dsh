@@ -164,7 +164,18 @@ export interface SeqCompressibleRange {
     readonly tokens: number;
     /** Share of messages that are tool messages (tool-call or tool-result), 0-100 — kernel `toolPct` parity. */
     readonly toolPct: number;
+    /** Image blocks reachable inside the span (directly or through a tool result). */
+    readonly images: number;
+    /** File blocks reachable inside the span. */
+    readonly files: number;
 }
+/**
+ * Per-seq provider-anchored price for non-text blocks (see `mediaPriceViaMeter`
+ * in host-tokens.ts). A callback, not a map, so a media-free session never pays
+ * for a meter measurement: the range walk only asks about seqs it already knows
+ * carry an image/file block.
+ */
+export type MediaPriceOf = (seq: number) => number;
 /**
  * Durable model-free prune: append `compaction/prune` as the shadow price,
  * then replace the given surface seqs with a user message. dsh-session 0.1.5+
@@ -307,6 +318,7 @@ export interface KernelRangeView {
  */
 export declare function buildCompressibleSeqRanges(session: Session, kernelView: KernelRangeView, opts?: {
     preserveRecent?: number;
+    mediaPriceOf?: MediaPriceOf;
 }): SeqCompressibleRange[];
 /**
  * A compact human-readable description of the current surface for the model:

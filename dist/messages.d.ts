@@ -20,6 +20,20 @@ import type { Session, SessionEvent } from '@deepseek-ai/dsh-session';
  * the actual `text` blocks, so a top-level-only walk would drop every tool
  * result from the projection (and with it the seq's ref assignment, breaking
  * compress boundary resolution). Nested arrays are flattened depth-first.
+ *
+ * Non-text blocks that the provider still bills for render as a deterministic
+ * one-line placeholder instead of vanishing (issue #117). An `image`/`file`
+ * block used to contribute nothing, which silently made a picture-only user
+ * message — or a tool result carrying a screenshot — invisible to the engine:
+ * no ref (so no compress boundary), `hasPlainRef` false (so the range solver
+ * shrank past it and swallowed neighbours), invisible to the kernel's
+ * recent/last-user protection (so the last real user turn could be compressed
+ * away), priced at zero tokens, and absent from search/decompress output. The
+ * host itself projects non-text references to deterministic handle text for
+ * files ("request assembly projects every occurrence to deterministic handle
+ * text", dsh-llm/lib/types/types.d.ts), and this is the same idea one layer
+ * down. Only durable attachment metadata is used, so the placeholder is stable
+ * across turns (cache prefix, summary text, search hits).
  */
 export declare function extractText(content: unknown): string;
 /**
@@ -76,6 +90,29 @@ export declare function surfaceEventsOf(session: Session): SessionEvent[];
 export declare function allLogMessages(session: import('@deepseek-ai/dsh-session').Session): CoreMessage[];
 /** Extract the model-facing text of any surface message event. */
 export declare function extractEventText(event: SessionEvent): string;
+/** Count image/file blocks reachable from a content payload (same walk as extractText). */
+export declare function countAttachmentBlocks(content: unknown): {
+    images: number;
+    files: number;
+};
+/**
+ * Attachments carried by one surface event, walked exactly like
+ * `extractEventText`. Used in two places: the compressible-range rows mark
+ * media-bearing spans, and the callers that already own a token meter price
+ * those spans with the provider-anchored media price instead of the text-only
+ * estimate (issue #117).
+ */
+export declare function attachmentsOfEvent(event: SessionEvent): {
+    images: number;
+    files: number;
+};
+/**
+ * The image/file blocks themselves (not just their counts), in document order.
+ * The compressible-range rows price these with the fixed-heuristic media price
+ * when the meter reports no routed surcharge, so a media-bearing span is never
+ * shown as free (issue #117).
+ */
+export declare function mediaBlocksOfEvent(event: SessionEvent): readonly unknown[];
 /**
  * Whether a surface user message is a compaction checkpoint node (already
  * compressed). Defined here (not in region.ts) so the classifier below and
