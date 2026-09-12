@@ -55,3 +55,21 @@ test('snapshot shape wins when BOTH exist (forward compatibility)', () => {
   assert.deepEqual(sessionEventsOf(session), events)
   assert.equal(eventAtOf(session, 0), events[0])
 })
+
+test('snapshot-only shape: eventAtOf falls back to snapshotEvents()', () => {
+  const events = [mkEvent(0), mkEvent(1)]
+  const session = {
+    snapshotEvents() {
+      return events
+    },
+  } as unknown as Session
+  assert.equal(eventAtOf(session, 0), events[0])
+  assert.equal(eventAtOf(session, 1), events[1])
+  assert.equal(eventAtOf(session, 9), undefined)
+})
+
+test('no read method: eventAtOf yields undefined instead of throwing', () => {
+  const session = {} as unknown as Session
+  assert.doesNotThrow(() => eventAtOf(session, 0))
+  assert.equal(eventAtOf(session, 0), undefined)
+})

@@ -402,7 +402,7 @@ function replaceTierTrigger(
   const targets = nudge.tierTargetBlocks!
   const summarySeqs = targets
     .map((block) => summarySeqOfKernelBlock(session, block.blockId))
-    .filter((seq): seq is number => seq !== null)
+    .filter((seq): seq is number => seq != null)
     .sort((a, b) => a - b)
   const pending = nudge.tier === 2 ? nudge.breakdown?.pendingT2 : nudge.breakdown?.pendingT3
   const tokens = typeof pending === 'number' ? pending : 0
@@ -477,7 +477,7 @@ function renderNudgeFromTemplates(
     const targets = nudge.tierTargetBlocks!
     const summarySeqs = targets
       .map((block) => summarySeqOfKernelBlock(session, block.blockId))
-      .filter((seq): seq is number => seq !== null)
+      .filter((seq): seq is number => seq != null)
       .sort((a, b) => a - b)
     const pending = nudge.tier === 2 ? nudge.breakdown?.pendingT2 : nudge.breakdown?.pendingT3
     const tokens = typeof pending === 'number' ? pending : 0
