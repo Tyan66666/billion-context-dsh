@@ -1,17 +1,19 @@
 /**
  * Cross-version session event access.
  *
- * DSH `0.1.2-alpha` replaced the public `Session.events` getter with explicit
- * `snapshotEvents()` / `eventAt(seq)` methods; rc.6 / 0.1.1-rc.x still expose
- * `events`. Both shapes are feature-detected here so a single build runs on
- * either seam (the engine's peer range keeps `^0.1.0-rc.6 || ^0.1.1-rc.1`).
+ * History: DSH `0.1.2-alpha` replaced the public `Session.events` getter with
+ * explicit `snapshotEvents()` / `eventAt(seq)` methods (only rc.6 /
+ * 0.1.1-rc.x had `events`). Both shapes are feature-detected here; since the
+ * peer floor moved to the 0.1.5 line (`>=0.1.5-alpha.1 <0.1.6-0`, issue #136),
+ * every supported seam exposes the method pair — dsh-session 0.1.5 has no
+ * public `.events` getter — so the `events` fallback is defensive robustness
+ * for foreign or stub handles, not a supported-host path.
  *
- * Semantics match on both sides:
- *  - `events` (rc.6) and `snapshotEvents()` (0.1.2-alpha) both return the
- *    current full log as a stable, cached snapshot (reused until the next
- *    append), with `seq === array index`.
- *  - indexed reads map to `events[seq]` / `eventAt(seq)` with the same
- *    `undefined`-when-absent contract.
+ * Semantics:
+ *  - `snapshotEvents()` returns the current full log as a stable, cached
+ *    snapshot (reused until the next append), with `seq === array index`.
+ *  - indexed reads map to `eventAt(seq)` (or `events[seq]` on the legacy
+ *    shape) with the same `undefined`-when-absent contract.
  * @module billion-context-dsh/session-events
  */
 
