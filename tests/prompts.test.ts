@@ -164,7 +164,8 @@ test('M4/prompts 4: range table snapshot (with ranges) and zero-range early retu
 Compressible ranges (1, oldest first; exact surface seqs — usable as-is):
   - seq 1..7 — 7 messages, ~7227 tokens [tool 0% | text 100%]
 Compress with: compress({ content: [{ startSeq, endSeq, summary }] }) — content is an array: batch multiple unrelated segments in one call, each entry its own block. Keep ranges disjoint.
-Snapshot taken at nudge time: the seqs go stale once the surface moves (a later compress shadows them), so re-run acp_status for fresh refs before compressing.`,
+Snapshot taken at nudge time: the seqs go stale once the surface moves (a later compress shadows them), so re-run acp_status for fresh refs before compressing.
+Before you compress any row above, confirm it is truly consumed — if a span still holds live task state (where you are in the task / open TODOs, paths already ruled out, artifacts already done and where they live), carry that state into your summary or keep the span live. Compressing an in-progress span without carrying its state forces a full re-run afterward.`,
   )
 })
 
@@ -258,6 +259,35 @@ test('M4/prompts 5d: anti-over-compression carriers ship in the default compress
   assert.ok(
     rendered.includes('decompress costs a full round-trip; prefer delaying the compress'),
     'round-trip cost warning present in system prompt (issue #55)',
+  )
+})
+
+test('M4/prompts 5e: liveness-aware compression carriers ship in the range-table footer AND the system prompt (issue #149)', () => {
+  // issue #149: compressing an in-progress span dropped live task state
+  // (where you are / open TODOs, ruled-out paths, ready artifacts + their
+  // locations), so the model re-ran consumed work after the summary replaced
+  // it. Two engine-owned carriers now guard it — the slim nudge no longer
+  // carries the full rule set (B6), so the point-of-action cue lives right
+  // under the ranges (footer) and the load-bearing one-time guidance (system
+  // prompt) names the handoff explicitly.
+  const rendered = renderSystemPrompt(resolvePrompts())
+  assert.ok(
+    rendered.includes('A mid-task compression must also hand off STATE, not just facts'),
+    'task-state handoff rule present in the system prompt (issue #149)',
+  )
+  assert.ok(
+    rendered.includes('which intermediate artifacts are already done and where they live'),
+    'ready-artifact-location carrier present in the system prompt (issue #149)',
+  )
+  const paged = buildTextSession(12)
+  const table = rangeTable(paged, wholeSurfaceRangeView(paged))
+  assert.ok(
+    table.includes('Before you compress any row above, confirm it is truly consumed'),
+    'action-zone liveness reminder present in the range-table footer (issue #149)',
+  )
+  assert.ok(
+    table.includes('artifacts already done and where they live'),
+    'footer names ruled-out paths + artifact locations (issue #149)',
   )
 })
 
