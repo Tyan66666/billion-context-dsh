@@ -38,7 +38,7 @@ import {
   DEFAULT_DECOMPRESS_PAGE_CHARS,
   type ResolvedSurfaceRange,
 } from './region.ts'
-import { allLogMessages, attachmentsOfEvent, buildToolCallIndex, eventsToCoreMessages, extractEventText, isCheckpointNode, surfaceEventsOf } from './messages.ts'
+import { allLogMessages, attachmentsOfEvent, buildToolCallIndex, eventsToCoreMessages, extractEventText, isCheckpointNode, surfaceEventsOf, toolCallsOf } from './messages.ts'
 import { shadowedTokensViaMeter } from './host-tokens.ts'
 import { eventAtOf, sessionEventsOf } from './session-events.ts'
 import { DEFAULT_RESOLVED, type ResolvedPrompts } from './prompts.ts'
@@ -369,6 +369,80 @@ export function protectedRowRejectionNote(start: number, end: number, hits: read
   return `  seqs ${start}..${end} rejected — the span covers ${hits.length} CURRENT injected instruction row(s) (seq ${preview}${more}); the host re-injects the newest AGENTS.md copy the moment it leaves the surface, so compressing it reclaims nothing — ${recovery} (older/stale copies of the same file are fine to compress)`
 }
 
+/**
+ * Kernel ref for one RESOLVED range edge's surface node (issue #155).
+ * Resolved edges are tool-pairing-balanced and anchorable, but NO LONGER
+ * guaranteed to carry a bare-`${seq}` ref: a multi-tool-call assistant
+ * projects to `${seq}#${callId}` sub-ids, and an empty tool result projects
+ * to nothing. Three tiers, in order:
+ *
+ *  1. the bare-seq id (user turns, single-call assistants, text-bearing results);
+ *  2. the node's sub-ids in projection (= content) order — FIRST for a start
+ *     edge (the kernel must consume the whole node from its first sub-message),
+ *     LAST for an end edge (unreachable in practice: a node with open calls
+ *     makes every cut after it unbalanced, so it can never be a resolved end
+ *     edge);
+ *  3. the nearest message-bearing LIVE node between this edge and the opposite
+ *     edge (inclusive), walked along the SURFACE — never raw-id space, where
+ *     shadowed nodes keep their refs and would anchor onto already-compressed
+ *     messages. Walking inward only also guarantees the returned ref names a
+ *     message the transaction actually shadows; a span whose interior carries
+ *     no message at all (two adjacent empty results) yields undefined and the
+ *     caller raises the existing "no assigned ref" error.
+ */
+export function edgeRefForSeq(
+  session: Session,
+  byRaw: Readonly<Record<string, string>>,
+  seq: number,
+  role: 'start' | 'end',
+  oppositeSeq: number,
+): string | undefined {
+  const nodes = session.surface.nodes
+  let index = -1
+  let oppositeIndex = -1
+  for (let i = 0; i < nodes.length; i += 1) {
+    if (nodes[i] === seq) index = i
+    if (nodes[i] === oppositeSeq) oppositeIndex = i
+  }
+  if (index < 0 || oppositeIndex < 0) return undefined
+  const direct = anchorRefForNode(session, byRaw, seq, role)
+  if (direct !== undefined) return direct
+  const step = role === 'start' ? 1 : -1
+  // Walk from just past this edge toward the opposite edge, INCLUSIVE of it:
+  // the opposite edge's own ref is a legitimate answer when nothing in between
+  // carries one (e.g. [empty result, text result]).
+  for (let i = index + step; i !== oppositeIndex + step; i += step) {
+    const ref = anchorRefForNode(session, byRaw, nodes[i]!, role)
+    if (ref !== undefined) return ref
+  }
+  return undefined
+}
+
+/** Bare-seq ref for one node, else its multi-call sub-id ref (see edgeRefForSeq). */
+function anchorRefForNode(
+  session: Session,
+  byRaw: Readonly<Record<string, string>>,
+  seq: number,
+  role: 'start' | 'end',
+): string | undefined {
+  const direct = byRaw[String(seq)]
+  if (direct !== undefined) return direct
+  const event = eventAtOf(session, seq)
+  if (event?.type !== 'assistant/message') return undefined
+  const content = (event.data as { message?: { content?: unknown } }).message?.content
+  const ids = toolCallsOf(content)
+    .map((call) => call.id ?? '')
+    .filter((id) => id.length > 0)
+  if (ids.length < 2) return undefined
+  // Projection order IS content order (projectEvent maps the calls in sequence).
+  const ordered = role === 'start' ? ids : [...ids].reverse()
+  for (const id of ordered) {
+    const ref = byRaw[`${seq}#${id}`]
+    if (ref !== undefined) return ref
+  }
+  return undefined
+}
+
 async function handleCompress(env: ToolEnvironment, args: CompressArgs, exec: ToolRunContext): Promise<TextOutput> {
   const agent = requireAgent(exec)
   const session = agent.session
@@ -444,13 +518,15 @@ async function handleCompress(env: ToolEnvironment, args: CompressArgs, exec: To
     const endSeq = parseBoundary(range.endSeq, byRef)
     let resolved: ResolvedSurfaceRange
     try {
-      // Balance edges FIRST: the requested edges may sit on multi-tool-call
-      // assistant messages, which project to `${seq}#${callId}` CoreMessage ids
-      // and therefore have NO bare-`${seq}` ref. resolveSurfaceRange shifts them
-      // to clean tool-pairing-balanced cuts that always carry a bare ref, so the
-      // resolved refs exist and the shadowed span matches the returned range.
-      // Edges shadowed by an earlier compression (stale nudge table / old
-      // compress result) are remapped to the still-live content of the span.
+      // Balance edges FIRST: the requested edges may sit mid-pair or on nodes
+      // that project no bare-`${seq}` id (multi-tool-call assistants project to
+      // `${seq}#${callId}` sub-ids; empty tool results project to nothing —
+      // issue #155). resolveSurfaceRange shifts them to clean
+      // tool-pairing-balanced cuts that ANCHOR (bare ref, sub-id, or the
+      // empty-result fallback — see edgeRefForSeq), so the resolved refs exist
+      // and the shadowed span matches the returned range. Edges shadowed by an
+      // earlier compression (stale nudge table / old compress result) are
+      // remapped to the still-live content of the span.
       resolved = resolveSurfaceRange(session, startSeq, endSeq)
     } catch (error) {
       if (error instanceof AlreadyCompressedRangeError) {
@@ -485,8 +561,8 @@ async function handleCompress(env: ToolEnvironment, args: CompressArgs, exec: To
     // (tier 2/3) instead of folding the summary as a plain message.
     const startBlockRef = blockRefForSummarySeq(session, resolved.start)
     const endBlockRef = blockRefForSummarySeq(session, resolved.end)
-    const startRef = startBlockRef ?? byRaw[String(resolved.start)]
-    const endRef = endBlockRef ?? byRaw[String(resolved.end)]
+    const startRef = startBlockRef ?? edgeRefForSeq(session, byRaw, resolved.start, 'start', resolved.end)
+    const endRef = endBlockRef ?? edgeRefForSeq(session, byRaw, resolved.end, 'end', resolved.start)
     if (startRef === undefined || endRef === undefined) {
       throw new Error(
         `billion-context-dsh: seq ${resolved.start}..${resolved.end} has no assigned ref — `

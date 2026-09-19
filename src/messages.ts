@@ -28,8 +28,8 @@ import { eventAtOf, sessionEventsOf } from './session-events.ts'
  * one-line placeholder instead of vanishing (issue #117). An `image`/`file`
  * block used to contribute nothing, which silently made a picture-only user
  * message — or a tool result carrying a screenshot — invisible to the engine:
- * no ref (so no compress boundary), `hasPlainRef` false (so the range solver
- * shrank past it and swallowed neighbours), invisible to the kernel's
+ * no ref (so no compress boundary), `anchorsRangeEdge` false (so the range
+ * solver shrank past it and swallowed neighbours), invisible to the kernel's
  * recent/last-user protection (so the last real user turn could be compressed
  * away), priced at zero tokens, and absent from search/decompress output. The
  * host itself projects non-text references to deterministic handle text for
@@ -94,7 +94,14 @@ interface ToolCallBlock {
   arguments?: unknown
 }
 
-function toolCallsOf(content: unknown): ToolCallBlock[] {
+/**
+ * The tool-call blocks of one assistant content array, in CONTENT order.
+ * Shared with the range-edge layer (src/region.ts `anchorsRangeEdge`,
+ * src/tools.ts `edgeRefForSeq`): projection order IS this order (projectEvent
+ * maps the calls in sequence), so "the node's first/last sub-message id" is
+ * derivable from it without re-implementing the filter anywhere else.
+ */
+export function toolCallsOf(content: unknown): ToolCallBlock[] {
   if (!Array.isArray(content)) return []
   return content.filter((b): b is ToolCallBlock => (b as { type?: string }).type === 'tool-call')
 }

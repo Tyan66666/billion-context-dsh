@@ -5,7 +5,7 @@
 DSH 会话里 `image` / `file` 块没有字符内容，而引擎的每一层都用文本估算器看会话。一个块没有字符，于是：
 
 1. **投影丢弃**：`extractText`（`src/messages.ts`）只取 `type: 'text'` 块，图片/文件块静默丢弃；`projectEvent` 对"图片-only"的 user 消息返回空数组 —— 这条消息在 acp-kernel 视图里**根本不存在**，没有 ref，因此
-   - 不能作为压缩边界：`hasPlainRef`（`src/region.ts`）要求事件文本非空，于是 `resolveSurfaceRange` 向内收缩时越过它、把邻接内容一起吞掉；收缩失败时报的却是 "no tool-pairing-balanced range"（与真因无关）；
+    - 不能作为压缩边界：边界谓词（当时为 `hasPlainRef`，现为 `anchorsRangeEdge`，`src/region.ts`）要求事件文本非空，于是 `resolveSurfaceRange` 向内收缩时越过它、把邻接内容一起吞掉；收缩失败时报的却是 "no tool-pairing-balanced range"（与真因无关）；
    - 不受内核保护：`handleCompress` 交给内核的 `coreMessages` 里没有它，内核的"最近尾 + 最近一条 user 消息"保护（`protectedMessageIds`）看不到它 —— **截图会话里最后一条消息常常就是图片-only 的提问，它可以被整段压掉**。Dousy 侧的"最后一条真实 user 消息"保护只在范围表路径（`buildCompressibleSeqRanges`）生效。
 2. **两套标尺混印**：nudge 的压力闸门用 `resolveTokenCount` → `sessionProjections.contextPressure.projectedTokens`（provider 口径，含图片 token），而 `acp_status` 的上下文分解、nudge 范围表、`/acp status` 的块统计全部用 `defaultCountTokens(extractEventText(...))`（纯文本口径）。picture 密集会话里两条数字来自两个世界，偏差约等于所有图片的价格（单张图千级 token 被记 0）。
 3. **压缩优先级误导**：范围表按 tokens 排序，图片密集区间显示 ~0 token，模型于是优先压"看起来最不占空间"的内容。

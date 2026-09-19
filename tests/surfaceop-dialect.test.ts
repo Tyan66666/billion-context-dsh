@@ -155,9 +155,9 @@ test('issue #136: a system prompt NOT at seq 0 stays out of the surface (mid-ses
 
 test('issue #136: live-path resolution has an explicit system-node guard (defense in depth)', () => {
   // Regression for the review note: resolveSurfaceRange previously excluded
-  // system nodes only INCIDENTALLY (hasPlainRef's default branch returns
-  // false). The explicit guard is now part of cleanBefore/cleanAfter, so a
-  // range whose edge falls on a system node snaps past it.
+  // system nodes only INCIDENTALLY (anchorsRangeEdge returns false for them).
+  // The explicit guard is now part of cleanBefore/cleanAfter, so a range whose
+  // edge falls on a system node snaps past it.
   const session = Session.create('surfaceop-live-guard')
   appendTurn(session, 1)                                     // seq 0
   appendUser(session, longText('q1', 1))                  // seq 1

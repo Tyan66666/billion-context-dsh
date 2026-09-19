@@ -20,7 +20,7 @@ import {
   shadowedSeqsOf,
   stripOrphanedSurfaceToolMessages,
 } from '../src/region.ts'
-import { appendTurn, appendToolCall, appendToolResult, appendMultiToolCall, appendUser, appendAssistant, buildTextSession, longText, wholeSurfaceRangeView } from './helpers.ts'
+import { appendTurn, appendToolCall, appendToolResult, appendEmptyToolResult, appendMultiToolCall, appendUser, appendAssistant, buildTextSession, longText, wholeSurfaceRangeView } from './helpers.ts'
 
 test('M2: AcpStateStore initialises one state per session', () => {
   const store = new AcpStateStore()
@@ -374,26 +374,76 @@ test('M5: tool-call ranges are auto-adjusted to balanced edges', () => {
   assert.throws(() => resolveSurfaceRange(session, 99, 100), /not in the current surface/)
 })
 
-test('M5: multi-tool-call boundaries are shifted to plain-ref cuts', () => {
+test('M5: multi-tool-call messages anchor compress ranges directly (issue #155)', () => {
   const session = Session.create('multi')
   appendTurn(session, 1)
   appendUser(session, longText('msg', 0))                     // seq 1
-  appendMultiToolCall(session, 'plan', ['c1', 'c2'], 1, 1)   // seq 2 (2 calls: no bare ref)
+  appendMultiToolCall(session, 'plan', ['c1', 'c2'], 1, 1)   // seq 2 (sub-ids 2#c1/2#c2)
   appendToolResult(session, longText('res', 0), 'c1', 1, 1)  // seq 3
   appendToolResult(session, longText('res', 1), 'c2', 1, 1)  // seq 4
   appendUser(session, longText('msg', 1))                     // seq 5
   // surface: [1 user, 2 multi-call, 3 res, 4 res, 5 user]
-  // An edge on the multi-call message (2) is NOT a valid boundary: it has no
-  // bare-seq ref. The start shrinks inward to the nearest clean cut (5); the
-  // request collapses to a single plain-ref message rather than crossing the
-  // unresolved multi-call round.
-  assert.deepEqual(resolveSurfaceRange(session, 2, 5), { start: 5, end: 5 })
+  // Pre-#155 the multi-call message had no bare-`${seq}` ref and was treated
+  // as an un-balancable wall: every span touching it either collapsed or was
+  // rejected. Cutting BEFORE it at a balanced point is safe (its own calls
+  // pair inside), so it now anchors its own round directly:
+  assert.deepEqual(resolveSurfaceRange(session, 2, 5), { start: 2, end: 5 })
+  // An interior edge still shrinks past the open call pair to the next cut.
   assert.deepEqual(resolveSurfaceRange(session, 3, 5), { start: 5, end: 5 })
-  // A lone multi-call message cannot shrink at all, so it EXPANDS outward to
-  // the smallest clean enclosing pair — the whole call/result round (1..4).
-  assert.deepEqual(resolveSurfaceRange(session, 2, 2), { start: 1, end: 4 })
+  // A lone multi-call message expands outward — but only to its own
+  // call/result round (2..4), no longer swallowing the previous user turn.
+  assert.deepEqual(resolveSurfaceRange(session, 2, 2), { start: 2, end: 4 })
   // A clean text range that merely CONTAINS the multi-call round is unchanged.
   assert.deepEqual(resolveSurfaceRange(session, 1, 5), { start: 1, end: 5 })
+})
+
+test('M5: consumed parallel clusters with empty results resolve (issue #155)', () => {
+  const session = Session.create('deadzone')
+  appendTurn(session, 1)
+  appendUser(session, longText('q0', 0))                            // seq 1
+  appendMultiToolCall(session, 'plan', ['a', 'b'], 1, 1)            // seq 2
+  appendEmptyToolResult(session, 'a', 1, 1)                         // seq 3 (projects to nothing)
+  appendToolResult(session, longText('res', 0), 'b', 1, 1)          // seq 4
+  appendMultiToolCall(session, 'plan2', ['c', 'd'], 1, 2)           // seq 5
+  appendEmptyToolResult(session, 'c', 1, 2)                         // seq 6 (projects to nothing)
+  appendEmptyToolResult(session, 'd', 1, 2)                         // seq 7 (projects to nothing)
+  appendAssistant(session, longText('reply', 1), 1, 3)              // seq 8 (in-flight tail)
+  // surface: [1, 2, 3, 4, 5, 6, 7, 8]
+  // The fully-consumed cluster 5..7 sits right before an in-flight node: every
+  // cut after it is unbalanced and its own nodes carry no refs, so pre-#155
+  // this span was a permanent dead zone ("no tool-pairing-balanced range").
+  // Now the multi-call node 5 anchors the start and the empty results anchor
+  // their cuts (their balance is well-defined): the whole cluster resolves.
+  assert.deepEqual(resolveSurfaceRange(session, 6, 7), { start: 5, end: 7 })
+  assert.deepEqual(resolveSurfaceRange(session, 6, 6), { start: 5, end: 7 })
+  // The earlier cluster (2..4) used to over-swallow the preceding user turn
+  // (old result {1,4}); the multi-call node 2 is itself a clean start cut.
+  assert.deepEqual(resolveSurfaceRange(session, 2, 4), { start: 2, end: 4 })
+  assert.deepEqual(resolveSurfaceRange(session, 3, 4), { start: 2, end: 4 })
+})
+
+test('M5: a dead zone behind a spliced checkpoint resolves (issue #155)', () => {
+  const session = Session.create('cp-deadzone')
+  appendTurn(session, 1)
+  appendUser(session, longText('q0', 0))                            // seq 1
+  appendMultiToolCall(session, 'plan', ['c1', 'c2'], 1, 1)          // seq 2
+  appendEmptyToolResult(session, 'c1', 1, 1)                        // seq 3
+  appendToolResult(session, longText('res', 0), 'c2', 1, 1)         // seq 4
+  appendMultiToolCall(session, 'plan2', ['c3', 'c4'], 1, 2)         // seq 5
+  appendEmptyToolResult(session, 'c3', 1, 2)                        // seq 6
+  appendToolResult(session, longText('res', 1), 'c4', 1, 2)         // seq 7
+  // A compaction of 1..4 splices the checkpoint ahead of the residuals.
+  session.append('user/message', createUserMessage({
+    content: [{ type: 'text', text: longText('summary', 0) }],
+    source: { kind: 'user', plugin: 'compact' },
+  }), { surfaceOp: { op: 'replace', startSeq: 1, endSeq: 4 }, sourceEventSeqs: [1, 2, 3, 4] })
+  // nodes: [8, 5, 6, 7] — NON-monotonic: checkpoint seq 8 ahead of residual
+  // 5..7. Pre-#155, expanding any request on 5..7 walked DOWNWARD across the
+  // checkpoint (its only "clean" predecessor) into a value-reversed 8..7 span
+  // and threw; now node 5 anchors the start and the round lands directly.
+  assert.deepEqual(resolveSurfaceRange(session, 6, 7), { start: 5, end: 7 })
+  assert.deepEqual(resolveSurfaceRange(session, 6, 6), { start: 5, end: 7 })
+  assert.deepEqual(resolveSurfaceRange(session, 5, 7), { start: 5, end: 7 })
 })
 
 test('M5: pass-2 expansion must not cross a checkpoint into value-reversed seqs', () => {
@@ -415,16 +465,37 @@ test('M5: pass-2 expansion must not cross a checkpoint into value-reversed seqs'
   // nodes: [8, 2, 3, 4, 5, 6, 7] — NON-monotonic: the newer checkpoint seq 8
   // sits ahead of the older residual nodes 2..7 (the live production shape
   // behind the '110295..106762' reversed nudge range).
-  // The whole multi-call round 2..6 has no clean inward cut, so pass-2 expands
-  // the start toward the checkpoint; the resulting span 8..6 is value-reversed
-  // and must be rejected instead of being shadowed.
-  assert.throws(() => resolveSurfaceRange(session, 2, 6), /balanced range|reversed/)
-  // The residual round alone (3..6) collapses too and must not cross the
-  // checkpoint either.
-  assert.throws(() => resolveSurfaceRange(session, 3, 6), /balanced range|reversed/)
+  // Pre-#155 the multi-call round had no anchorable edge, so pass-2 expanded
+  // the start across the checkpoint into a value-reversed 8..6 span that had
+  // to be REJECTED. Node 2 now anchors its own round directly, so both
+  // requests land on it without touching the checkpoint — the regression is
+  // fixed at the source instead of by rejection.
+  assert.deepEqual(resolveSurfaceRange(session, 2, 6), { start: 2, end: 6 })
+  assert.deepEqual(resolveSurfaceRange(session, 3, 6), { start: 2, end: 6 })
   // A span that does not touch the unresolved round still resolves cleanly:
   // the trailing user message is a plain-ref boundary on both sides.
   assert.deepEqual(resolveSurfaceRange(session, 6, 7), { start: 7, end: 7 })
+})
+
+test('M5: range rows bounded by multi-call sub-ids survive ref translation (issue #155)', () => {
+  const session = Session.create('subid-row')
+  appendTurn(session, 1)
+  appendUser(session, longText('q0', 0))                     // seq 1
+  appendMultiToolCall(session, 'plan', ['c1', 'c2'], 1, 1)   // seq 2 (sub-ids 2#c1/2#c2)
+  appendToolResult(session, longText('res', 0), 'c1', 1, 1)  // seq 3
+  appendToolResult(session, longText('res', 1), 'c2', 1, 1)  // seq 4
+  appendUser(session, longText('q1', 1))                     // seq 5 (last user turn: protected)
+  // The kernel bounds its ranges by CoreMessage ids — for a multi-call node
+  // that is a `${seq}#${callId}` SUB-id. Pre-#155, seqOfKernelRef ran Number()
+  // on such an id (NaN) and silently DROPPED the whole row from the model's
+  // compressible table; the call-id suffix is now stripped before parsing.
+  const view = {
+    ranges: [{ startRef: 'm00001', endRef: 'm00002' }],
+    refs: { byRef: { m00001: '2#c1', m00002: '4' } },
+  }
+  const rows = buildCompressibleSeqRanges(session, view, { preserveRecent: 0 })
+  assert.equal(rows.length, 1, 'the sub-id-bounded row survives ref translation')
+  assert.deepEqual({ start: rows[0]!.start, end: rows[0]!.end }, { start: 2, end: 4 })
 })
 
 test('M5: ledger backfills shadowedTokenCount for legacy blocks written as 0', () => {

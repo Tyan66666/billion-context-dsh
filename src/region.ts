@@ -30,6 +30,7 @@ import {
   isCheckpointNode,
   isRealUserTurn,
   toolCallIdOfResultEvent,
+  toolCallsOf,
   withSummaryFramePrefix,
 } from './messages.ts'
 import { hostMediaStructuralPrice, hostPriceEvent } from './host-tokens.ts'
@@ -109,33 +110,49 @@ export function assertNoActiveCompaction(events: readonly SessionEvent[]): void 
 }
 
 /**
- * Whether the surface node at `seq` projects to CoreMessage(s) whose ref key
- * is the bare seq — user messages, tool results, and text-only or SINGLE
- * tool-call assistant messages all do. Multi-tool-call assistant messages
- * project to `${seq}#${callId}` ids (projectEvent) and therefore carry NO
- * bare-`${seq}` ref, so compress's byRaw lookup can never resolve them as
- * range edges. resolveSurfaceRange treats such edges as unbalanced and shifts
- * them to the nearest clean cut.
+ * Whether the surface node at `seq` may ANCHOR a compress range edge — i.e. a
+ * balanced cut here maps onto kernel refs that name the shadowed span.
+ *
+ * The predecessor of this predicate was `hasPlainRef`, which answered "does
+ * this node project to a CoreMessage whose id is the bare seq?" That conflated
+ * being a legal cut (a tool-pairing question, decided by the host helpers)
+ * with carrying a bare-seq id (an id-dialect detail), and it permanently
+ * dead-zoned two real shapes (issue #155):
+ *
+ * - A MULTI-TOOL-CALL assistant message projects to `${seq}#${callId}`
+ *   sub-messages (projectEvent) — no bare id — yet cutting BEFORE it at a
+ *   balanced point is exactly safe: every earlier pair is already closed, and
+ *   the node's own calls pair with results INSIDE any span that starts here.
+ *   Such a node can never be a legal END edge anyway (its open calls make
+ *   every cut after it unbalanced), so only the start side matters. The ref
+ *   layer maps the edge onto the node's sub-ids (edgeRefForSeq in tools.ts).
+ * - An EMPTY tool result projects to NO message at all. It carries no
+ *   characters, so anchoring a cut on it loses nothing; the host's pairing
+ *   balance counts it like any other result (-1), so balance at its cuts is
+ *   well-defined. The ref layer falls back to the nearest message-bearing
+ *   node inside the span.
+ *
+ * Everything else keeps the old rule: a user turn anchors only with non-empty
+ * text (an empty user message projects to nothing and is almost always the
+ * protected last turn); a call-less assistant anchors only with non-empty
+ * text; system nodes never anchor.
  */
-function hasPlainRef(session: Session, seq: number): boolean {
+function anchorsRangeEdge(session: Session, seq: number): boolean {
   const event = eventAtOf(session, seq)
   if (event === undefined) return false
+  if (isSystemNode(event)) return false
   switch (event.type) {
     case 'user/message':
-    case 'tool/result':
       return extractEventText(event).trim().length > 0
     case 'assistant/message': {
       const content = (event.data as { message?: { content?: unknown } }).message?.content
-      const calls = Array.isArray(content)
-        ? content.filter(
-            (block) => block !== null && typeof block === 'object' && (block as { type?: string }).type === 'tool-call',
-          )
-        : []
-      if (calls.length > 1) return false
-      // One tool-call: projectEvent emits a bare-seq CoreMessage unconditionally.
-      // Zero: only when the text is non-empty.
-      return calls.length === 1 || extractEventText(event).trim().length > 0
+      // Any tool-call count (including multi-call, which anchors via its
+      // `${seq}#${callId}` sub-ids) or non-empty text makes the node a valid
+      // edge; only a fully empty projection is not.
+      return toolCallsOf(content).length > 0 || extractText(content).trim().length > 0
     }
+    case 'tool/result':
+      return true
     default:
       return false
   }
@@ -221,14 +238,15 @@ export interface ResolvedSurfaceRange {
 
 /**
  * Validate one inclusive surface span and adjust its edges to a
- * tool-pairing-balanced range whose boundaries carry a bare-seq ref. Reversed
- * ranges throw. An edge that sits inside a tool-call/result pair — or on a
- * multi-tool-call assistant message that has no bare-seq ref — is first nudged
- * inward to the nearest clean cut; if that collapses the range (e.g. the model
- * asked for a SINGLE tool result, which can never be balanced alone), the
- * range EXPANDS outward to the enclosing clean pair instead — a lone tool
- * message is almost always a "consumed output" the model genuinely wants to
- * compress. The returned range is what a caller should actually shadow.
+ * tool-pairing-balanced range whose boundaries anchor (bare-`${seq}` ref,
+ * multi-call sub-id, or empty-result fallback — see anchorsRangeEdge,
+ * issue #155). Reversed ranges throw. An edge that sits inside a
+ * tool-call/result pair is first nudged inward to the nearest clean cut; if
+ * that collapses the range (e.g. the model asked for a SINGLE tool result,
+ * which can never be balanced alone), the range EXPANDS outward to the
+ * enclosing clean pair instead — a lone tool message is almost always a
+ * "consumed output" the model genuinely wants to compress. The returned range
+ * is what a caller should actually shadow.
  *
  * Missing edges are NOT an immediate error: the seqs were probably shadowed by
  * an earlier compression (stale nudge table / old compress result). The span
@@ -284,25 +302,25 @@ export function resolveSurfaceRange(
   if (start > end) {
     throw new Error(`billion-context-dsh: reversed range ${start}..${end}`)
   }
-  // A boundary must be BOTH tool-pairing-balanced AND carry a bare-seq ref.
-  // A boundary must be BOTH tool-pairing-balanced AND carry a bare-seq ref,
-  // and never a host system prompt. The system check is explicit, not
-  // incidental: `hasPlainRef` happens to return false for `system/message`,
-  // but riding that default would silently invert if the projection ever
-  // learns to emit a bare-seq ref for system nodes.
+  // A boundary must be BOTH tool-pairing-balanced AND anchorable: the cut must
+  // map onto kernel refs that name the shadowed span (bare-`${seq}` id, a
+  // multi-call node's `${seq}#${callId}` sub-ids, or the empty-result fallback
+  // — see anchorsRangeEdge / edgeRefForSeq). The system-node exclusion is
+  // incidental: anchorsRangeEdge returns false for `system/message`, so keep it
+  // explicit rather than relying on the coincidence.
   const cleanBefore = (index: number): boolean => {
-    const event = eventAtOf(session, nodes[index]!)
-    return event !== undefined
-      && !isSystemNode(event)
-      && toolPairingBalancedBefore(session, nodes[index]!)
-      && hasPlainRef(session, nodes[index]!)
+    const node = nodes[index]!
+    const event = eventAtOf(session, node)
+    if (event === undefined || isSystemNode(event)) return false
+    if (!toolPairingBalancedBefore(session, node)) return false
+    return anchorsRangeEdge(session, node)
   }
   const cleanAfter = (index: number): boolean => {
-    const event = eventAtOf(session, nodes[index]!)
-    return event !== undefined
-      && !isSystemNode(event)
-      && toolPairingBalancedAfter(session, nodes[index]!)
-      && hasPlainRef(session, nodes[index]!)
+    const node = nodes[index]!
+    const event = eventAtOf(session, node)
+    if (event === undefined || isSystemNode(event)) return false
+    if (!toolPairingBalancedAfter(session, node)) return false
+    return anchorsRangeEdge(session, node)
   }
   let startIdx = requestedStartIdx
   let endIdx = requestedEndIdx
@@ -1011,8 +1029,11 @@ function seqOfKernelRef(refs: KernelRangeView['refs'], ref: string): number | nu
   const id = refs.byRef[ref]
   if (id === undefined) return null
   // Our CoreMessage ids ARE surface seqs (src/messages.ts), so the kernel's ref
-  // map is the bridge between the two id dialects.
-  const seq = Number(id)
+  // map is the bridge between the two id dialects. Multi-tool-call messages
+  // project to `${seq}#${callId}` sub-ids (issue #155) — strip the suffix so a
+  // kernel range bounded by such a sub-id still resolves to its surface node
+  // instead of silently vanishing from the nudge table.
+  const seq = Number(String(id).split('#')[0])
   return Number.isInteger(seq) ? seq : null
 }
 

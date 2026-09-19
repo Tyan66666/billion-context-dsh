@@ -228,10 +228,10 @@ test('#117: an image-only user message now has a ref and a plain-ref boundary', 
   assert.equal(projected[0]?.id, String(imageEvent.seq), 'with its surface seq as the kernel ref')
   assert.match(String(projected[0]?.text), /^\[image /, 'carrying the placeholder as its text')
 
-  // `hasPlainRef` (src/region.ts) requires non-empty event text for a
+  // `anchorsRangeEdge` (src/region.ts) requires non-empty event text for a
   // user/message — this is that precondition, and the range solver can now
   // treat the message as a boundary instead of shrinking past it.
-  assert.ok(extractEventText(imageEvent).trim().length > 0, 'event text is non-empty → hasPlainRef true')
+  assert.ok(extractEventText(imageEvent).trim().length > 0, 'event text is non-empty → anchorsRangeEdge true')
 })
 
 test('#117: the range table prices media spans and marks them; text-only sessions never measure', () => {

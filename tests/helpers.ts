@@ -69,7 +69,8 @@ export function appendToolResult(session: Session, text: string, callId: string,
 /**
  * An assistant message carrying MULTIPLE tool-call blocks in one content list —
  * the real DSH shape whose projection yields `${seq}#${callId}` CoreMessage
- * ids (no bare `${seq}` ref, so it can never be a compress range edge).
+ * sub-ids (no bare `${seq}` ref; a legal range edge only on its START side —
+ * issue #155).
  */
 export function appendMultiToolCall(session: Session, text: string, callIds: readonly string[], turn = 1, step = 1): void {
   session.append('assistant/message', {
@@ -84,6 +85,25 @@ export function appendMultiToolCall(session: Session, text: string, callIds: rea
       provider: 'test-provider',
       model: 'test-model',
     }),
+  }, { surfaceOp: 'append' })
+}
+
+/**
+ * A tool result with EMPTY content (e.g. a grep/glob that matched nothing) —
+ * the real DSH shape whose projection yields NO CoreMessage at all, so it
+ * carries no kernel ref of any kind (issue #155). dsh-session accepts the
+ * empty nested content array.
+ */
+export function appendEmptyToolResult(session: Session, callId: string, turn = 1, step = 1): void {
+  session.append('tool/result', {
+    turn,
+    step,
+    message: {
+      id: `res-${callId}`,
+      role: 'user',
+      content: [{ type: 'tool-result', toolCallId: callId, content: [] }],
+      source: { kind: 'tool', callId },
+    },
   }, { surfaceOp: 'append' })
 }
 
