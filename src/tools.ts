@@ -369,6 +369,40 @@ export function protectedRowRejectionNote(start: number, end: number, hits: read
   return `  seqs ${start}..${end} rejected — the span covers ${hits.length} CURRENT injected instruction row(s) (seq ${preview}${more}); the host re-injects the newest AGENTS.md copy the moment it leaves the surface, so compressing it reclaims nothing — ${recovery} (older/stale copies of the same file are fine to compress)`
 }
 
+/**
+ * Resolve the kernel ref for a range edge whose surface node projects no
+ * bare-`${seq}` CoreMessage. Three attempts, in order:
+ *
+ * 1. the exact bare id (`String(seq)`) — the common shape;
+ * 2. a `${seq}#callId` child id — a multi-tool-call assistant message
+ *    projects one child per call, and every child anchors the SAME surface
+ *    node, so any child's ref pins the edge;
+ * 3. the nearest EARLIER live surface node that carries a ref — an empty
+ *    tool result projects nothing at all (`projectEvent` returns `[]`), and
+ *    the block simply ends one content-less node short. Walking the SURFACE
+ *    (not raw id space) keeps the fallback from anchoring on an already
+ *    shadowed message.
+ *
+ * Returns undefined only when nothing on the surface before `seq` carries a
+ * ref, which the caller reports as a hard error.
+ */
+function nearestRefForSeq(session: Session, byRaw: Readonly<Record<string, string>>, seq: number): string | undefined {
+  const exact = byRaw[String(seq)]
+  if (exact !== undefined) return exact
+  const prefix = `${seq}#`
+  for (const [id, ref] of Object.entries(byRaw)) {
+    if (id.startsWith(prefix)) return ref
+  }
+  const nodes = session.surface.nodes
+  for (let index = nodes.length - 1; index >= 0; index -= 1) {
+    const node = nodes[index]!
+    if (node >= seq) continue
+    const earlier = byRaw[String(node)]
+    if (earlier !== undefined) return earlier
+  }
+  return undefined
+}
+
 async function handleCompress(env: ToolEnvironment, args: CompressArgs, exec: ToolRunContext): Promise<TextOutput> {
   const agent = requireAgent(exec)
   const session = agent.session
@@ -400,7 +434,6 @@ async function handleCompress(env: ToolEnvironment, args: CompressArgs, exec: To
   // exist here; the deterministic re-assignment yields the same mN for the
   // same messages (see parseBoundary).
   const byRef = turn.state.messageRefs.byRef
-
   // Tolerate the wrapped-arguments forms some models emit (double-nested
   // `{ arguments: "..." }`), which the old DSH validator surfaced as
   // `"arguments" must be an object` and sent the model into a retry loop.
@@ -444,12 +477,14 @@ async function handleCompress(env: ToolEnvironment, args: CompressArgs, exec: To
     const endSeq = parseBoundary(range.endSeq, byRef)
     let resolved: ResolvedSurfaceRange
     try {
-      // Balance edges FIRST: the requested edges may sit on multi-tool-call
-      // assistant messages, which project to `${seq}#${callId}` CoreMessage ids
-      // and therefore have NO bare-`${seq}` ref. resolveSurfaceRange shifts them
-      // to clean tool-pairing-balanced cuts that always carry a bare ref, so the
-      // resolved refs exist and the shadowed span matches the returned range.
-      // Edges shadowed by an earlier compression (stale nudge table / old
+      // Balance edges FIRST: the requested edges may sit on nodes whose
+      // pairing balance or ref shape needs care. resolveSurfaceRange keeps
+      // edges that both pair-balance AND anchor a ref (`anchorsRangeEdge`,
+      // src/region.ts — this includes multi-tool-call assistant messages
+      // and empty tool results, whose refs `nearestRefForSeq` resolves),
+      // shifts the rest to the nearest such cut, and expands a collapsed
+      // lone-tool request outward to the smallest enclosing pair. Edges
+      // shadowed by an earlier compression (stale nudge table / old
       // compress result) are remapped to the still-live content of the span.
       resolved = resolveSurfaceRange(session, startSeq, endSeq)
     } catch (error) {
@@ -485,8 +520,8 @@ async function handleCompress(env: ToolEnvironment, args: CompressArgs, exec: To
     // (tier 2/3) instead of folding the summary as a plain message.
     const startBlockRef = blockRefForSummarySeq(session, resolved.start)
     const endBlockRef = blockRefForSummarySeq(session, resolved.end)
-    const startRef = startBlockRef ?? byRaw[String(resolved.start)]
-    const endRef = endBlockRef ?? byRaw[String(resolved.end)]
+    const startRef = startBlockRef ?? nearestRefForSeq(session, byRaw, resolved.start)
+    const endRef = endBlockRef ?? nearestRefForSeq(session, byRaw, resolved.end)
     if (startRef === undefined || endRef === undefined) {
       throw new Error(
         `billion-context-dsh: seq ${resolved.start}..${resolved.end} has no assigned ref — `

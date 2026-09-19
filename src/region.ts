@@ -109,32 +109,45 @@ export function assertNoActiveCompaction(events: readonly SessionEvent[]): void 
 }
 
 /**
- * Whether the surface node at `seq` projects to CoreMessage(s) whose ref key
- * is the bare seq — user messages, tool results, and text-only or SINGLE
- * tool-call assistant messages all do. Multi-tool-call assistant messages
- * project to `${seq}#${callId}` ids (projectEvent) and therefore carry NO
- * bare-`${seq}` ref, so compress's byRaw lookup can never resolve them as
- * range edges. resolveSurfaceRange treats such edges as unbalanced and shifts
- * them to the nearest clean cut.
+ * Whether the surface node at `seq` can anchor a compress range edge.
+ *
+ * Most anchoring shapes project a bare-`${seq}` CoreMessage — user messages,
+ * tool results with text, and text-only or single-tool-call assistant
+ * messages. Two shapes project NO bare-seq id and still anchor an edge,
+ * because `handleCompress` resolves their refs through `nearestRefForSeq`
+ * (src/tools.ts):
+ *
+ * - a MULTI-tool-call assistant message projects `${seq}#${callId}` children;
+ *   any child ref anchors the same surface node.
+ * - an EMPTY tool result projects nothing at all (`projectEvent` returns
+ *   `[]`); the nearest earlier ref stands in for the edge, and the empty node
+ *   carries no content the compressed block could lose.
+ *
+ * Rejecting these two shapes here made whole consumed clusters permanently
+ * incompressible: a run of multi-call rounds and empty results has no
+ * plain-ref node at its edges, so there is no clean cut to shrink or expand
+ * to, and `resolveSurfaceRange` threw "no tool-pairing-balanced range" for
+ * every range that touched the cluster.
  */
-function hasPlainRef(session: Session, seq: number): boolean {
+function anchorsRangeEdge(session: Session, seq: number): boolean {
   const event = eventAtOf(session, seq)
   if (event === undefined) return false
   switch (event.type) {
     case 'user/message':
-    case 'tool/result':
       return extractEventText(event).trim().length > 0
+    case 'tool/result':
+      // Empty results anchor too — the ref comes from `nearestRefForSeq`.
+      return true
     case 'assistant/message': {
+      // Any assistant message with at least one tool-call or non-empty text
+      // anchors; multi-call ones resolve through a `${seq}#callId` child.
       const content = (event.data as { message?: { content?: unknown } }).message?.content
       const calls = Array.isArray(content)
         ? content.filter(
             (block) => block !== null && typeof block === 'object' && (block as { type?: string }).type === 'tool-call',
           )
         : []
-      if (calls.length > 1) return false
-      // One tool-call: projectEvent emits a bare-seq CoreMessage unconditionally.
-      // Zero: only when the text is non-empty.
-      return calls.length === 1 || extractEventText(event).trim().length > 0
+      return calls.length >= 1 || extractEventText(event).trim().length > 0
     }
     default:
       return false
@@ -295,14 +308,14 @@ export function resolveSurfaceRange(
     return event !== undefined
       && !isSystemNode(event)
       && toolPairingBalancedBefore(session, nodes[index]!)
-      && hasPlainRef(session, nodes[index]!)
+      && anchorsRangeEdge(session, nodes[index]!)
   }
   const cleanAfter = (index: number): boolean => {
     const event = eventAtOf(session, nodes[index]!)
     return event !== undefined
       && !isSystemNode(event)
       && toolPairingBalancedAfter(session, nodes[index]!)
-      && hasPlainRef(session, nodes[index]!)
+      && anchorsRangeEdge(session, nodes[index]!)
   }
   let startIdx = requestedStartIdx
   let endIdx = requestedEndIdx

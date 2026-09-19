@@ -28,7 +28,7 @@ import { eventAtOf, sessionEventsOf } from './session-events.ts'
  * one-line placeholder instead of vanishing (issue #117). An `image`/`file`
  * block used to contribute nothing, which silently made a picture-only user
  * message — or a tool result carrying a screenshot — invisible to the engine:
- * no ref (so no compress boundary), `hasPlainRef` false (so the range solver
+ * no ref (so no compress boundary), `anchorsRangeEdge` false (so the range solver
  * shrank past it and swallowed neighbours), invisible to the kernel's
  * recent/last-user protection (so the last real user turn could be compressed
  * away), priced at zero tokens, and absent from search/decompress output. The

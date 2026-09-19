@@ -69,7 +69,9 @@ export function appendToolResult(session: Session, text: string, callId: string,
 /**
  * An assistant message carrying MULTIPLE tool-call blocks in one content list —
  * the real DSH shape whose projection yields `${seq}#${callId}` CoreMessage
- * ids (no bare `${seq}` ref, so it can never be a compress range edge).
+ * ids (no bare `${seq}` ref; `nearestRefForSeq` resolves the edge through a
+ * child, so the node CAN anchor a compress range edge — see region.ts
+ * `anchorsRangeEdge`).
  */
 export function appendMultiToolCall(session: Session, text: string, callIds: readonly string[], turn = 1, step = 1): void {
   session.append('assistant/message', {

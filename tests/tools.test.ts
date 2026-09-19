@@ -962,14 +962,15 @@ function buildMultiCallSession(): Session {
   return session
 }
 
-test('M3: compress expands a lone multi-tool-call boundary to the clean pair', async () => {
+test('M3: compress resolves a lone multi-tool-call boundary through its child refs', async () => {
   const env = makeEnv()
   const session = buildMultiCallSession()
   const compress = toolOf(env, 'compress')
   // seq 2 is a multi-tool-call assistant message: it has NO bare '2' ref (the
-  // projection keys are '2#c1' / '2#c2'), so a naive byRaw lookup fails. A lone
-  // request on it expands outward to the smallest clean enclosing pair — the
-  // whole call/result round (1..4) — whose edges are plain-ref messages.
+  // projection keys are '2#c1' / '2#c2'), so a naive byRaw lookup fails. The
+  // edge now anchors through its child refs (`nearestRefForSeq`), and the lone
+  // request resolves to the balanced round 2..4 — the multi-call node itself
+  // plus its results — leaving the preceding user message live.
   const result = await compress.execute({
     content: [{
       startSeq: 2,
@@ -981,7 +982,39 @@ test('M3: compress expands a lone multi-tool-call boundary to the clean pair', a
   assert.match((result as { text: string }).text, /Compressed 1 block/)
   const ledger = rebuildBlockLedger(session.snapshotEvents())
   assert.equal(ledger.length, 1)
-  assert.deepEqual(ledger[0]!.shadowedSeqs, [1, 2, 3, 4])
+  assert.deepEqual(ledger[0]!.shadowedSeqs, [2, 3, 4])
+})
+
+test('M3: compress resolves a consumed cluster of multi-call parents and an empty result', async () => {
+  const env = makeEnv()
+  const session = Session.create('cluster')
+  appendTurn(session, 1)
+  appendMultiToolCall(session, 'plan', ['c1', 'c2'], 1, 1)   // seq 1
+  appendToolResult(session, longText('res', 0), 'c1', 1, 1)  // seq 2
+  appendToolResult(session, '', 'c2', 1, 1)                  // seq 3 (empty result)
+  appendMultiToolCall(session, 'plan2', ['c3', 'c4'], 1, 2)  // seq 4
+  appendToolResult(session, longText('res', 1), 'c3', 1, 2)  // seq 5
+  appendToolResult(session, longText('res', 2), 'c4', 1, 2)  // seq 6
+  appendUser(session, longText('msg', 0))                    // seq 7
+  const compress = toolOf(env, 'compress')
+  // Every edge here used to fail the boundary predicate: the two multi-call
+  // parents project `${seq}#${callId}` ids and the empty result projects
+  // nothing at all, so the cluster had no plain-ref cut to shrink or expand
+  // to and EVERY compress touching it died with "no tool-pairing-balanced
+  // range" (the live-session deadlock). Now the start anchors through a child
+  // ref and the empty end falls back to the nearest earlier live ref.
+  const result = await compress.execute({
+    content: [{
+      startSeq: 1,
+      endSeq: 6,
+      summary: 'This summary is long enough to pass the kernel minimum length threshold of fifty characters for the compressible content range.',
+    }],
+  } as never, fakeExec(session))
+
+  assert.match((result as { text: string }).text, /Compressed 1 block/)
+  const ledger = rebuildBlockLedger(session.snapshotEvents())
+  assert.equal(ledger.length, 1)
+  assert.deepEqual(ledger[0]!.shadowedSeqs, [1, 2, 3, 4, 5, 6])
 })
 
 test('M3: compress shadows multi-tool-call messages inside a clean range', async () => {
