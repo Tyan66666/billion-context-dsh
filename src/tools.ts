@@ -430,9 +430,10 @@ function anchorRefForNode(
   const event = eventAtOf(session, seq)
   if (event?.type !== 'assistant/message') return undefined
   const content = (event.data as { message?: { content?: unknown } }).message?.content
-  const ids = toolCallsOf(content)
-    .map((call) => call.id ?? '')
-    .filter((id) => id.length > 0)
+  // The projection emits one sub-message PER CALL, including calls whose id is
+  // absent (keyed `${seq}#`), so the gate must mirror that trigger exactly:
+  // fewer than 2 calls means this node projected to a bare seq (tier 1 above).
+  const ids = toolCallsOf(content).map((call) => call.id ?? '')
   if (ids.length < 2) return undefined
   // Projection order IS content order (projectEvent maps the calls in sequence).
   const ordered = role === 'start' ? ids : [...ids].reverse()
