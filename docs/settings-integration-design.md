@@ -1,10 +1,10 @@
 # 运行时设置集成设计（Settings Integration Design）— v2
 
 > **目标**：让 `AcpConfig` 中适合运行时调整的数值项（上下文窗口、nudge 阈值、自动开关）接入宿主
-> `ctx.settings` 设置体系——用户改 `~/.dsh/settings.yaml` 即热生效，无需重启；并提供 `/acp config`
+> `ctx.settings` 设置体系——用户改 `~/.dsh/settings.yaml` 即热生效，无需重启；并提供 `/acp-prune config`
 > 斜杠命令在任意模式（TUI/web/headless）读写同一份配置。
 >
-> **范围声明**：本文档只覆盖**阶段一（宿主侧设置接缝）+ 阶段一b（`/acp config` 子命令）**。
+> **范围声明**：本文档只覆盖**阶段一（宿主侧设置接缝）+ 阶段一b（`/acp-prune config` 子命令）**。
 > 浏览器端设置卡片是阶段三：rc.6 时代被宿主 `WEB_SETTINGS_NAMESPACES` 白名单硬编码阻塞；
 > **2026-09-06 勘探确认 0.1.2 线上门禁已解除**（见 §5「浏览器设置卡片·勘探更新」），
 > 剩余工作是自建 client 卡片/页（需按 0.1.2 客户端重勘后设计）。
@@ -112,7 +112,7 @@
 
 - src/tools.ts:92 — `windowForEnv` 回退分支读 `env.modelContextLimit`；
 - src/tools.ts:271 与 tools.ts:681 — compress/status 工具内 `kernelConfigFor({ ...env, modelContextLimit: window.limit })`；
-- src/commands.ts:54 — `/acp status` 同款 spread；
+- src/commands.ts:54 — `/acp-prune status` 同款 spread；
 - src/index.ts:299 — pre-step 门 `if (!this.config.autoNudge) return next()`；
 - src/index.ts:302-305 — `buildNudge(payload.agent, { ...env, modelContextLimit: window.limit }, …)`；
 - src/index.ts:347-379 — `windowFor`：显式 `this.config.modelContextLimit` 直通分支 +
@@ -133,7 +133,7 @@
                       → base = 组合行 config 的【过滤后子集】(§4.2)
                       → 用户层 ~/.dsh/settings.yaml 的 compaction-acp section
 写入入口：            手编 ~/.dsh/settings.yaml（provider publish 热生效）
-                      或 /acp config set|reset（service.update/replace）
+                      或 /acp-prune config set|reset（service.update/replace）
 消费方式：            引擎 env 的标量字段改为活源 getter（§4.3）；onChange 清窗口缓存
 ```
 
@@ -262,7 +262,7 @@ if (this.config.settingsEnabled !== false) {   // kill switch，见下
       setSource: (current) => { source = current },        // 官方接线：换活源
       onChange: () => { applySettingsChange() },
     })
-    // /acp config 用的服务句柄（同一次注入内捕获；installSection 不吐 scope，不重复注册 namespace）
+    // /acp-prune config 用的服务句柄（同一次注入内捕获；installSection 不吐 scope，不重复注册 namespace）
     this.settingsService = settingsCtx.settings
   })
 }
@@ -311,7 +311,7 @@ private onSettingsChanged(prev: AcpSettings, next: AcpSettings): void {
   （§6 测试 11 显式锁定这条语义）。
 - **不动的东西**：`kernelConfigFor` 合并逻辑（src/config.ts）、`lastNudgeTurn`、
   `compressCallIdsToHide`、系统提示词 section（文案不含任何阈值数字，阈值变化不影响提示词）、
-  四个工具与 `/acp` 命令的注册。
+  四个工具与 `/acp-prune` 命令的注册。
 
 ### 4.5 validate 的宽严边界（宁松勿紧）
 
@@ -321,10 +321,10 @@ private onSettingsChanged(prev: AcpSettings, next: AcpSettings): void {
 变成启动失败——违背「不破坏现有定制部署」。今天的引擎对任意数值组合都不拒绝（kernel 内部自行
 处理退化情形），所以设置层的写校验不得严于现状。
 
-### 4.6 `/acp config` 子命令（阶段一b）
+### 4.6 `/acp-prune config` 子命令（阶段一b）
 
 挂在现有 `acpCommand`（src/commands.ts:141-150 的 status|compress|decompress 之后）：
-`/acp config [set <key> <value> | reset <key>|all]`。
+`/acp-prune config [set <key> <value> | reset <key>|all]`。
 
 - **服务句柄获取**：`SettingsProvider.installSection` 不吐 scope，但 service 级 API 够用。0.1.5 线
   `installSection` 是 provider 方法、必须在注入回调里调用，所以服务引用就在**同一次注入**内捕获
@@ -335,26 +335,26 @@ private onSettingsChanged(prev: AcpSettings, next: AcpSettings): void {
     this.settingsService = settingsCtx.settings
   })
   ```
-  effect 清理时置回 undefined。`/acp config` 执行时若服务缺席（TUI 纯净 profile 等），
+  effect 清理时置回 undefined。`/acp-prune config` 执行时若服务缺席（TUI 纯净 profile 等），
   输出一句人话：「设置服务在本 profile 未启用，请改用 cordis.patch.yml 的 compaction-acp 行配置」。
-- **`/acp config`（列表）**：`settings.describe()` 过滤出本 namespace，渲染
+- **`/acp-prune config`（列表）**：`settings.describe()` 过滤出本 namespace，渲染
   `键 | 生效值 | 来源(default/base/user)` 表——descriptor 同时带 base 与原始 user 层，
   「user 层含该键」即标记覆盖。若组合层存在同名 `coreOverrides.nudge.*`，在表尾加一行脚注：
   「nudge 阈值的实际产物以 coreOverrides 为准（它最后合并）」——否则列表展示的设置层生效值会
   高估自己的权威（评审核验过的误导场景）。
-- **`/acp config set <key> <value>`**：value 解析规则（评审 B3 的教训——裸 `JSON.parse` 会把
+- **`/acp-prune config set <key> <value>`**：value 解析规则（评审 B3 的教训——裸 `JSON.parse` 会把
   最常见的小数写法弄坏）：
   1. trim 后先匹配字面量 `'true'`/`'false'` → boolean；
   2. 再试 `Number(value)`，有限数即取数字（覆盖 `.7`、`128000`、`1e5` 等一切 JS 数字面量；
      JSON.parse 不接受前导小数点，`.7` 会静默退化成字符串再被 schema 拒掉）；
   3. `'null'`/`null` → 不走 set，转单键 reset 语义（删 user 层该键；「清回探测模式」的正规
-     入口是 `/acp config reset modelContextLimit`，输出文案里明示）；
+     入口是 `/acp-prune config reset modelContextLimit`，输出文案里明示）；
   4. 其余走 `JSON.parse` 兜底字符串（带引号的键名等），失败则报错并附正确用法示例。
   然后 `settings.update(ACP_SETTINGS_NAMESPACE, { [key]: value })`。捕获
   `SettingsConflictError` → 提示「配置刚被其他入口修改，请重试」；校验失败把 service 的报错原文
   （含路径）透出。成功输出注明热生效语义（如涉及窗口键则注明「窗口缓存已清，下次步骤重新探测」），
   并注明首版未用乐观锁（同键并发写为静默后者胜）。
-- **`/acp config reset <key>|all`**：从 descriptor 读原始 user section，删键（或 `all` →
+- **`/acp-prune config reset <key>|all`**：从 descriptor 读原始 user section，删键（或 `all` →
   `replace({})` 整体重置回 base+默认）。merge-only patch 表达不了删除，必须走 replace/mutate。
   输出必须讲清楚回落到哪：「reset to composition base (0.80) — schema default is 0.70;
   change the compaction-acp composition row or override via coreOverrides if you want a different
@@ -365,8 +365,8 @@ private onSettingsChanged(prev: AcpSettings, next: AcpSettings): void {
   不会把 `this.config` 的对象/函数值带进设置层（规则 3 不破）。两条 reset 路径与 `set` 共用同一段
   `SettingsConflictError` 映射，避免并发写冲突以裸 rejection 逃逸。
 - 命令全程进程内调用，**不经过 wire 白名单**，TUI/web/headless 通吃；web 端设置页看不到本
-  namespace 是预期行为（§8），`/acp config` 就是 web 模式下的替代入口。
-- 输出文案遵守仓库「plain-language」规范；与现有 `/acp status` 输出风格一致（英文正文）。
+  namespace 是预期行为（§8），`/acp-prune config` 就是 web 模式下的替代入口。
+- 输出文案遵守仓库「plain-language」规范；与现有 `/acp-prune status` 输出风格一致（英文正文）。
 
 ### 4.7 依赖与打包
 
@@ -462,13 +462,13 @@ coreOverrides.nudge.X  >  settings.yaml compaction-acp.X / 组合行 config.X（
 11. **autoNudge 翻转**：false→true 时 `lastNudgeTurn.clear()` 被调用；true→false 不清。
 12. **schema 边界实测**：`min(0).max(1)` 是否含边界——0 与 1 必须通过、1.0000001 被拒；
     `modelContextLimit` 的 `.step(1).min(1)`：1 通过、0 与小数被拒。
-13. **/acp config**：列表输出含来源标记 + coreOverrides 脚注；set 合法/非法键（含 `.7` 小数、
+13. **/acp-prune config**：列表输出含来源标记 + coreOverrides 脚注；set 合法/非法键（含 `.7` 小数、
     `'null'` 转 reset、垃圾串报错文案）；reset 单键与 all 的回落值展示；服务缺席时的降级文案。
 14. **peer-range**：`tests/peer-range.test.ts` 把 dsh-settings 并入 `seamPeers`（五项）共用 0.1.5 断言。
 15. **全量回归**：现有 162+ 测试全绿——env 形状不变是前提，任何下游测试红都说明接线侵入了
     不该侵入的地方。
 16. **合并评审补齐的回归锁定**（每条都带「改前值 / 改后值」双断言，所以按老代码运行必红）：filtered `base` 入口 +
-    `/acp config list` 来源列；seam → `windowFor` 门（设置层的 `autoModelContextLimit: false` 必须让窗口路径
+    `/acp-prune config list` 来源列；seam → `windowFor` 门（设置层的 `autoModelContextLimit: false` 必须让窗口路径
     不再走 projection）；`kernelConfigFor` 产物含新 pct；provider 单独 detach 后回落组合值（走 inject disposer）；
     单键 reset 保留手写键。
 
@@ -476,7 +476,7 @@ coreOverrides.nudge.X  >  settings.yaml compaction-acp.X / 组合行 config.X（
 
 - README.md / README.en.md：配置表标注哪些键可热调（用 ✅/— 脚注式标记，不重构现有
   键/默认值/含义三列结构）；新增「运行时设置」节（settings.yaml 示例 + 优先级总表 +
-  「reset 回落到组合行 base」的说明 + `/acp config` 用法）。
+  「reset 回落到组合行 base」的说明 + `/acp-prune config` 用法）。
 - docs/INSTALL.md：组合选项处补一段「settings.yaml 是运行时覆盖层」。
 - docs/settings-integration-design.md：本文。
 - AGENTS.md：模块图加 `src/settings.ts # M6`; 若实现中发现新的坑，沉淀为 hard-won rule
@@ -524,7 +524,7 @@ v2 状态：R1–R5 已由评审核验关闭，遗留两个实现期验证门（
     `.step(1).min(1)`（§4.1）；
   - 【阻断】onChange 引用构造期闭包 prev 是悬垂 bug（helper 不透传 watch 的 next/prev）→
     自维护 `lastApplied` 快照（§4.3）；
-  - 【阻断】`/acp config set` 裸 JSON.parse 弄坏 `.7` 小数与 null 语义 → 四步解析规则 +
+  - 【阻断】`/acp-prune config set` 裸 JSON.parse 弄坏 `.7` 小数与 null 语义 → 四步解析规则 +
     null 转 reset（§4.6）；
   - 【阻断】缺 kill switch → 组合层专属 `settingsEnabled`（默认 true，故意不进 schema）（§4.3、§2）；
   - 【修正】base 过滤理由改写：register 不校验 base、object 解析器非 strict 透传未知键进

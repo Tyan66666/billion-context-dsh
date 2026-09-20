@@ -10,12 +10,12 @@
 > - **P2-2**:§6.1 明确 `handleStatus` 调 processTurn 时 `tokenCount` 用 `resolveTokenCount(agent, surfaceMessages)`(遵守硬性规则 2),且**不持久化 turn.state**(避免同 turn 二次推进 nudge 基线;`Nudge:` 行只用 `turn.nudge.reason`)。
 > - **P2-3**:§9 scope 钻取后续项加 ref 兼容性预警(`seq#callId` 自映射值在 `renderUncompressedRanges`/`renderMessageDrilldown` 的 `/\d+/` 解析与连续合并逻辑下语义漂移)。
 > - **P2-4**:§4.3/§6.5 "抽共享渲染函数"降级为**可选、仅共享 ledger→块行片段**(改后两路径分叉,共享面极小;现状两函数本就有差异:handleStatus 有 surface 行、statusText 有 `[T${tier}]` 标签)。
-> - **P2-5**:§8.2.3 ACTIVE 态测试构造补强(需同时满足 usage≥阈值 且 pending≥`minCompressRange`,否则 reason 落 "nudge suppressed");§4.3 的 /acp 示例删去 surface 行(当前 `statusText` 不输出该行)。
+> - **P2-5**:§8.2.3 ACTIVE 态测试构造补强(需同时满足 usage≥阈值 且 pending≥`minCompressRange`,否则 reason 落 "nudge suppressed");§4.3 的 /acp-prune 示例删去 surface 行(当前 `statusText` 不输出该行)。
 > - **P2-6**:§4.2 块排序措辞修正——overview 块列表按 `compressedTokens desc || createdAt desc`(`index.js:2472-2474`),非 numericPart 序(numericPart 仅用于 buildRecap)。
 
 ## 0. 结论先行（TL;DR）
 
-把模型工具 `acp_status` 的输出从"移植版自研格式（含 `estimated context: X / Y (Z%)` 与 `context window: Y (source)` 两行窗口语义）"改为**复用 acp-kernel 自带的 `buildStatusReport`** 渲染 `CONTEXT BREAKDOWN` + `COMPRESSED BLOCKS`（百分比为**占可见总量**、不含窗口），并拼接 kernel nudge 决策行的 `Nudge: idle/ACTIVE — reason`。**模型可见的 acp_status 不再出现任何上下文窗口信息**，与上游 billion-context-pi 一致；人类 `/acp` 斜杠命令保留窗口展示（上游 `/acp` 面板同样展示窗口）。kernel 升级提示词/渲染逻辑时本引擎零改动自动跟随（复用 `renderNudgeText` 的既有模式）。
+把模型工具 `acp_status` 的输出从"移植版自研格式（含 `estimated context: X / Y (Z%)` 与 `context window: Y (source)` 两行窗口语义）"改为**复用 acp-kernel 自带的 `buildStatusReport`** 渲染 `CONTEXT BREAKDOWN` + `COMPRESSED BLOCKS`（百分比为**占可见总量**、不含窗口），并拼接 kernel nudge 决策行的 `Nudge: idle/ACTIVE — reason`。**模型可见的 acp_status 不再出现任何上下文窗口信息**，与上游 billion-context-pi 一致；人类 `/acp-prune` 斜杠命令保留窗口展示（上游 `/acp-prune` 面板同样展示窗口）。kernel 升级提示词/渲染逻辑时本引擎零改动自动跟随（复用 `renderNudgeText` 的既有模式）。
 
 ## 1. 背景与目标
 
@@ -41,7 +41,7 @@ ACP status — session <id>
 | 路径 | 输出 | 是否含窗口 |
 |---|---|---|
 | 模型工具 `acp_status`（`src/status-tool.ts` → kernel `buildStatusReport`） | `CONTEXT BREAKDOWN`（tool/text/summaries 估算 + **占可见总量百分比**）+ `COMPRESSED BLOCKS` + `Nudge: idle/ACTIVE — reason` + `Checkpoint seqs`（active 块的 `bN → seq` 蒸馏入口，issue #60 P2）+ `Surface:` 行 | **否** |
-| 人类 `/acp` 命令（`src/commands.ts` → `buildStatusPanel`，billion-context-kit） | 面板：tokenCount + modelContextLimit + 进度条等 | **是**（人类排查需要） |
+| 人类 `/acp-prune` 命令（`src/commands.ts` → `buildStatusPanel`，billion-context-kit） | 面板：tokenCount + modelContextLimit + 进度条等 | **是**（人类排查需要） |
 
 移植版目前**两条路径共用同一份自研格式**（`src/tools.ts` 的 `handleStatus` 与 `src/commands.ts` 的 `statusText` 结构相同），导致模型工具也被迫看到窗口行。
 
@@ -49,7 +49,7 @@ ACP status — session <id>
 
 1. **模型工具 `acp_status` 对齐上游**：输出 `CONTEXT BREAKDOWN` + `COMPRESSED BLOCKS` + `Nudge` 行（+ 保留移植版 `surface` 行，见 §4.4），**删除 `estimated context` 与 `context window` 两行**；
 2. **复用 acp-kernel 自带接口**：用 `buildStatusReport` / kernel nudge reason 渲染，引擎只做拼装，不自研格式（与上游 status-tool 的职责划分一致）；
-3. **人类 `/acp` 命令保留窗口**：与上游 `/acp` 面板一致，窗口信息仍是人类排查的有效手段（`window.ts` 探测逻辑不动）；
+3. **人类 `/acp-prune` 命令保留窗口**：与上游 `/acp-prune` 面板一致，窗口信息仍是人类排查的有效手段（`window.ts` 探测逻辑不动）；
 4. **kernel 升级零改动**：与 `config.prompts` 默认路径复用 `renderNudgeText`（`src/nudge.ts:183`）同理，acp_status 渲染完全由 kernel 提供文案，kernel 更新提示词/格式时本引擎自动跟随；
 5. **默认输出字节对齐上游**（除 §4.4 surface 行为移植版特有扩展）。
 
@@ -59,7 +59,7 @@ ACP status — session <id>
 
 1. **kernel 有现成的 → 直接调用，不复制**。kernel 提供渲染函数（`buildStatusReport` / `formatRanges` / nudge reason / `renderNudgeText`），引擎只拼装、不复制文案到本项目。kernel 升级提示词时本引擎零改动自动跟随（本设计 §4.1 的 `CONTEXT BREAKDOWN` / `COMPRESSED BLOCKS` / `Tip:` 即此例）。
 2. **kernel 没有、pi 有 → 与 pi 保持一致，复制过来**。kernel 明确不拥有的 surface-level 文本（工具描述、状态行拼装格式）归 adapter 层（pi 插件源码），此类与 pi 逐字对齐（本设计 §4.4 的 `Nudge:` 行、§4.5 工具描述即此例）。
-3. **两者都没有、或不符合本项目 → 用自己的**。DSH 特有的 seq 锚点语义（`Surface:` 行）、schema 不支持的参数说明（scope 钻取，`statusParameters = {}`）、未引入的依赖（billion-context-kit 的 `/acp` 面板）——此类用移植版自己的文案，不做无谓对齐。
+3. **两者都没有、或不符合本项目 → 用自己的**。DSH 特有的 seq 锚点语义（`Surface:` 行）、schema 不支持的参数说明（scope 钻取，`statusParameters = {}`）、未引入的依赖（billion-context-kit 的 `/acp-prune` 面板）——此类用移植版自己的文案，不做无谓对齐。
 
 > 边界判定依据：kernel `dist/prompts.d.ts` 头注释明确声明 *"Surface-level text (summary section headers, status-report chrome, tool descriptions) is intentionally NOT part of this interface — it is owned by the adapter"*——工具描述等 surface 文本按 kernel 自身设计归 adapter 层，因此 §4.5 复制 pi 的 description 属于第 2 条，不是"kernel 有却复制"。
 
@@ -69,8 +69,8 @@ ACP status — session <id>
 |---|---|---|
 | 模型工具 handler | `src/tools.ts:665-731` `handleStatus` | 自研：`rebuildBlockLedger` + `resolveTokenCount` + `env.windowFor` 手工拼行 |
 | 工具描述 | `src/prompts.ts:212`（`DEFAULT_RESOLVED.tools.acpStatus`） | `"Report the ACP block ledger: compressed blocks, reclaimed tokens, and current context pressure."` |
-| 人类命令 | `src/commands.ts:26-74` `statusText` | 与模型工具同格式（含窗口行）；`/acp` 命令注册于 `src/commands.ts:133-153` |
-| 窗口探测 | `src/window.ts`（`detectContextWindow` / `windowSourceLabel`） | 仍为 nudge 决策与 `/acp` 所需，**保留** |
+| 人类命令 | `src/commands.ts:26-74` `statusText` | 与模型工具同格式（含窗口行）；`/acp-prune` 命令注册于 `src/commands.ts:133-153` |
+| 窗口探测 | `src/window.ts`（`detectContextWindow` / `windowSourceLabel`） | 仍为 nudge 决策与 `/acp-prune` 所需，**保留** |
 | nudge 决策 | `src/nudge.ts:138` `env.kernel.processTurn` → `buildNudge` | 已走 kernel 管线；acp_status 未复用 |
 | nudge 文案 | `src/nudge.ts:183` `renderNudgeText(nudge)` | 默认路径已复用 kernel 文案（v6 R1） |
 | 块账本 | `src/region.ts` `AcpBlockLedgerEntry` + `rebuildBlockLedger` | 自研 ledger，含 `tier`/`shadowedTokenCount`/`kernelBlockId` 等 |
@@ -82,7 +82,7 @@ ACP status — session <id>
 - `tests/tools.test.ts:358`（`M3: acp_status renders the upstream kernel breakdown without window rows`）：断言模型工具输出**不含** `estimated context`/`context window`（`tools.test.ts:370-371,392-393`）；
 - `tests/tools.test.ts:396`（`M3: acp_status uses the auto-detected window for pressure without showing window rows`）：窗口探测仍有效，但模型工具不展示窗口（`tools.test.ts:413-414`）；
 - `tests/tools.test.ts:430`（`M3: acp_status pressure follows the probed window, not the fallback (issue #63 false alarm)`）：小窗口 + `windowFor` → 1M 时 nudge 走 idle（旧代码 25× usage 必挂）。
-- `tests/window.test.ts`：`detectContextWindow` 单元测试——**保留**（窗口仍用于 nudge 与 `/acp`）
+- `tests/window.test.ts`：`detectContextWindow` 单元测试——**保留**（窗口仍用于 nudge 与 `/acp-prune`）
 
 ## 3. 上游基准（kernel 真实渲染结果）
 
@@ -194,13 +194,13 @@ buildStatusReport(state: CompressionState, messages: CoreMessage[], countTokens:
 
 **tokenCount 口径（P2-2）**：`handleStatus` 调 `processTurn` 时 `tokenCount` 用 `resolveTokenCount(agent, surfaceMessages)`（surface 口径，与 `handleCompress`/`buildNudge` 一致，遵守硬性规则 2）；**不持久化 turn.state**（`env.store.set` 不调用），避免同 turn 二次推进 nudge 基线、`Nudge:` 行只用 `turn.nudge.reason`。
 
-**窗口来源（issue #63）**：`config.modelContextLimit` 不再是 `env.modelContextLimit`（128K 初始兜底），而是经 `windowFor(agent)` 探测后的有效窗口——`handleCompress` / `handleStatus` 与人类侧 `statusText` 统一走 `resolveEffectiveWindow(env, agent)`（`src/tools.ts`），再 `kernelConfigFor({ ...env, modelContextLimit: window.limit })`。模型工具只消费探测后的窗口进 nudge 决策（规则 9：窗口行不进工具输出），窗口来源的人类可见性由 `/acp` 的 `context window:` 行承担。
+**窗口来源（issue #63）**：`config.modelContextLimit` 不再是 `env.modelContextLimit`（128K 初始兜底），而是经 `windowFor(agent)` 探测后的有效窗口——`handleCompress` / `handleStatus` 与人类侧 `statusText` 统一走 `resolveEffectiveWindow(env, agent)`（`src/tools.ts`），再 `kernelConfigFor({ ...env, modelContextLimit: window.limit })`。模型工具只消费探测后的窗口进 nudge 决策（规则 9：窗口行不进工具输出），窗口来源的人类可见性由 `/acp-prune` 的 `context window:` 行承担。
 
 **窗口优先读宿主投影（探针路由快照陷阱）**：`agent.options.provider/model` 是会话创建时的路由快照——会话中途切换模型后它不会跟随，`detectContextWindow` 若只探这条路由，会得到**上一模型**的窗口（1M 窗口会话被读成 96K → usage 300%+ 的假 EMERGENCY nudge）。修复：`windowFor`（`src/index.ts`）优先读 `sessionProjections.contextPressure.contextWindow`（宿主按**当前真实路由**披露的最新容量，`dsh-token-meter` 的 `ContextPressureProjection`，`src/window.ts` 的 `projectedContextWindow`），该值每次请求刷新、天然随模型切换自适应且无需重启/配置——注意投影字段按 last-wins 逐字段刷新：切换模型后的**下一次请求**上报之前，`contextWindow` 仍短暂保留旧路由的窗口（一次请求的滞后，随后自愈），并非瞬时切换；无投影时回退到 `llm.resolveModelInfo` 探针（保留原缓存与 128K fallback 语义）。投影来源不在 `windowCache` 缓存——缓存会冻结切模型前的旧窗口整个进程生命周期，与 `(restart to re-probe)` 同源（issue #63 假警报陷阱）。`autoModelContextLimit: false` 时投影与探针均跳过。
 
-### 4.3 人类 `/acp` 命令
+### 4.3 人类 `/acp-prune` 命令
 
-`src/commands.ts:26-74` `statusText` **保留窗口行**（对齐上游 `/acp` 面板语义：人类排查需要窗口）。`/acp` 与模型工具**不强制共用渲染函数**（P2-4）：改后两条路径分叉（模型工具走 kernel 渲染、`/acp` 保留现状窗口格式），且现状两函数本就有差异（`handleStatus` 有 `surface:` 行、`statusText` 无；`statusText` 块行带 `[T${tier}]` 标签、`handleStatus` 不带）。可共享的仅"ledger→块列表行"这一小段，列为可选重构，不引入耦合。`/acp` 输出保持现状：
+`src/commands.ts:26-74` `statusText` **保留窗口行**（对齐上游 `/acp-prune` 面板语义：人类排查需要窗口）。`/acp-prune` 与模型工具**不强制共用渲染函数**（P2-4）：改后两条路径分叉（模型工具走 kernel 渲染、`/acp-prune` 保留现状窗口格式），且现状两函数本就有差异（`handleStatus` 有 `surface:` 行、`statusText` 无；`statusText` 块行带 `[T${tier}]` 标签、`handleStatus` 不带）。可共享的仅"ledger→块列表行"这一小段，列为可选重构，不引入耦合。`/acp-prune` 输出保持现状：
 
 ```
 ACP status — session <id>          ← 保留（人类友好）
@@ -211,16 +211,16 @@ ACP status — session <id>          ← 保留（人类友好）
   - b1: seqs 1..5 — Refactor auth to JWT...
 ```
 
-即：`/acp` 保留现状窗口格式，模型工具走 kernel 渲染——两条路径各自对齐上游的对应路径。
+即：`/acp-prune` 保留现状窗口格式，模型工具走 kernel 渲染——两条路径各自对齐上游的对应路径。
 
-**探测失败提示（issue #63，措辞随运行时设置更新）**：`windowFor` 探测失败（网关未披露窗口/探测抛错）时，该窗口对象带 `probeFailed: true`，且失败结果与成功结果一样被缓存（`src/index.ts` `windowCache`）。重新探测的路径有两条：改 `modelContextLimit`/`autoModelContextLimit`（`/acp config`，改动会清空窗口缓存）或**重启**，因此提示文案明确写 `(change modelContextLimit or autoModelContextLimit via /acp config — or restart — to re-probe)`。此时 `/acp` 在 `context window:` 行之后、`nudge:` 行之前追加一行提示：
+**探测失败提示（issue #63，措辞随运行时设置更新）**：`windowFor` 探测失败（网关未披露窗口/探测抛错）时，该窗口对象带 `probeFailed: true`，且失败结果与成功结果一样被缓存（`src/index.ts` `windowCache`）。重新探测的路径有两条：改 `modelContextLimit`/`autoModelContextLimit`（`/acp-prune config`，改动会清空窗口缓存）或**重启**，因此提示文案明确写 `(change modelContextLimit or autoModelContextLimit via /acp-prune config — or restart — to re-probe)`。此时 `/acp-prune` 在 `context window:` 行之后、`nudge:` 行之前追加一行提示：
 
 ```
-  context window: 128000 (default (auto-detection failed — see /acp config))
-  ⚠ window auto-detection failed — using the 128000 fallback (change modelContextLimit or autoModelContextLimit via /acp config — or restart — to re-probe)
+  context window: 128000 (default (auto-detection failed — see /acp-prune config))
+  ⚠ window auto-detection failed — using the 128000 fallback (change modelContextLimit or autoModelContextLimit via /acp-prune config — or restart — to re-probe)
 ```
 
-同时 `windowFor` 在探测失败时写一条 `ctx.logger.warn`（宿主日志），文案同样带 `/acp config` 指引。显式配置 `modelContextLimit`、探测成功、`autoModelContextLimit: false` 三种情况均不带 `probeFailed` 标志（`windowSourceLabel` 的 default 文案借此区分 failed 与 unavailable）。模型工具 `acp_status` 不展示该提示——规则 9 约束窗口语义不进模型工具输出，探测失败的人类可见性由 `/acp` 与宿主日志承担。
+同时 `windowFor` 在探测失败时写一条 `ctx.logger.warn`（宿主日志），文案同样带 `/acp-prune config` 指引。显式配置 `modelContextLimit`、探测成功、`autoModelContextLimit: false` 三种情况均不带 `probeFailed` 标志（`windowSourceLabel` 的 default 文案借此区分 failed 与 unavailable）。模型工具 `acp_status` 不展示该提示——规则 9 约束窗口语义不进模型工具输出，探测失败的人类可见性由 `/acp-prune` 与宿主日志承担。
 
 ### 4.4 保留/删除清单（模型工具 `acp_status`）
 
@@ -234,7 +234,7 @@ ACP status — session <id>          ← 保留（人类友好）
 | `estimated context: X / Y (Z%)` | ❌ 删除 | 窗口语义，上游无 |
 | `context window: Y (source)` | ❌ 删除 | 窗口语义，上游无 |
 | `blocks: N` / `tokens compressed: N` | ❌ 删除 | 上游无；由 `COMPRESSED BLOCKS` 承载。注：上游 `N active` 是 **active** 块数（`buildStatusReport` 只列 active 块），而 DSH 现状 `blocks: N` 是**总**块数（含被蒸馏的 inactive 父块）；对齐后模型看不到已蒸馏块总数，与上游语义一致，可接受 |
-| `session <id>` | ❌ 删除（模型工具） | 上游模型工具无 session 头；`/acp` 保留 |
+| `session <id>` | ❌ 删除（模型工具） | 上游模型工具无 session 头；`/acp-prune` 保留 |
 | `Compressible ranges` / `Delegate usage` | ⏸ 暂不实现 | 上游有但依赖 `billion-context-kit`（`viableRanges`/delegate 三件套）；移植版无此依赖，ranges 由 nudge 范围表承载（`src/nudge.ts`）。列入 §9 后续项 |
 
 ### 4.5 工具描述
@@ -254,12 +254,12 @@ scope:'compressed' for block drilldown.
 
 | # | 决策 | 理由 |
 |---|---|---|
-| D1 | 模型工具删窗口行，`/acp` 保留 | 对齐上游"模型无窗口、人类有窗口"的双路径；窗口仍是人类排查手段 |
+| D1 | 模型工具删窗口行，`/acp-prune` 保留 | 对齐上游"模型无窗口、人类有窗口"的双路径；窗口仍是人类排查手段 |
 | D2 | 用 kernel `buildStatusReport` 而非自研 | 上游 status-tool 即此职责划分；百分比"占可见总量"、块列表格式、Tip 行全部逐字复用；kernel 升级自动跟随 |
 | D3 | nudge 行直接用 kernel reason | `buildNudge` 已走 `env.kernel.processTurn`（`nudge.ts:138`）；reason 字符串（`max compressible ... < threshold ...`）由 kernel 生成，零手抄 |
 | D4 | `byRaw` 自映射而非分配真实 mNNNNN ref（且**排除 checkpoint 节点**，P1-3） | overview 不显示 ref（§3.3.4）；分配真实 ref 会与 DSH seq 语义冲突、无收益；排除 checkpoint 杜绝摘要双重计数。**[SUPERSEDED by issue #31]**：kernel 实际分配真实 mNNNNN ref（`assignRefs`），且 compress 已接受 mN（经 `turn.state.messageRefs.byRef` 反查为 live seq）——"无收益"判断已被 mN→seq 适配推翻 |
 | D5 | 保留 `Surface: seqs` 行 | DSH 压缩锚点是 seq（`compress({ startSeq, endSeq })`），删掉模型无法定位范围；上游 ref 语义不适用 |
-| D6 | `session` 头仅 `/acp` 保留 | 上游模型工具无头；人类命令保留便于多会话排查 |
+| D6 | `session` 头仅 `/acp-prune` 保留 | 上游模型工具无头；人类命令保留便于多会话排查 |
 | D7 | Tip 行逐字保留（不裁剪） | 对齐优先；裁剪会造成与上游字节级偏差，且 kernel 升级可能调整该行文案 |
 
 ## 6. 接线改动（逐文件）
@@ -273,7 +273,7 @@ scope:'compressed' for block drilldown.
 3. **`src/prompts.ts`**：更新 `tools.acpStatus` 描述（§4.5）。
 4. **`src/region.ts`**（P2-1，推荐）：`compaction/summary` 事件与 `AcpBlockLedgerEntry` 增记 `topic`（`runCompactionTransaction` 已接收 `input.topic`；`handleCompress` 已传 topic，`tools.ts:301,353,449`）。否则块行恒显 `(no topic)`。若本 PR 不做，§4.1 示例的 `"topic"` 改为 `"(no topic)"` 并在 CHANGELOG 记偏差。
 5. **`src/nudge.ts`**（可选）：抽出 `runKernelTurn(session)` 共享函数供 `buildNudge` 与 `handleStatus` 复用，避免两次 `processTurn` 各算一遍（低优先级，非本 PR 必需）。
-6. **`src/window.ts`**：**不动**（窗口仍用于 nudge 决策与 `/acp`）。
+6. **`src/window.ts`**：**不动**（窗口仍用于 nudge 决策与 `/acp-prune`）。
 7. **`src/index.ts`**：`DEFAULT_CONFIG` 阈值（0.70/0.85）不动（nudge 决策语义与 acp_status 展示解耦）。
 
 ## 7. 与既有设计的一致性
@@ -289,7 +289,7 @@ scope:'compressed' for block drilldown.
 **状态：已由 #64 实施**。改造前的两条测试（`tests/tools.test.ts:173-195` `acp_status reports the block ledger and pressure`、`197-212` `shows the auto-detected context window and source`）已重写为：
 
 - `tests/tools.test.ts:358`（`M3: acp_status renders the upstream kernel breakdown without window rows`）：删除 `context window: 128000 (configured)`、`estimated context:` 断言，新增 `CONTEXT BREAKDOWN` / `COMPRESSED BLOCKS` / `Nudge:` / `Surface:` 断言（空会话 + 压缩后各一，`tools.test.ts:370-371,392-393`）；
-- `tests/tools.test.ts:396`（`M3: acp_status uses the auto-detected window for pressure without showing window rows`）：窗口探测仍有效（`/acp` 路径），但模型工具不再展示窗口——断言模型工具输出**不含** `context window`/`estimated context`，且 `/acp`（`statusText`）仍含。
+- `tests/tools.test.ts:396`（`M3: acp_status uses the auto-detected window for pressure without showing window rows`）：窗口探测仍有效（`/acp-prune` 路径），但模型工具不再展示窗口——断言模型工具输出**不含** `context window`/`estimated context`，且 `/acp-prune`（`statusText`）仍含。
 - `tests/window.test.ts`：不动。
 
 ### 8.2 新增回归
@@ -314,13 +314,13 @@ scope:'compressed' for block drilldown.
 
 **问题**：`buildStatusReport` 的 `COMPRESSED BLOCKS` 块行渲染的是 kernel 块 ref（`b1 (T1) …`），而 `decompress`/`search_context` 原本只接受 compaction UUID（`aa463345-…`）前缀——模型看到 `b1` 调 `decompress({ blockId: 'b1' })` 会 "not found"，模型可见 id 与可用 id 脱节（上游 pi 自洽：块 id 就是 `bN`，`decompress b3` 直接可用）。
 
-**决策（选项 1，优于选项 2）**：让 `decompress`/`/acp decompress` 接受**双 id 空间**——先精确匹配 `bN`（`/^b\d+$/` 锚定，经新增 `blockIdOfKernelRef`（`src/region.ts`）解析为 compaction id），再回退 compaction-id 前缀匹配（search_context 返回的 UUID 继续可用）。**不**在 `handleStatus` 里把 `bN` 文本替换为 UUID（选项 2）——那需要解析 kernel 渲染输出（对 kernel 文案/格式升级脆弱）、无法覆盖 nudge/tier 文本里的 `bN`、且违反硬性规则 9。
+**决策（选项 1，优于选项 2）**：让 `decompress`/`/acp-prune decompress` 接受**双 id 空间**——先精确匹配 `bN`（`/^b\d+$/` 锚定，经新增 `blockIdOfKernelRef`（`src/region.ts`）解析为 compaction id），再回退 compaction-id 前缀匹配（search_context 返回的 UUID 继续可用）。**不**在 `handleStatus` 里把 `bN` 文本替换为 UUID（选项 2）——那需要解析 kernel 渲染输出（对 kernel 文案/格式升级脆弱）、无法覆盖 nudge/tier 文本里的 `bN`、且违反硬性规则 9。
 
 **kernel 兼容性论证（子代理评审确认）**：`blockIdOfKernelRef` 只依赖**自有数据层**（持久化 `kernelBlockId` 字段 + `blockRegistry` 合成逻辑，`region.ts:890-968`），不解析 `buildStatusReport` 文本。kernel 升级改渲染文案/块 id 来源时本方案无感；仅对 §4b 已列出的 "ref assignment 格式" 热区敏感，现有测试网兜底。`rebuildKernelBlocks`（`state.ts:25-86`）与 `blockRegistry` 的 `bN` 合成为同一逻辑——已加**交叉断言测试**（P1-2）防止两处漂移导致同类 id 脱节复发。
 
 **实现要点**：
 - `blockIdOfKernelRef(session, bN): string | null`——精确 `bN` → compaction id；非 `bN` 形态返回 null（调用方回退前缀匹配）；
-- `resolveBlockId`（`src/tools.ts`）先 `blockIdOfKernelRef` 后前缀匹配；`/acp decompress`（`src/commands.ts`）同逻辑（P1-1）；
+- `resolveBlockId`（`src/tools.ts`）先 `blockIdOfKernelRef` 后前缀匹配；`/acp-prune decompress`（`src/commands.ts`）同逻辑（P1-1）；
 - 畸形输入（`b0`/`b01`/`B1`/`b1 `）不归一化，一律 "not found"（P2-6）；
 - 碰撞优先级：`/^b\d+$/` 带 `$` 锚定，UUID 前缀（含 hex）不可能匹配，先 `bN` 后前缀无歧义（P2-5，测试固化）；
 - `search_context` 保持返回 compaction id（`decompress` 接受前缀，闭环成立）（P2-3）；PR #23 落地后消息级命中显示 surface seq（`message seq N`），与压缩参考系同方言。
@@ -328,7 +328,7 @@ scope:'compressed' for block drilldown.
 
 ## 10. 文档同步清单（本 PR 必须完成）
 
-- `README.md:133/152/173`（工具表、acp_status 描述、`autoModelContextLimit` 行——"`acp_status` 展示窗口来源"改为"`/acp` 展示窗口来源"）；
+- `README.md:133/152/173`（工具表、acp_status 描述、`autoModelContextLimit` 行——"`acp_status` 展示窗口来源"改为"`/acp-prune` 展示窗口来源"）；
 - `README.en.md` 对应行（132/151/172）；
 - `docs/INSTALL.md:135`（验证步骤 2："返回块数、压缩 token、估计上下文占用" → "返回 CONTEXT BREAKDOWN、压缩块列表、nudge 状态"）；
 - `docs/README.md`（发布说明 + 模块图 `tools.ts` 描述）；

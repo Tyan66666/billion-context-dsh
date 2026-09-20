@@ -7,7 +7,7 @@
  *    parseSettingValue (incl. the `false` regression), describeSettingsChange
  *    diff flags, command-surface degradation without a service;
  *  - E2E: a REAL engine on a bare cordis Context with an in-memory settings
- *    provider — external edits hot-apply to the live env, /acp config
+ *    provider — external edits hot-apply to the live env, /acp-prune config
  *    list/set/reset round-trips, the kill switch ignores the provider;
  *  - regression locks added in review: the filtered `base` entry, the
  *    seam-to-window gate, the kernelConfigFor output, provider detach
@@ -76,7 +76,7 @@ async function mountEngine(root: Context, config: Partial<AcpConfig> = {}): Prom
   return { fiber, engine }
 }
 
-/** Drive /acp through the real command handler (config paths never touch the agent). */
+/** Drive /acp-prune through the real command handler (config paths never touch the agent). */
 async function runAcp(env: ToolEnvironment, rawInput: string): Promise<string> {
   const command = acpCommand(env)
   const result = await command.handler({
@@ -211,7 +211,7 @@ test('M6: engine env reads LIVE settings — an external edit hot-applies', asyn
   }
 })
 
-test('M6: /acp config list/set/reset round-trips through a real provider', async () => {
+test('M6: /acp-prune config list/set/reset round-trips through a real provider', async () => {
   const root = new Context()
   await root.plugin(MemorySettingsProvider)
   const { fiber, engine } = await mountEngine(root)
@@ -289,7 +289,7 @@ test('M6: installSection registers the FILTERED composition subset as `base`', a
     const descriptor = engine.env.settingsCommand?.describe()
     assert.ok(descriptor !== undefined, 'the settings surface is available')
     // Registering the RESOLVED snapshot instead would make every untouched key
-    // look composed (`source: base`), so /acp config reset would report a
+    // look composed (`source: base`), so /acp-prune config reset would report a
     // composition value the operator never wrote.
     assert.deepEqual(descriptor.base, filterSettingsEntry({ nudgeMaxContextLimitPct: 0.66 }))
     const list = await runAcp(engine.env, 'config')

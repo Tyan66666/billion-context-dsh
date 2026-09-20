@@ -133,7 +133,7 @@ const checksStatus = (result) => {
   list.push(['report has Checkpoint seqs row (distillation entry)', report.includes('Checkpoint seqs'), ''])
   list.push(['report has Surface: seq anchor', report.includes('Surface:'), ''])
   list.push(['report has Nudge decision row', report.includes('Nudge: '), ''])
-  list.push(['report excludes window-semantics rows (human-side /acp)', !report.includes('estimated context') && !report.includes('context window'), ''])
+  list.push(['report excludes window-semantics rows (human-side /acp-prune)', !report.includes('estimated context') && !report.includes('context window'), ''])
   return list
 }
 // Prompt-cache guard at the WIRE level. The request body is the only thing a provider

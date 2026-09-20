@@ -35,7 +35,7 @@
   到此为止。
 - **`autoModelContextLimit: false` / 上限 ≥ 窗口（退化）** — 保持原始行为。
 
-结果携带 `rawLimit` 与 `outputReserved`，因此 `/acp status` 显示
+结果携带 `rawLimit` 与 `outputReserved`，因此 `/acp-prune status` 显示
 `context window: 79616 (raw 96000 − 16384 output reservation; auto)`，
 而不是把算术藏起来。
 
@@ -58,4 +58,4 @@ append，故切换后首次 pre-step 滞后一次请求、随后自愈），以�
 「全有或全无」守卫（缺一半／空串／null／未记录／宿主抛错一律返回 null 并整条
 回退）。压缩事务写进 `compaction/summary` 的
 `provider`/`model` 同样以实时路由为准：`tests/tools.test.ts`（`compress`）与
-`tests/commands.test.ts`（`/acp compress`）各自钉住这两列。
+`tests/commands.test.ts`（`/acp-prune compress`）各自钉住这两列。

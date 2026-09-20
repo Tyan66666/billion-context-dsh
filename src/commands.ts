@@ -1,5 +1,5 @@
 /**
- * M4 — the `/acp` slash command: a human-friendly window into the same
+ * M4 — the `/acp-prune` slash command: a human-friendly window into the same
  * machinery the model tools expose (status, one-shot compress, decompress,
  * runtime settings read/write).
  * @module billion-context-dsh/commands
@@ -77,11 +77,11 @@ async function statusText(env: ToolEnvironment, agent: Agent): Promise<string> {
     )
   }
   // A failed probe falls back to the 128K default AND is cached for the
-  // process lifetime — the /acp panel must say so explicitly, or the operator
+  // process lifetime — the /acp-prune panel must say so explicitly, or the operator
   // can't tell why pressure looks wrong (issue #63: a gateway that disclosed
   // no window read as ~55% of 128K instead of ~18% of the real 1M window).
   if (window.probeFailed === true) {
-    lines.push(`  ⚠ window auto-detection failed — using the ${limit} fallback (change modelContextLimit or autoModelContextLimit via /acp config — or restart — to re-probe)`)
+    lines.push(`  ⚠ window auto-detection failed — using the ${limit} fallback (change modelContextLimit or autoModelContextLimit via /acp-prune config — or restart — to re-probe)`)
   }
   // Nudge arbitration on the SAME inputs the nudge path uses — a read-only
   // diagnostic, so run on a cloned state and never write it back to the store.
@@ -98,7 +98,7 @@ async function statusText(env: ToolEnvironment, agent: Agent): Promise<string> {
       lines.push(`  next nudge: ~${toNudge.toLocaleString()} tokens to go (usage ${Math.round(nudge.contextUsage * 100)}% → ${Math.round(maxPct * 100)}% line)`)
     }
   }
-  // Show ALL blocks, not just the oldest 10: /acp status is how the user
+  // Show ALL blocks, not just the oldest 10: /acp-prune status is how the user
   // confirms recent work survived compression, and the block list is folded
   // in the GUI anyway, so length has no cost (issue #47).
   for (const block of ledger) {
@@ -110,21 +110,21 @@ async function statusText(env: ToolEnvironment, agent: Agent): Promise<string> {
 
 function compressText(env: ToolEnvironment, agent: Agent, args: string[]): string {
   if (args.length < 3) {
-    return '/acp compress <startSeq> <endSeq> <summary...>'
+    return '/acp-prune compress <startSeq> <endSeq> <summary...>'
   }
   const startSeq = Number(args[0])
   const endSeq = Number(args[1])
   const summary = args.slice(2).join(' ')
   if (!Number.isInteger(startSeq) || !Number.isInteger(endSeq)) {
-    return '/acp compress: startSeq and endSeq must be integers'
+    return '/acp-prune compress: startSeq and endSeq must be integers'
   }
   const session = agent.session
   const { start, end } = resolveSurfaceRange(session, startSeq, endSeq)
   // A checkpoint summary node can only be distilled through the kernel (the
-  // compress tool); /acp compress is a plain T1 range transaction, so refuse
+  // compress tool); /acp-prune compress is a plain T1 range transaction, so refuse
   // rather than silently folding the summary as a message.
   if (blockRefForSummarySeq(session, start) !== null || blockRefForSummarySeq(session, end) !== null) {
-    return '/acp compress: the range touches a compressed block summary node — distill it with the compress tool (seq-based batch), not /acp compress'
+    return '/acp-prune compress: the range touches a compressed block summary node — distill it with the compress tool (seq-based batch), not /acp-prune compress'
   }
   // The same hard reject as the compress tool (src/tools.ts): a CURRENT
   // injected instruction row cannot be legitimately compressed by ANY caller,
@@ -164,14 +164,14 @@ function compressText(env: ToolEnvironment, agent: Agent, args: string[]): strin
   return `Compressed seqs ${start}..${end} (${shadowed.length} messages) as block ${compactionId.slice(0, 8)}`
 }
 
-const DECOMPRESS_USAGE = '/acp decompress <blockId> [offset] [limit]'
+const DECOMPRESS_USAGE = '/acp-prune decompress <blockId> [offset] [limit]'
 
 function decompressText(_env: ToolEnvironment, agent: Agent, args: string[]): string {
   if (args.length < 1) return DECOMPRESS_USAGE
   const offset = args[1] === undefined ? 0 : Number(args[1])
   if (!Number.isInteger(offset) || offset < 0) return `${DECOMPRESS_USAGE} — offset must be a non-negative integer`
   const limit = args[2] === undefined ? DEFAULT_DECOMPRESS_PAGE : Number(args[2])
-  // /acp is human-facing, so it rejects out-of-range values loudly (the model
+  // /acp-prune is human-facing, so it rejects out-of-range values loudly (the model
   // tool clamps instead); the ceiling matches the tool's hard cap.
   if (!Number.isInteger(limit) || limit < 1 || limit > DEFAULT_DECOMPRESS_PAGE) return `${DECOMPRESS_USAGE} — limit must be an integer between 1 and ${DEFAULT_DECOMPRESS_PAGE}`
   const session = agent.session
@@ -182,10 +182,10 @@ function decompressText(_env: ToolEnvironment, agent: Agent, args: string[]): st
   const block = blockId === null
     ? ledger.find((entry) => entry.blockId.startsWith(args[0]!))
     : ledger.find((entry) => entry.blockId === blockId)
-  if (block === undefined) return `block "${args[0]}" not found (see /acp status)`
+  if (block === undefined) return `block "${args[0]}" not found (see /acp-prune status)`
   // Tier-2/3 blocks shadow parent checkpoint nodes: expand to the originals.
   // Same char-budget paging as the model tool so a normal page stays under the
-  // host pruner threshold; /acp renders bare text (no `[seq N]` prefix), so
+  // host pruner threshold; /acp-prune renders bare text (no `[seq N]` prefix), so
   // renderLen prices the raw message text.
   const expanded = expandShadowedSeqs(session, block.blockId)
   const page = sliceDecompressPage(
@@ -208,18 +208,18 @@ function decompressText(_env: ToolEnvironment, agent: Agent, args: string[]): st
     `Block ${block.blockId} — ${block.summary}`,
     `[messages ${page.offset + 1}..${page.offset + page.seqs.length} of ${page.total}]`,
   ]
-  if (!page.exhausted) lines.push(`Continue with: /acp decompress ${block.blockId.slice(0, 8)} ${page.offset + page.seqs.length}`)
+  if (!page.exhausted) lines.push(`Continue with: /acp-prune decompress ${block.blockId.slice(0, 8)} ${page.offset + page.seqs.length}`)
   lines.push('', parts.join('\n\n') || '(no recoverable content)')
   return lines.join('\n')
 }
 
-/** Register the /acp command (idempotent per engine). */
+/** Register the /acp-prune command (idempotent per engine). */
 export function acpCommand(env: ToolEnvironment): CommandDefinition {
   return {
-    name: 'acp',
+    name: 'acp-prune',
     description:
       'Active Context Pruning — model-driven context compression. '
-      + 'Usage: /acp status | /acp compress <startSeq> <endSeq> <summary> | /acp decompress <blockId> [offset] [limit] | /acp config [list|set <key> <value>|reset <key>|all]',
+      + 'Usage: /acp-prune status | /acp-prune compress <startSeq> <endSeq> <summary> | /acp-prune decompress <blockId> [offset] [limit] | /acp-prune config [list|set <key> <value>|reset <key>|all]',
     handler: async (invocation) => {
       const raw = invocation.rawInput.trim()
       if (raw === '' || raw === 'status') {
@@ -234,7 +234,7 @@ export function acpCommand(env: ToolEnvironment): CommandDefinition {
       if (raw.startsWith('decompress')) {
         return { kind: 'success', text: decompressText(env, invocation.agent, raw.slice('decompress'.length).trim().split(/\s+/)) }
       }
-      return { kind: 'error', text: `unknown /acp subcommand "${raw.split(/\s+/)[0]}" — use status | compress | decompress | config` }
+      return { kind: 'error', text: `unknown /acp-prune subcommand "${raw.split(/\s+/)[0]}" — use status | compress | decompress | config` }
     },
   }
 }
@@ -251,7 +251,7 @@ function isSettingsKey(key: string): key is SettingsKey {
 /** Uniform wording for a failed settings write — the same copy `configSetText` shows. */
 function settingsWriteFailure(error: unknown): string {
   if (error instanceof SettingsConflictError) {
-    return 'conflict: another writer changed this setting at the same time — run /acp config again'
+    return 'conflict: another writer changed this setting at the same time — run /acp-prune config again'
   }
   return `rejected: ${String(error)}`
 }
@@ -284,7 +284,7 @@ function configListText(surface: SettingsCommandSurface | undefined): string {
   }
   lines.push('', '  changes apply to running sessions immediately (no restart)')
   lines.push('  coreOverrides (composition layer) merge LAST and beat these values on same-name keys')
-  lines.push('  /acp config reset <key> returns the key to the composition row / engine default')
+  lines.push('  /acp-prune config reset <key> returns the key to the composition row / engine default')
   return lines.join('\n')
 }
 
@@ -299,7 +299,7 @@ async function configSetText(surface: SettingsCommandSurface | undefined, key: s
   const parsed = parseSettingValue(rawValue)
   if (!parsed.ok) return parsed.reason
   if (parsed.value === null) {
-    // `null` is the reset-this-key sentinel: same path as /acp config reset.
+    // `null` is the reset-this-key sentinel: same path as /acp-prune config reset.
     return configResetText(surface, key)
   }
   // Boolean keys take `true`/`false` only: `1` would reach the settings service
@@ -363,11 +363,11 @@ async function configText(env: ToolEnvironment, rest: string): Promise<string> {
   const verb = args[0] ?? 'list'
   if (verb === 'list') return configListText(surface)
   if (verb === 'set') {
-    if (args.length < 3) return 'usage: /acp config set <key> <value> (e.g. /acp config set nudgeMaxContextLimitPct 0.72)'
+    if (args.length < 3) return 'usage: /acp-prune config set <key> <value> (e.g. /acp-prune config set nudgeMaxContextLimitPct 0.72)'
     return configSetText(surface, args[1]!, args.slice(2).join(' '))
   }
   if (verb === 'reset') {
     return configResetText(surface, args[1] ?? 'all')
   }
-  return `unknown /acp config verb "${verb}" — use list | set <key> <value> | reset <key>|all`
+  return `unknown /acp-prune config verb "${verb}" — use list | set <key> <value> | reset <key>|all`
 }

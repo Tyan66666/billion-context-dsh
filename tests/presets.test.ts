@@ -261,9 +261,9 @@ test('config: a lower tier lowers the over-limit line — efficient fires where 
   assert.equal(loud!.emergency, false, '61% is above max but below the emergency line')
 })
 
-// --- Display: /acp status names the tier ------------------------------------
+// --- Display: /acp-prune status names the tier ------------------------------------
 
-test('config: /acp status names the preset with the thresholds it resolved to', async () => {
+test('config: /acp-prune status names the preset with the thresholds it resolved to', async () => {
   const agent = fakeAgent(midSession())
   const result = await acpCommand(nudgeEnvFor('efficient')).handler({
     commandId: 'cmd-test' as never,
@@ -284,7 +284,7 @@ test('config: /acp status names the preset with the thresholds it resolved to', 
   )
 })
 
-test('config: /acp status preset line mirrors a same-name key in coreOverrides.nudge', async () => {
+test('config: /acp-prune status preset line mirrors a same-name key in coreOverrides.nudge', async () => {
   // kernelConfigFor spreads coreOverrides.nudge LAST, so its keys are the ones
   // actually in force — the panel must print those, not the lower preset values.
   // Minimal single-key override (the shape a real composition row uses); the two

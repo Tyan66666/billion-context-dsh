@@ -57,8 +57,8 @@ const claim = seqs.reduce((sum, seq) => sum + bySeq.get(seq)!, 0)
 
 - `handleCompress`（`src/tools.ts`）：`shadowedTokensViaMeter(session, shadowed, agent.ctx)`
 - `hideSurfaceSeqs`（`src/region.ts`）：新增 `priceEvent: (event) => number = hostPriceEvent` 参数，默认镜像
-- `/acp compress`（`src/commands.ts`）：`shadowedTokensViaMeter(session, shadowed, agent.ctx)`
-- **`src/commands.ts:88` raw-vs-resolved 崩溃**（审阅发现）：旧代码用 raw `startSeq/endSeq` 调 `shadowedSeqsOf`，事务用 resolved `{start, end}`——边界被调整时 `indexOf = −1` → 垃圾跨度 → `assertProvenance` THROW（/acp compress 现存崩溃）。已改为 resolved 边界，同 PR 修复。
+- `/acp-prune compress`（`src/commands.ts`）：`shadowedTokensViaMeter(session, shadowed, agent.ctx)`
+- **`src/commands.ts:88` raw-vs-resolved 崩溃**（审阅发现）：旧代码用 raw `startSeq/endSeq` 调 `shadowedSeqsOf`，事务用 resolved `{start, end}`——边界被调整时 `indexOf = −1` → 垃圾跨度 → `assertProvenance` THROW（/acp-prune compress 现存崩溃）。已改为 resolved 边界，同 PR 修复。
 
 `rebuildBlockLedger` 回填（`src/region.ts:422-427`）保持 `defaultCountTokens`——仅展示，宿主不读。
 
@@ -70,7 +70,7 @@ const claim = seqs.reduce((sum, seq) => sum + bySeq.get(seq)!, 0)
 - CJK fixture 必须带 `step/start` 事件（真实 `measure` 对无 step 的 log 会 THROW）
 - 断言：claim == meter 价、镜像 == claim、投影非负且 == `measure().surfaceTokens`、旧 `defaultCountTokens` claim 会打穿账本（#54 算术复现）
 - **不做本地 fold 复刻作 oracle**：宿主 fold 不可导入，自复刻证明不了宿主不崩
-- 覆盖三条写入路径（compress 工具 / /acp compress / prune）
+- 覆盖三条写入路径（compress 工具 / /acp-prune compress / prune）
 - **#103 回归**：图片 fixture（真实 `ImageAttachmentRef` 块，`AttachmentId('att-shot-1')` 800×600 png）+ 0.1.2 节点形状的 stub meter——`tokens` = 启发价 + 路由视觉价（4000）、`heuristicTokens` = 真实 meter 自己的启发价（devDep 0.1.0-rc.6 无路由计价，stub 围绕真实启发价模拟 0.1.2 形状）——断言 claim == 启发价合计（== 镜像 == 真实 meter 价）；按路由 `node.tokens` sum 会在测试内扣负（bug 算术复现）；真实 registry fold 非负且 == meter
 - **旧形状兼容**：单 `tokens` 字段 meter（0.1.1- 及更早）claim 照读 `tokens`（它就是固定启发价）
 

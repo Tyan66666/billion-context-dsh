@@ -7,7 +7,7 @@
  *
  * Layering (per key): schemastery schema default → composition-row subset
  * (the `base` layer, filtered by `filterSettingsEntry`) → user section.
- * The `/acp config` slash command reads and writes the same namespace
+ * The `/acp-prune config` slash command reads and writes the same namespace
  * through the `SettingsCommandSurface` built here.
  *
  * Deliberately NOT exposed through settings: `coreOverrides`, `countTokens`,
@@ -30,7 +30,7 @@ import type { SettingsDescriptor, SettingsProvider } from '@deepseek-ai/dsh-sett
  */
 export const ACP_SETTINGS_NAMESPACE = 'compaction-acp'
 
-/** The six knobs exposed to the runtime settings layer. Order defines /acp config listing order. */
+/** The six knobs exposed to the runtime settings layer. Order defines /acp-prune config listing order. */
 export const SETTINGS_KEYS = [
   'modelContextLimit',
   'autoModelContextLimit',
@@ -171,13 +171,13 @@ export function describeSettingsChange(prev: AcpSettings, next: AcpSettings): Se
   }
 }
 
-/** Result of parsing a `/acp config set` value. `null` means "reset this key". */
+/** Result of parsing a `/acp-prune config set` value. `null` means "reset this key". */
 export type ParsedSettingValue =
   | { ok: true; value: number | boolean | null }
   | { ok: false; reason: string }
 
 /**
- * Four-step value parser for `/acp config set` — deliberately NOT bare
+ * Four-step value parser for `/acp-prune config set` — deliberately NOT bare
  * JSON.parse, which rejects the most common human inputs (`.7` throws a
  * SyntaxError and the raw string would then fail schema validation; `null`
  * would silently mean "unset" only by convention). Order:
@@ -199,7 +199,7 @@ export function parseSettingValue(raw: string): ParsedSettingValue {
   }
 }
 
-/** Everything `/acp config` needs from the engine. Fakes in tests implement this directly. */
+/** Everything `/acp-prune config` needs from the engine. Fakes in tests implement this directly. */
 export interface SettingsCommandSurface {
   /** False in processes without a settings provider (plain npm-install compositions): the command degrades to advice instead of failing. */
   readonly available: boolean

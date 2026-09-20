@@ -111,7 +111,7 @@ mN 修复完成后，按「与 pi 语义对齐」讨论追加两项范围表改�
 | 选"compress 接受 mN"而非"drilldown 行带 seq" | 不解析/改写 kernel 报告（rule 9）；避免复现 `collectVisible` 耦合；改动集中 handleCompress；rule 9 已定方向（C6/C8） |
 | mN 反查用 turn.state.messageRefs | BLOCKER-B1：acp_status turn 不持久化；compress turn 确定性重分配同一 mN（C5） |
 | stale 复用 rule 7 | mN→id 恒定；span 已 shadowed 走 recoverStaleRange / AlreadyCompressedRangeError（C4）；仅从未分配的 mN 是新失败路径 |
-| 不动 kernel | issue #32 F 节归属裁定（C9 确认 /acp 命令也不涉及） |
+| 不动 kernel | issue #32 F 节归属裁定（C9 确认 /acp-prune 命令也不涉及） |
 | 保留 stale footer | "精确≠不过期"（MINOR-4 已论证，风险可控） |
 
 ## 四、风险与边界（审阅确认项）
@@ -121,7 +121,7 @@ mN 修复完成后，按「与 pi 语义对齐」讨论追加两项范围表改�
 - C3 checkpoint 不进 drilldown（引擎 isCheckpointEvent 过滤，`tools.ts:616-619`）→ 无 mN→checkpoint 错位；`blockRefForSummarySeq` 只对 checkpoint 返回 bN，mN 普通消息 seq 不误触发 tier 2/3
 - C5 mN 跨 turn 确定性重分配（refs 只增不减、first-wins）
 - C7 compress schema 已是 number|string，无需改
-- C9 /acp 命令纯 seq，无需改
+- C9 /acp-prune 命令纯 seq，无需改
 
 ## 五、验收清单
 

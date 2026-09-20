@@ -18,7 +18,7 @@
  *
  * Presets are set at composition time (`config: { preset: 'efficient' }`).
  * Runtime hot-reload of the underlying keys rides on issue #75 Phase 1
- * (`settings.yaml` + `/acp config`); surfacing the `preset` alias through that
+ * (`settings.yaml` + `/acp-prune config`); surfacing the `preset` alias through that
  * same channel is the small follow-up once Phase 1 lands. The two knobs named in
  * the original request that are NOT first-class engine knobs today — `growthRatio`
  * (exists in acp-kernel as `nudge.growthRatio`, reachable via `coreOverrides`) and

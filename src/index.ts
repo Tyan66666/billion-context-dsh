@@ -21,7 +21,7 @@
  * ```
  *
  * The package registers `ctx.compaction` plus the four model tools and the
- * `/acp` command when the hosting composition provides `ctx.tools` /
+ * `/acp-prune` command when the hosting composition provides `ctx.tools` /
  * `ctx.commands`.
  * @module billion-context-dsh
  */
@@ -195,7 +195,7 @@ export interface AcpConfig {
   readonly countTokens?: (text: string) => number
   /** Register the four model tools on `ctx.tools`. Default true. */
   readonly autoTools: boolean
-  /** Register the `/acp` command on `ctx.commands`. Default true. */
+  /** Register the `/acp-prune` command on `ctx.commands`. Default true. */
   readonly autoCommand: boolean
   /** Inject the nudge into `agent/pre-step` when the kernel recommends it. Default true. */
   readonly autoNudge: boolean
@@ -318,9 +318,9 @@ export class AcpCompactionEngine extends CompactionEngine {
   private readonly windowCache = new Map<string, AcpWindow>()
   /** Live settings snapshot thunk (composition → user settings layer); swapped when the settings provider attaches (SettingsProvider.installSection). */
   private readSettingsSource: () => AcpSettings = () => resolveAcpSettings({})
-  /** The settings service, captured lazily for /acp config (undefined in provider-less processes). */
+  /** The settings service, captured lazily for /acp-prune config (undefined in provider-less processes). */
   private settingsService: SettingsProvider | undefined
-  /** /acp config read/write surface. */
+  /** /acp-prune config read/write surface. */
   readonly settingsCommand: SettingsCommandSurface
   /** Per route the adapter's per-request output cap (the output reservation); null = undisclosed. */
   private readonly outputReservationCache = new Map<string, number | null>()
@@ -360,7 +360,7 @@ export class AcpCompactionEngine extends CompactionEngine {
     // The BASE layer the seam registers is the composition row's own scalar
     // subset, taken from the RAW row — not from `this.config`, which already has
     // engine defaults merged in; using it would turn every uncomposed key into a
-    // `base` override that shadows the schema default (so /acp config list would
+    // `base` override that shadows the schema default (so /acp-prune config list would
     // report `base` for keys nobody composed, and a reset would keep the value).
     // `current` is the resolved snapshot reads start from; the two differ only
     // in which keys are PRESENT, never in the values they resolve to.
@@ -403,13 +403,13 @@ export class AcpCompactionEngine extends CompactionEngine {
           },
           onChange: applySettings,
         })
-        // installSection hands out no service handle, and /acp config needs
+        // installSection hands out no service handle, and /acp-prune config needs
         // describe/update/replace — capture the service from the same optional
         // inject (fires only while a provider exists; a no-op otherwise).
         this.settingsService = settingsCtx.settings
         // Detach cleanup: cordis disposes the value an inject callback returns
         // when the provider fiber unloads. Without it the engine would keep a
-        // dead provider handle (/acp config would still report available and
+        // dead provider handle (/acp-prune config would still report available and
         // write into a disposed service) and freeze reads at the last value.
         return () => {
           this.settingsService = undefined
@@ -422,7 +422,7 @@ export class AcpCompactionEngine extends CompactionEngine {
       kernel: this.kernel,
       store: this.store,
       // The settings-exposed knobs read LIVE from the settings source, so a
-      // settings.yaml edit (or /acp config set) hot-applies to every
+      // settings.yaml edit (or /acp-prune config set) hot-applies to every
       // subsequent call — consumers never see stale numbers. (ToolEnvironment
       // fields are readonly properties; getters satisfy them.)
       get modelContextLimit() { return engine.readSettingsSource().modelContextLimit ?? DEFAULT_CONTEXT_WINDOW },
@@ -431,7 +431,7 @@ export class AcpCompactionEngine extends CompactionEngine {
       get nudgeEmergencyThresholdPct() { return engine.readSettingsSource().nudgeEmergencyThresholdPct },
       coreOverrides: this.config.coreOverrides,
       // Display-only: which named preset produced the thresholds above (if any),
-      // so /acp status can name it. The resolved pct values above are what the
+      // so /acp-prune status can name it. The resolved pct values above are what the
       // kernel actually reads — this field never feeds kernelConfigFor.
       preset: this.config.preset,
       windowFor: (agent) => this.windowFor(agent),
@@ -630,7 +630,7 @@ export class AcpCompactionEngine extends CompactionEngine {
         // came from (a gateway that disclosed no window read as ~55% of 128K
         // when the real window was 1M).
         this.ctx.logger.warn(
-          `billion-context-dsh: context-window auto-detection failed for ${provider}/${model} — using the ${DEFAULT_CONTEXT_WINDOW} fallback (change modelContextLimit or autoModelContextLimit via /acp config — or restart — to re-probe)`,
+          `billion-context-dsh: context-window auto-detection failed for ${provider}/${model} — using the ${DEFAULT_CONTEXT_WINDOW} fallback (change modelContextLimit or autoModelContextLimit via /acp-prune config — or restart — to re-probe)`,
         )
         window = { limit: DEFAULT_CONTEXT_WINDOW, source: 'default', provider, model, probeFailed: true }
         cap = null // the probe failed or disclosed nothing — no cap either

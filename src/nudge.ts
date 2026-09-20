@@ -222,7 +222,7 @@ function measuredTokenCount(agent: Agent, coreMessages: CoreMessage[]): number {
  * source marker). We instead count active-block summaries directly from kernel
  * state (same source `buildStatusReport` uses), and the caller must exclude
  * checkpoint summary nodes from `messages` (they are not in any block's
- * `effectiveMessageIds` and would double-count — mirror of `/acp` status's
+ * `effectiveMessageIds` and would double-count — mirror of `/acp-prune` status's
  * `isCheckpointNode` exclusion).
  */
 export function computeSurfaceBreakdown(
@@ -307,7 +307,7 @@ export function buildNudge(
   // surface + active-block summaries so the nudge line matches acp_status
   // (which renders from `buildStatusReport` over the surface). Checkpoint
   // summary nodes are excluded (they are not in any block's effectiveMessageIds
-  // and would double-count) — the same exclusion `/acp` status applies. The
+  // and would double-count) — the same exclusion `/acp-prune` status applies. The
   // breakdown is display-only and never drives injection, so this override is
   // safe for the decision path.
   const statusMessages = eventsToCoreMessages(

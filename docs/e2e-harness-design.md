@@ -33,7 +33,7 @@
 | basic-compress | window 2000（系统提示词单占 > 窗口 → EMERGENCY）; 3 轮 warm filler（每轮 `count: 250`，~15.5K chars/轮 —— **必须越过内核 nudge 收益下限，见约束 9**）+ compress `{{U1}}..{{A1}}` + 续回答 | compaction start/end 配对; summary 遮蔽 U1; `shadowedTokenCount ≥ 0`（rule 12 折叠非负）; durable replace 节点落; 线协议严格配对; nudge ≥1; end 后继续; **投影: compress 后线请求含 summary、原文已消失**（durable surface 端到端本质）; **nudge 范围表: 表头 oldest first、行带 `[tool X% | text Y%]` 份额、seq 升序**（rule 3） |
 | nudge-rhythm | window 24000; 5 轮小历史 + 2 轮大历史（~16K chars） | 小历史时无注入; 大历史后注入（观测: 仅最后请求——投影锚滞后一轮）; 不每轮注入（rule: advisory 节奏）; **nudge 范围表: 表头 oldest first、行带 `[tool X% | text Y%]` 份额、seq 升序**（rule 3） |
 | compress-then-decompress | basic 基础上 + `decompress {"blockId":"b1"}` 轮 | basic 全断 + decompress 结果含原始文本（日志重建路径）; compress 结果报 tier; decompress 不新增 compaction 事件 |
-| acp-status | window 2000; 3 轮 warm filler + compress 轮 + `acp_status {}` 轮 | 报告存在; 含 `CONTEXT BREAKDOWN` / `COMPRESSED BLOCKS`（kernel `buildStatusReport`，rule 9 非手搓）; 块 `b1` 行 + `Checkpoint seqs` 行（蒸馏入口，issue #60 P2）; `Surface:` seq 锚; `Nudge:` 决策行; **不含 `estimated context`/`context window`**（窗口语义属人侧 `/acp`，rule 9） |
+| acp-status | window 2000; 3 轮 warm filler + compress 轮 + `acp_status {}` 轮 | 报告存在; 含 `CONTEXT BREAKDOWN` / `COMPRESSED BLOCKS`（kernel `buildStatusReport`，rule 9 非手搓）; 块 `b1` 行 + `Checkpoint seqs` 行（蒸馏入口，issue #60 P2）; `Surface:` seq 锚; `Nudge:` 决策行; **不含 `estimated context`/`context window`**（窗口语义属人侧 `/acp-prune`，rule 9） |
 
 ## 二期（未实现，记录取舍）
 

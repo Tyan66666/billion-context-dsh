@@ -352,7 +352,7 @@ test('PR1: handleCompress REJECTS a manual range covering a current instruction 
   assert.doesNotMatch((result2 as { text: string }).text, /rejected|current instruction row/, 'no instruction rows in span — no rejection')
 })
 
-test('PR1: /acp compress rejects a current instruction row exactly like the tool; stale copies still compress', async () => {
+test('PR1: /acp-prune compress rejects a current instruction row exactly like the tool; stale copies still compress', async () => {
   const env = makeEnv()
   const session = Session.create('command-gate')
   appendTurn(session, 1)

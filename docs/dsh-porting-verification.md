@@ -11,7 +11,7 @@
 | 阶段 | 结果 |
 | --- | --- |
 | `defaultConfig(limit)` 生成合法配置 | ✅ |
-| `processTurn` 分配 ref 标签（`<acp tokens="15" type="text">m00001</acp>`） | ✅ |
+| `processTurn` 分配 ref 标签（`<acp tokens="15" type="text">m00001</acp-prune>`） | ✅ |
 | 紧急 nudge 决策（usage ≥80% 注入） | ✅ |
 | `applyCompression` 建块（12 条消息压 5 条 → `blocksCreated:1, tokensCompressed:7255`） | ✅ |
 | 下一轮 `processTurn` 剪掉被覆盖消息（12 → 9 条，块活跃） | ✅ |
@@ -95,7 +95,7 @@ PROBE OK
   │     ├── agent/pre-step（pressure）+ agent/request-error（overflow）监听
   │     └── 自带/上游化 region 事务（V2 架构事实 1）
   ├── 4 个模型工具：compress / decompress / search_context / acp_status（V3）
-  ├── /acp 命令（V3）
+  ├── /acp-prune 命令（V3）
   └── ACP 块状态持久化（日志事件 或 ctx.storage，V3/V5）
 ```
 
@@ -125,7 +125,7 @@ PROBE OK
 | M1 | 消息适配层：Session 事件 ↔ acp-kernel CoreMessage（user/assistant/tool-call/tool-result 投影，参考 `src/messages.ts` 的 `entriesToCoreMessages`/`projectMessage`） | 单测 + 日志回放 |
 | M2 | 块状态持久化（日志事件 schema + load/merge） | 单测（重启恢复） |
 | M3 | 4 个模型工具（工具 schema 用 typebox/schemastery，参考 `src/compress-tool.ts`） | 工具级单测 |
-| M4 | nudge 注入 + seq-as-ref 范围表 + `/acp` 命令 | 注入消息单测 |
+| M4 | nudge 注入 + seq-as-ref 范围表 + `/acp-prune` 命令 | 注入消息单测 |
 | M5 | region 事务 + 自动触发（pressure/overflow） | 端到端（压到阈值触发） |
 | M6 | 组合接入 + preset + 搜索开启 + 全量测试（复用 acp-kernel 45 测 + DSH 测试工具） | 集成测试 |
 
@@ -185,4 +185,4 @@ compress({ startSeq: 64757, endSeq: 265056, ... })
 
 > **dsh-session 0.1.5 协议漂移与 peer 下限（issue #136，非绕行——协议决策记录）**——replace surfaceOp 字段在 0.1.5 线改名 `{ op, start, end }` → `{ op, startSeq, endSeq }`，且校验严格为**恰好三键**（≤0.1.3-alpha.2 收旧名、≥0.1.5-alpha.1 收新名，逐版本从已发布 tarball 核实；四键形态两边都拒）→ 双方言共发不可能，引擎单一方言输出 + peer 下限 `>=0.1.5-alpha.1 <0.1.6-0`（显式区间，caret 会悄悄放进未验证的 0.1.6+ 线）。同线两个连带破坏一并处理：① assistant/message 内嵌 provider stream、**禁止携带 `sourceEventSeqs`**（运行时抛错）→ 隐形剪枝节点不复存在，`hideSurfaceSeqs` 改写可见 `PRUNE_NOTE` user 消息，范围表末位 user 保护扫描经 `isPruneTombstone` 跳过占位节点；② 宿主系统提示成为 surface node 0（`system/message`）且受保护（非 system 替换覆盖它即抛 "node 0 holds the system prompt"）→ `isSystemNode` 将其排除出可压缩表与 stale-range 恢复。回归钉：`tests/surfaceop-dialect.test.ts`（真实 0.1.5 会话 E2E：事务成功 + 恰好三键 shape 断言 + 孤儿剥离新方言 + node-0 保护）、`tests/peer-range.test.ts`（整线接受 / 其余版本线全部拒绝）。
 
-> **nudge 上下文 breakdown 口径：全日志 vs 活跃 surface（AGENTS.md rule 2）**——`buildNudge` 为支持 T2/T3 蒸馏锚点，必须把**整个日志**（`allLogMessages`，含已被压缩进 block 的历史消息）喂给 `kernel.processTurn`；kernel 的 `computeContextBreakdown` 对这份消息数组分类加总，于是 nudge 展示带上**历史累积**口径——实测 nudge 报 `85.2K tool`，而 acp_status 报真实活跃 `8.5K tool`，相差约 10 倍。`acp_status` 用 `buildStatusReport` 喂**活跃 surface**（排除 `source.plugin==='compact'` 的 checkpoint 摘要节点——`/acp` status 的 `isCheckpointEvent`），所以它反映当前真实上下文。修复：`src/nudge.ts` 导出 `computeSurfaceBreakdown(state, messages, total, growth)`——分类复刻 kernel（tool-call/tool-result→tool、role system→system、含```→code、否则→text），但 **summaries 直接取 active blocks 的 `block.summary`**（kernel 源码靠消息文本 `[Compressed conversation section]` 前缀识别摘要，而 DSH checkpoint 节点从不带此前缀，故须读 block 而非消息文本）；`buildNudge` 用活跃 surface（排除 checkpoint 节点）调用它覆盖 `nudge.contextBreakdown`。两条渲染路径（kernel `renderNudgeText` + 模板 `renderNudgeFromTemplates`）都读 `nudge.contextBreakdown`，覆盖一次即统一。该字段纯展示、不参与 `shouldInject` 决策，覆盖安全。回归测试 tests/nudge.test.ts（活跃 surface tool < 全日志 tool + block summaries>0；无块形状校验）。测试易踩坑：`compress` 工具的 `resolveSurfaceRange` pass-2 会把相邻 tool 对一并扩展吃掉（`adjusted from 2..3 to balanced edges` 扩到 1..4），若测试要保留 surface tool，须用 `runCompactionTransaction` 直接精确压范围而非走 compress 工具。
+> **nudge 上下文 breakdown 口径：全日志 vs 活跃 surface（AGENTS.md rule 2）**——`buildNudge` 为支持 T2/T3 蒸馏锚点，必须把**整个日志**（`allLogMessages`，含已被压缩进 block 的历史消息）喂给 `kernel.processTurn`；kernel 的 `computeContextBreakdown` 对这份消息数组分类加总，于是 nudge 展示带上**历史累积**口径——实测 nudge 报 `85.2K tool`，而 acp_status 报真实活跃 `8.5K tool`，相差约 10 倍。`acp_status` 用 `buildStatusReport` 喂**活跃 surface**（排除 `source.plugin==='compact'` 的 checkpoint 摘要节点——`/acp-prune` status 的 `isCheckpointEvent`），所以它反映当前真实上下文。修复：`src/nudge.ts` 导出 `computeSurfaceBreakdown(state, messages, total, growth)`——分类复刻 kernel（tool-call/tool-result→tool、role system→system、含```→code、否则→text），但 **summaries 直接取 active blocks 的 `block.summary`**（kernel 源码靠消息文本 `[Compressed conversation section]` 前缀识别摘要，而 DSH checkpoint 节点从不带此前缀，故须读 block 而非消息文本）；`buildNudge` 用活跃 surface（排除 checkpoint 节点）调用它覆盖 `nudge.contextBreakdown`。两条渲染路径（kernel `renderNudgeText` + 模板 `renderNudgeFromTemplates`）都读 `nudge.contextBreakdown`，覆盖一次即统一。该字段纯展示、不参与 `shouldInject` 决策，覆盖安全。回归测试 tests/nudge.test.ts（活跃 surface tool < 全日志 tool + block summaries>0；无块形状校验）。测试易踩坑：`compress` 工具的 `resolveSurfaceRange` pass-2 会把相邻 tool 对一并扩展吃掉（`adjusted from 2..3 to balanced edges` 扩到 1..4），若测试要保留 surface tool，须用 `runCompactionTransaction` 直接精确压范围而非走 compress 工具。

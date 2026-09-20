@@ -15,12 +15,12 @@ DSH 仓库里的 `packages/acp` 是 **Agent Client Protocol**（进程间自动�
 ### 1.1 billion-context-pi（Pi 侧）
 
 - 入口 `src/index.ts` 挂钩 4 类 Pi 扩展点：
-  - `pi.on('context')` — **核心**：每次 LLM 调用前，把即将发送的消息数组交给 acp-kernel 的 `processTurn`（8 阶段管线：assign refs → sync blocks → prune → filter → hide calls → recommend → nudge → emergency truncate），返回改写后的消息（剪掉被压缩范围、给消息打 `<acp tokens="..">mNNNNN</acp>` 引用标签、按需附加 nudge 提示），**会话日志本身不动**。
+  - `pi.on('context')` — **核心**：每次 LLM 调用前，把即将发送的消息数组交给 acp-kernel 的 `processTurn`（8 阶段管线：assign refs → sync blocks → prune → filter → hide calls → recommend → nudge → emergency truncate），返回改写后的消息（剪掉被压缩范围、给消息打 `<acp tokens="..">mNNNNN</acp-prune>` 引用标签、按需附加 nudge 提示），**会话日志本身不动**。
   - `pi.on('session_before_compact')` — 取消 Pi 内置自动压缩。
   - `pi.on('session_start'/'session_shutdown')` — 生命周期。
   - `pi.on('before_agent_start')` — 注入 ACP 系统提示词。
 - 注册 4+ 工具：`compress`（模型写摘要替换范围）、`decompress`（把块恢复回上下文）、`search_context`（在压缩块内搜索）、`acp_status`（压缩统计）；外加 delegate 三件套（`acp_delegate`/`acp_delegate_wait`/`acp_delegate_cancel`）。
-- 注册 `/acp` slash 命令；自动更新检查；状态持久化到 `~/.pi/agent/sessions/*.acp.json` 旁车文件。
+- 注册 `/acp-prune` slash 命令；自动更新检查；状态持久化到 `~/.pi/agent/sessions/*.acp.json` 旁车文件。
 - **acp-kernel 是纯内核**（"Framework-agnostic context-compression engine. Pure core: no host dependency"），tsup 构建时内联进 dist。这意味着压缩算法本身**可原样复用**，只需重写 Pi↔kernel 的适配层。
 
 ### 1.2 DeepSeek Harness（DSH 侧）
@@ -75,7 +75,7 @@ DSH 仓库里的 `packages/acp` 是 **Agent Client Protocol**（进程间自动�
 | `pi.registerTool(decompress)` | 需自实现"反遮蔽"：把 checkpoint 节点 replace 回原文（原文仍在日志中，可回放恢复） | 🟡 设计取舍 |
 | `pi.registerTool(search_context)` | 落地为：从日志重建统一文档集（块摘要 + 被遮蔽原文），交 acp-kernel `searchBlocks`（hybrid：BM25 词干化 + CJK bigram + 字符 n-gram 模糊）打分；**信任内核**——引擎不做无命中闸门/阈值等二级搜索策略，评分直接呈现给模型自行判断；消息命中回链最内层所属块。`ctx.sessionQuery` 全文索引（`openAt: 'first-search'`）留作二期可选项 | 🟢 直接复用内核（无 opt-in 依赖） |
 | `pi.registerTool(acp_status)` | `ctx.tokenMeter` 投影（`contextPressure`/`contextBreakdown`） | 🟢 直接对应 |
-| `pi.registerCommand(/acp)` | `ctx.commands`（`dsh-command-compact` 是现成参考） | 🟢 直接对应 |
+| `pi.registerCommand(/acp-prune)` | `ctx.commands`（`dsh-command-compact` 是现成参考） | 🟢 直接对应 |
 | 状态持久化 `*.acp.json` 旁车文件 | 会话日志本身 durable；ACP 块状态可写成自定义日志事件（如 `acp/block`，回放友好，且自动获得 checkpoint）或 storage key | 🟢 更优 |
 | delegate 三件套 | `subagents` registry + spawn/fork 后端 + `jobs` registry（delegate+wait+cancel 已有先例） | 🟢 已有现成物 |
 | 自动更新（npm 检查） | 不适用：组合式发布，插件版本由部署层固定；没有自更新惯例 | 🟢 直接放弃 |
@@ -110,7 +110,7 @@ durable 部分（压缩、块状态、搜索、状态）走路径 A；只把"易
 
 ## 5. 推荐落地形态
 
-1. **包形态**：新建一个压缩能力族叶子包（对齐 `packages/compaction/` 下现有结构，或独立 npm 包），实现 `CompactionEngine` 接口 + 注册 `compress`/`decompress`/`search_context`/`acp_status` 四个模型工具 + `/acp` 命令。
+1. **包形态**：新建一个压缩能力族叶子包（对齐 `packages/compaction/` 下现有结构，或独立 npm 包），实现 `CompactionEngine` 接口 + 注册 `compress`/`decompress`/`search_context`/`acp_status` 四个模型工具 + `/acp-prune` 命令。
 2. **组合接入**：host 组合加一行提供 `ctx.compaction`；preset 里在 `compaction` isolate realm 用 ACP 后端替换 `compaction-basic`（或新增一个 preset 变体）。这与 DSH 的 capability-seam 哲学完全一致。
 3. **复用内核**：`acp-kernel` 直接作为依赖（或内联），只重写适配层（Pi 的 `ExtensionAPI`/`SessionEntry`/`AgentMessage` ↔ DSH 的 `Session` 事件日志/surface/`Message`）。
 4. **状态与搜索**：ACP 块状态写成日志事件；`search_context` 基于 `ctx.sessionQuery`（需要把 `openAt` 从 `never` 改为 `first-search`）。

@@ -7,7 +7,7 @@ DSH 会话里 `image` / `file` 块没有字符内容，而引擎的每一层都�
 1. **投影丢弃**：`extractText`（`src/messages.ts`）只取 `type: 'text'` 块，图片/文件块静默丢弃；`projectEvent` 对"图片-only"的 user 消息返回空数组 —— 这条消息在 acp-kernel 视图里**根本不存在**，没有 ref，因此
     - 不能作为压缩边界：边界谓词（当时为 `hasPlainRef`，现为 `anchorsRangeEdge`，`src/region.ts`）要求事件文本非空，于是 `resolveSurfaceRange` 向内收缩时越过它、把邻接内容一起吞掉；收缩失败时报的却是 "no tool-pairing-balanced range"（与真因无关）；
    - 不受内核保护：`handleCompress` 交给内核的 `coreMessages` 里没有它，内核的"最近尾 + 最近一条 user 消息"保护（`protectedMessageIds`）看不到它 —— **截图会话里最后一条消息常常就是图片-only 的提问，它可以被整段压掉**。Dousy 侧的"最后一条真实 user 消息"保护只在范围表路径（`buildCompressibleSeqRanges`）生效。
-2. **两套标尺混印**：nudge 的压力闸门用 `resolveTokenCount` → `sessionProjections.contextPressure.projectedTokens`（provider 口径，含图片 token），而 `acp_status` 的上下文分解、nudge 范围表、`/acp status` 的块统计全部用 `defaultCountTokens(extractEventText(...))`（纯文本口径）。picture 密集会话里两条数字来自两个世界，偏差约等于所有图片的价格（单张图千级 token 被记 0）。
+2. **两套标尺混印**：nudge 的压力闸门用 `resolveTokenCount` → `sessionProjections.contextPressure.projectedTokens`（provider 口径，含图片 token），而 `acp_status` 的上下文分解、nudge 范围表、`/acp-prune status` 的块统计全部用 `defaultCountTokens(extractEventText(...))`（纯文本口径）。picture 密集会话里两条数字来自两个世界，偏差约等于所有图片的价格（单张图千级 token 被记 0）。
 3. **压缩优先级误导**：范围表按 tokens 排序，图片密集区间显示 ~0 token，模型于是优先压"看起来最不占空间"的内容。
 4. **召回静默丢失**：`decompress` / `search_context` 都走 `extractEventText`，恢复出来的文本里图片上下文整体消失。
 
@@ -55,6 +55,6 @@ DSH 会话里 `image` / `file` 块没有字符内容，而引擎的每一层都�
 ## 边界与未做的事
 
 - 未知或形状不符的附件不生成占位符（不猜、不抛错）；`tool-result` 内嵌媒体与顶层媒体走同一条递归。
-- 无媒体的会话不做任何额外测量（nudge 里 meter 最多测一次，`/acp status`、`decompress`、`search_context` 完全不碰 meter）。
+- 无媒体的会话不做任何额外测量（nudge 里 meter 最多测一次，`/acp-prune status`、`decompress`、`search_context` 完全不碰 meter）。
 - 逆投影（从占位符还原图片字节）不做：`decompress` 恢复的是原文事件（图片块本身还在日志里），占位符只影响文本面。
 - 逐会话缓存媒体价（每次 nudge 一次 meter 测量）未做 —— 目前每次 nudge 一次测量，够用；如果将来出现大会话的测量开销，可在 `CompactionState` 之外按 snapshot 缓存。

@@ -28,7 +28,7 @@
  *   3. the host projection stays non-negative and agrees with the meter,
  *   4. the OLD claims would have overdrawn the meter (the #54 and #103
  *      arithmetic reproduced in-test).
- * All three event writers are covered: the compress tool, /acp compress, and
+ * All three event writers are covered: the compress tool, /acp-prune compress, and
  * the prune path.
  */
 
@@ -253,7 +253,7 @@ test('L3: prune (orphan cleanup) claims the HOST price too', async () => {
   assert.ok(oldClaim > expected, 'defaultCountTokens overclaims CJK vs the host price')
 })
 
-test('L3: /acp compress uses RESOLVED edges and prices the host vocabulary (raw-vs-resolved fix)', async () => {
+test('L3: /acp-prune compress uses RESOLVED edges and prices the host vocabulary (raw-vs-resolved fix)', async () => {
   const { ctx, meter, env } = await makeHosted()
   const session = Session.create('acp-range')
   session.append('turn/start', { turn: 1 })
@@ -288,7 +288,7 @@ test('L3: /acp compress uses RESOLVED edges and prices the host vocabulary (raw-
   }, { surfaceOp: 'append' })
   // surface nodes: 2 user, 3 tool-call assistant, 5 tool/result.
   // Raw "3 3" (lone tool-call) EXPANDS to {3,5} — the adjustment that used to
-  // make /acp compress shadow a garbage span and crash (assertProvenance).
+  // make /acp-prune compress shadow a garbage span and crash (assertProvenance).
   const hostClaim = meterPriceOf(meter, session, [3, 5])
 
   const agent = {

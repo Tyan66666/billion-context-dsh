@@ -528,7 +528,7 @@ test('M3: acp_status uses the auto-detected window for pressure without showing 
   const status = await toolOf(env, 'acp_status').execute({}, fakeExec(session))
   const text = (status as { text: string }).text
   assert.match(text, /CONTEXT BREAKDOWN/, 'kernel breakdown still rendered')
-  // The window is a human-side (/acp) concern; the model tool never sees it.
+  // The window is a human-side (/acp-prune) concern; the model tool never sees it.
   assert.ok(!/context window/.test(text), 'window rows stay out of the model tool even with a probed window')
   assert.ok(!/estimated context/.test(text), 'window-occupancy rows stay out of the model tool')
   assert.deepEqual(modelContextLimits, [1000000], 'acp_status gives the kernel the auto-detected window, not the 128K fallback')

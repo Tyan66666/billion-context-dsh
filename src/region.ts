@@ -987,7 +987,7 @@ export function newestInstructionSeqsOf(session: Session): Set<number> {
  * agent-instructions row of every scope, restricted to rows still visible on
  * the surface (one definition of "current" — `newestInstructionSeqsOf`).
  * `buildCompressibleSeqRanges` never OFFERS them, and both compress entry
- * points (`handleCompress` in src/tools.ts, `/acp compress` in
+ * points (`handleCompress` in src/tools.ts, `/acp-prune compress` in
  * src/commands.ts) probe the RESOLVED span against this set and HARD-REJECT a
  * covering range before the kernel applies it, so nothing durable lands and no
  * phantom block can exist. This supersedes the earlier F7 draft (warn only):

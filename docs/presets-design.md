@@ -4,9 +4,9 @@
 > - **P1**：新增 `config.preset`，一句话选择 nudge 的激进程度——`preserve` / `relaxed` / `balanced` / `efficient` / `aggressive` 五档。只填充三个 nudge 阈值，优先级 **显式值 > preset > engine 默认**。
 > - **P2**：`balanced` 逐字节等于当前开箱阈值（min 0.45 = 内核默认、max 0.70、emergency 0.85），选它相对今天零变化。
 > - **P3**：未知名称在引擎构造期抛错并列出合法值（与自定义提示词模板同一 fail-fast 约定），不静默回退默认。
-> - **P4**：`preset` 是**展示字段**——进 env 仅供 `/acp status` 命名当前档位，永不进 `kernelConfigFor`；真正喂给内核的是解析后的三个 pct。
+> - **P4**：`preset` 是**展示字段**——进 env 仅供 `/acp-prune status` 命名当前档位，永不进 `kernelConfigFor`；真正喂给内核的是解析后的三个 pct。
 > - **P5**：落在**组合配置层**（安装 / `cordis.patch.yml`），今天即可用；settings.yaml 热加载暴露 `preset` 别名待 #75 Phase 1 落地后跟进。
-> - **R1（PR review 跟进）**：`/acp status` 的 preset 行原来只读构造期解析出的 env 值，`coreOverrides.nudge` 的同名键不会反映在上面（显示值低于真实生效值）。已改为镜像 `kernelConfigFor` 的合并顺序显示三个阈值——该行数字即真实生效值；新增回归测试钉住。
+> - **R1（PR review 跟进）**：`/acp-prune status` 的 preset 行原来只读构造期解析出的 env 值，`coreOverrides.nudge` 的同名键不会反映在上面（显示值低于真实生效值）。已改为镜像 `kernelConfigFor` 的合并顺序显示三个阈值——该行数字即真实生效值；新增回归测试钉住。
 >
 > **范围说明：** 原始需求里的 `growthRatio`（内核已有 `nudge.growthRatio`，可经 `coreOverrides` 调）与 `protectedLastMessages`（≈ 内核 `preserveRecentMessages`）**不是本项目的一等旋钮**，是否采纳为命名键 / UI 项属维护者决策，本次未擅自并入预设（见 §6）。
 
@@ -14,7 +14,7 @@
 
 #105「Feature Request: Presets + Custom UI」要求用户能用一个词选择压缩策略，而不是逐个调三个百分比。维护者在 issue 里把范围钉死为**五个预设**（preserve / relaxed / balanced / efficient / aggressive），其余能力归 #75：
 
-- 自定义模式的三个阈值旋钮 → #75 Phase 1（settings.yaml 热加载 + `/acp config` list/set/reset）
+- 自定义模式的三个阈值旋钮 → #75 Phase 1（settings.yaml 热加载 + `/acp-prune config` list/set/reset）
 - 可编辑提示词 → #75 Phase 2
 - 图形化 Web UI → #75 Phase 3（DSH 0.1.2 线已放开 `WEB_SETTINGS_NAMESPACES` 门，剩下的只是我们自己的 client card）
 
@@ -67,8 +67,8 @@ return {
 
 ## 5. 展示（display-only）
 
-- `ToolEnvironment`（`src/tools.ts`）新增 `readonly preset?: PresetName`，引擎构造时填 `this.config.preset`。**它不进 `kernelConfigFor`**——真正驱动 nudge 决策的是解析后的三个 pct（经 `kernelConfigFor(env)` 进入 `buildNudge` / 工具路径）。preset 只是让 `/acp status` 能说出「现在跑的是哪一档」。
-- `/acp status`（`src/commands.ts` `statusText`）在有 preset 时追加一行：
+- `ToolEnvironment`（`src/tools.ts`）新增 `readonly preset?: PresetName`，引擎构造时填 `this.config.preset`。**它不进 `kernelConfigFor`**——真正驱动 nudge 决策的是解析后的三个 pct（经 `kernelConfigFor(env)` 进入 `buildNudge` / 工具路径）。preset 只是让 `/acp-prune status` 能说出「现在跑的是哪一档」。
+- `/acp-prune status`（`src/commands.ts` `statusText`）在有 preset 时追加一行：
   `preset: <name> (<label>) [min X% · max Y% · emergency Z%]`
   括号里的三个值**镜像 `kernelConfigFor` 的合并顺序**（`coreOverrides.nudge` 同名键 > env 解析值），所以你在 preset 之上做的显式覆盖与 `coreOverrides.nudge` 的同名键都会如实显示——该行数字即真实生效值，不存在低估口径。
 
@@ -82,10 +82,10 @@ return {
 ## 7. 验证
 
 已验证：`npm run typecheck` 0 错、`npm test` **318 全绿**（299 条基线 + 19 条本 PR 新增）、与 main 的 dist 零差异、worktree 内无冲突标记（合并 main 时四处冲突——`README.md` / `README.en.md` 的配置表行、`src/index.ts` / `src/tools.ts` 的 import 块——分别以「main 的行 + 插入 `preset` 行」「两侧 import 取并集」解决）；另做两次变异验证——禁用 `assertNudgeThresholdOrder` 只让「反向窗口」用例红、把 `aggressive.min` 由 0.30 改成 0.35 只让 15 值快照用例红。
-- 19 条新测试覆盖：内核不变量逐行成立；单调谱系（相邻档三值严格递减）；**15 个阈值逐字快照**（README 表格即契约，改一个数字即红）；`PRESET_NAMES` 恰好五键且有序；`balanced == 开箱默认`；`isPresetName` 守卫（大小写 / 空格 / 非串全拒）；`resolvePreset` 命中 + 未知名报错并列合法值；`resolveAcpConfig` 全填 / 显式优先 / 部分覆盖保留其余 / 未知名 fail-fast / **反向窗口 fail-fast** / 省略 preset 行为逐字节不变；解析值经 `kernelConfigFor` 原样到达内核（`growthRatio` 等无关键保持默认）+ **`coreOverrides.nudge` 同名键最后落地**；未知 preset 在**引擎构造**边界同样 fail-fast；`/acp status` 的 `preset:` 行逐字（含解析后的三个百分比）；端到端——同一 ~61% 用量下 `efficient`（max 0.60）触发过限 nudge 而 `balanced`（max 0.70）保持安静（证明档位真的改变内核决策）；两个档位都先调用一次暖住状态再断言第二次，因为内核 ≥0.0.54 的 `firstSightMassReady` 会在全新状态下按 `min` 直接触发，绕过 `max` 这条被断言的线。
+- 19 条新测试覆盖：内核不变量逐行成立；单调谱系（相邻档三值严格递减）；**15 个阈值逐字快照**（README 表格即契约，改一个数字即红）；`PRESET_NAMES` 恰好五键且有序；`balanced == 开箱默认`；`isPresetName` 守卫（大小写 / 空格 / 非串全拒）；`resolvePreset` 命中 + 未知名报错并列合法值；`resolveAcpConfig` 全填 / 显式优先 / 部分覆盖保留其余 / 未知名 fail-fast / **反向窗口 fail-fast** / 省略 preset 行为逐字节不变；解析值经 `kernelConfigFor` 原样到达内核（`growthRatio` 等无关键保持默认）+ **`coreOverrides.nudge` 同名键最后落地**；未知 preset 在**引擎构造**边界同样 fail-fast；`/acp-prune status` 的 `preset:` 行逐字（含解析后的三个百分比）；端到端——同一 ~61% 用量下 `efficient`（max 0.60）触发过限 nudge 而 `balanced`（max 0.70）保持安静（证明档位真的改变内核决策）；两个档位都先调用一次暖住状态再断言第二次，因为内核 ≥0.0.54 的 `firstSightMassReady` 会在全新状态下按 `min` 直接触发，绕过 `max` 这条被断言的线。
 - 测试小坑：Node 22 下 `assert.throws(fn)` 返回 `undefined`，故断言错误信息改用正则校验器参数（`assert.throws(fn, /…/)`），并以 `.*` 桥接错误消息中引号名与合法值列表之间的分隔符。
 
 ## 8. 后续 TODO
 
-- #75 Phase 1 落地后：把 `preset` 别名暴露进 settings 命名空间，`/acp config set preset <tier>` 热切换（与六个标量键同一通道）。`src/settings.ts` 现无 `preset`（未知键按未知键拒绝），所以当前只有组合行能设置它。
+- #75 Phase 1 落地后：把 `preset` 别名暴露进 settings 命名空间，`/acp-prune config set preset <tier>` 热切换（与六个标量键同一通道）。`src/settings.ts` 现无 `preset`（未知键按未知键拒绝），所以当前只有组合行能设置它。
 - owner 决策后：视需要把 `growthRatio` / `protectedLastMessages` 提为一等键或纳入预设维度。

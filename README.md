@@ -67,9 +67,9 @@ dsh plugin --profile web add billion-context-dsh
 命令内部会装包并把本包的 bundle 补丁（[cordis.patch.yml](cordis.patch.yml)）自动挂进该 profile 的层栈。补丁做了两件事：
 
 - **禁用 host 的 `compaction-basic`**——避免同一 realm 内两个后端同时注册 `ctx.compaction` 冲突（现代 DSH 的 web bundle 已自带该禁用，此行为幂等兜底，任何受支持版本下都成立）；
-- **把 ACP 引擎挂到 host 平面**——四种模型工具（`compress` / `decompress` / `search_context` / `acp_status`）、`/acp` 命令、nudge、ACP 提示词段对该 profile 的**所有模式**（standard / code / minimal / cordis / 自定义预设）生效。窗口自动探测、工具/命令/nudge 默认全开，**无需任何手工配置**。
+- **把 ACP 引擎挂到 host 平面**——四种模型工具（`compress` / `decompress` / `search_context` / `acp_status`）、`/acp-prune` 命令、nudge、ACP 提示词段对该 profile 的**所有模式**（standard / code / minimal / cordis / 自定义预设）生效。窗口自动探测、工具/命令/nudge 默认全开，**无需任何手工配置**。
 
-装完**重启 `dsh`**（bundle 层在启动时组合），新开会话即可用——让模型调用 `acp_status` 或执行 `/acp status` 自证。shipped 预设（standard / code / cordis）内部的 realm 级 `compaction-basic` 自动压缩兜底仍然保留（这些模式里"自动摘要"照旧，ACP 工具与 nudge 并存）；minimal 等不带 compaction realm 的预设直接使用本引擎。
+装完**重启 `dsh`**（bundle 层在启动时组合），新开会话即可用——让模型调用 `acp_status` 或执行 `/acp-prune status` 自证。shipped 预设（standard / code / cordis）内部的 realm 级 `compaction-basic` 自动压缩兜底仍然保留（这些模式里"自动摘要"照旧，ACP 工具与 nudge 并存）；minimal 等不带 compaction realm 的预设直接使用本引擎。
 
 > **与 DSH 版本的兼容性。** 包把五个运行期 seam 包（`dsh-compaction` /
 > `dsh-session` / `dsh-llm` / `dsh-tools` / `dsh-settings`）都声明为 peer
@@ -120,7 +120,7 @@ dsh plugin --profile web add github:Tyan66666/billion-context-dsh#v0.2.24
 **全局生效（host 平面，所有模式）——推荐**。这是方式一 bundle 的默认行为；纯 npm 安装的用户在 profile 补丁中追加以下全部内容（bundle 用户跳过前两行）：
 
 ```yaml
-# ACP 作为全局压缩后端：四个模型工具 + `/acp` 命令 + nudge + ACP 提示词段，
+# ACP 作为全局压缩后端：四个模型工具 + `/acp-prune` 命令 + nudge + ACP 提示词段，
 # 对所有模式（standard / code / minimal / cordis / 自定义预设）生效。
 # 必须同时禁用 host 的 compaction-basic：同一 realm 内两个后端同时
 # provide `ctx.compaction` 会冲突。（bundle 安装已自动带上这两行。）
@@ -148,7 +148,7 @@ dsh plugin --profile web add github:Tyan66666/billion-context-dsh#v0.2.24
 
 可配置槽位清单、每槽可用占位符、空串/`null` 语义见 [docs/configurable-prompts-design.md](docs/configurable-prompts-design.md)。未配置 `prompts` 的部署直接使用 kernel 渲染（对齐 kernel/pi，见设计文档 v6）。
 
-**（可选）运行时设置 —— 编辑 `~/.dsh/settings.yaml` 或 `/acp config`，无需重启。** 六个标量键（`modelContextLimit`、`autoModelContextLimit`、`nudgeMinContextLimitPct`、`nudgeMaxContextLimitPct`、`nudgeEmergencyThresholdPct`、`autoNudge`，见「配置」表中带「运行时热调」标记的行）在宿主 settings 层有一份可热改的副本：编辑 settings 文件或 `/acp config` 会**立即生效于运行中的会话**（组合行 `config:` 仍是起点——分层为 schema 默认 → 组合行 → 用户 settings 段）：
+**（可选）运行时设置 —— 编辑 `~/.dsh/settings.yaml` 或 `/acp-prune config`，无需重启。** 六个标量键（`modelContextLimit`、`autoModelContextLimit`、`nudgeMinContextLimitPct`、`nudgeMaxContextLimitPct`、`nudgeEmergencyThresholdPct`、`autoNudge`，见「配置」表中带「运行时热调」标记的行）在宿主 settings 层有一份可热改的副本：编辑 settings 文件或 `/acp-prune config` 会**立即生效于运行中的会话**（组合行 `config:` 仍是起点——分层为 schema 默认 → 组合行 → 用户 settings 段）：
 
 ```yaml
 # ~/.dsh/settings.yaml
@@ -157,14 +157,14 @@ compaction-acp:
 ```
 
 ```text
-/acp config                                  # 列出六个键当前值 + 来源层（user / base / default）
-/acp config set nudgeMaxContextLimitPct 0.72 # 热改一个键
-/acp config set autoNudge false              # 布尔键（false 是合法值）
-/acp config reset nudgeMaxContextLimitPct    # 退回组合行 / 引擎默认
-/acp config reset all
+/acp-prune config                                  # 列出六个键当前值 + 来源层（user / base / default）
+/acp-prune config set nudgeMaxContextLimitPct 0.72 # 热改一个键
+/acp-prune config set autoNudge false              # 布尔键（false 是合法值）
+/acp-prune config reset nudgeMaxContextLimitPct    # 退回组合行 / 引擎默认
+/acp-prune config reset all
 ```
 
-窗口相关键（`modelContextLimit` / `autoModelContextLimit`）改动会清空窗口探测缓存——下一次 pre-step 按新值重新探测（探测失败也会被缓存，正是靠这个机制在修复网关后重新探测）。无 settings provider 的纯 npm 安装组合下 `/acp config` 降级为指引文案；`settingsEnabled: false` 可整体关闭该集成（组合行专用，不进 settings 层——开关不能关掉自己）。设计细节见 [docs/settings-integration-design.md](docs/settings-integration-design.md)。
+窗口相关键（`modelContextLimit` / `autoModelContextLimit`）改动会清空窗口探测缓存——下一次 pre-step 按新值重新探测（探测失败也会被缓存，正是靠这个机制在修复网关后重新探测）。无 settings provider 的纯 npm 安装组合下 `/acp-prune config` 降级为指引文案；`settingsEnabled: false` 可整体关闭该集成（组合行专用，不进 settings 层——开关不能关掉自己）。设计细节见 [docs/settings-integration-design.md](docs/settings-integration-design.md)。
 
 **单模式生效（agent preset 的 `compaction` realm）**。先在该 realm 内*禁用（或删除）原有的 `dsh-compaction-basic` 行*，再插入本引擎——同一 realm 内两个后端不能并存：
 
@@ -198,7 +198,7 @@ DSH 的每个模型请求都派生自其 append-only 会话日志（*surface*）
 | 分层蒸馏（T2/T3） | 再次压缩某块的摘要节点 = 蒸馏该块（tier 2），蒸馏 tier-2 块得 tier 3；tier 与内核块 id 持久化进日志，重启后内核状态从日志再水合、可继续蒸馏 |
 | 压缩记账（影子价格） | `shadowedTokenCount`（宿主占用率据此扣减）**用宿主 token-meter 的固定启发价计价**（`ctx.tokenMeter.measure` 优先、按 `heuristicTokens ?? tokens` 读固定启发价基准，`src/host-tokens.ts` 精确镜像兜底）——绝不混用插件内部的 CJK 感知估算（那是展示货币，混用会把宿主账本扣成负数、卡死中文会话，issue #54），也不按路由重定价的 `node.tokens` 计价（0.1.2+ 图片路由计价下那是请求压力价，读它会让含图片区间的 claim 虚报视觉价、同样扣穿账本，issue #103） |
 | 图片/文件块可见性 | `image`/`file` 块没有字符，早先被投影层静默丢弃——于是它们在压缩范围表里没有 ref、不能当边界、不受内核"最近一条 user 消息"保护，还按 0 token 计价（截图会话里最后一条提问可能被整段压掉，issue #117）。现在 `extractText` 用附件的持久元数据生成一行确定性占位符（`[image image/png shot.png 800x600 4.2KB]`、`[file notes.txt 1.0KB]`，与宿主对文件的 handle 文本投影同源），媒体价格读宿主 token-meter 节点上 `tokens` 与 `heuristicTokens` 的差值（该节点只暴露这两个价格：`tokens` 是当前路由下的请求压力，媒体出现时带适配器声明的视觉价，`heuristicTokens` 是与路由无关的固定启发式——差值即路由多收的那部分），并在此之上**叠加宿主固定启发式对媒体引用的结构价**（`hostMediaStructuralPrice`，镜像宿主自己的 `estimateStructuralBlock`）：今天所有适配器都不声明视觉价，差值恒为 0，只读差值会让图片重新看起来"免费"，范围表行尾标注 `[+N images]`；无媒体的会话不做任何额外测量 |
-| 注入指令行卫生 | 宿主会把 AGENTS.md 等策略文件注入会话表面；压缩其**当前副本**会让宿主立刻重注入同一份文件——压缩→重注→压缩死循环（issue #71）。可压缩范围表把注入行当屏障：永不提供、永不计入段；手动压缩（模型的 compress 工具、人用的 /acp compress 命令）若覆盖某文件的当前副本都会被**直接拒绝**（报错点名行号，并提示过期的旧副本可以压），因为压当前副本没有收益——宿主必重贴。按 `source.changes[].scope`（= 一个文件）分组，只有每组最新副本受保护——被更新取代的旧副本可以安全压缩 |
+| 注入指令行卫生 | 宿主会把 AGENTS.md 等策略文件注入会话表面；压缩其**当前副本**会让宿主立刻重注入同一份文件——压缩→重注→压缩死循环（issue #71）。可压缩范围表把注入行当屏障：永不提供、永不计入段；手动压缩（模型的 compress 工具、人用的 /acp-prune compress 命令）若覆盖某文件的当前副本都会被**直接拒绝**（报错点名行号，并提示过期的旧副本可以压），因为压当前副本没有收益——宿主必重贴。按 `source.changes[].scope`（= 一个文件）分组，只有每组最新副本受保护——被更新取代的旧副本可以安全压缩 |
 
 承载性的压缩指引（工具、哲学、摘要规则、tier 蒸馏/浓缩规则）注册为一次性系统提示段；每条 nudge 携带精简版（效率提示 + 哲学 + 上下文分解 + 压缩规则 + 范围表 + 批量提示）。刻意**不做自动摘要**：自动策略只 nudge 模型（`compactIfNeeded` 返回 null）。
 
@@ -216,7 +216,7 @@ DSH 的每个模型请求都派生自其 append-only 会话日志（*surface*）
 | `decompress` | 恢复已压缩块的原始内容（只读）；接受 acp_status 显示的 `bN` 或 compaction id。大块按字符预算分页（默认每页约 7K 字符、至多 100 条），使普通页面低于宿主 tool-result 截断阈值（8192）；`offset`/`limit` + 续页提示走完全块 |
 | `search_context` | 按关键词搜索压缩块摘要与原文（acp-kernel hybrid 检索：词干化 + CJK bigram + 模糊）；命中回链所属块 |
 | `acp_status` | CONTEXT BREAKDOWN（tool/text/summaries 占可见总量）+ 压缩块账本 + nudge 决策行 + `Checkpoint seqs` 行（active 块的 `bN → seq` 蒸馏入口，issue #60）；不含上下文窗口。支持钻取：`scope:"compressed"` 逐块、`scope:"uncompressed"` + `view:"messages"`/`"ranges"` 逐消息/区间，`tool` 过滤、`sort` 排序、`limit` 截断。钻取行 ref 是内核 mN——可直接作为 `compress` 的 `startSeq`/`endSeq`（自动映射为 live surface seq）；`Surface:` 的 seq 同样可用 |
-| `/acp` | 从命令栏执行 status / compress / decompress；status 额外展示 human-side 窗口信息（estimated context、context window 来源、压缩账本、**nudge 仲裁**——`nudge: idle/ACTIVE — reason` 及距下一次 nudge 还差多少 token，与 nudge 路径同一内核判定） |
+| `/acp-prune` | 从命令栏执行 status / compress / decompress；status 额外展示 human-side 窗口信息（estimated context、context window 来源、压缩账本、**nudge 仲裁**——`nudge: idle/ACTIVE — reason` 及距下一次 nudge 还差多少 token，与 nudge 路径同一内核判定） |
 
 - **摘要标源（模型自写摘要的框架行）**：每条压缩摘要在写入时前置 `[Model-written summary — not user words; re-verify any obligations before relying on them]`——同时写进持久化摘要事件与其 checkpoint 节点（同一份文本），投影路径对旧块幂等补框。目的：阻止模型把摘要里的义务句当成用户原话直接执行。
 - **瘦身 nudge**：压缩哲学/规则段不再随每次 nudge 重复（它们已在系统提示里）；nudge 正文只保留触发框架 + 上下文分解 + 范围表。模板路径（`config.prompts.nudge`）同样摘除这些段落。设计背景：[docs/injection-governance-design.md](docs/injection-governance-design.md)。
@@ -238,16 +238,16 @@ DSH 的每个模型请求都派生自其 append-only 会话日志（*surface*）
 
 | 键 | 默认值 | 含义 |
 |---|---|---|
-| `modelContextLimit` | 自动探测（回退 `128000`） | 用于内核压力决策的上下文窗口；显式配置时优先且跳过探测。省略时优先读宿主会话投影 `contextPressure.contextWindow`（按**当前真实路由**披露的新窗口，切模型会话自动跟随，无需重启），无投影时再从模型 API 探测；显式配置同样跳过输出预留扣减（分母完全由操作者定义）（运行时热调：`/acp config`） |
-| `autoModelContextLimit` | `true` | 从模型 API 自动探测真实窗口（`agent.ctx.llm.resolveModelInfo`）；探测失败回退默认值，`/acp` 命令展示窗口来源（模型工具 `acp_status` 不含窗口信息）。省略时窗口先读宿主投影（`windowFor` → `projectedContextWindow`，`src/window.ts`）再走探测；投影与探测在 `autoModelContextLimit: false` 时均跳过。探测失败会在宿主日志与 `/acp` 面板提示（`restart to re-probe`）——失败结果同样被缓存，修复网关后需重启或显式设置 `modelContextLimit` 才会重新探测。探测成功后还会**扣减 adapter 的每请求输出上限**（`defaultMaxTokens`，窗口末端每请求保证的输出预留）：所有下游压力决策（nudge 档位、truncate、growth）以「可持续输入预算」（窗口 − 输出预留）为分母——96K 窗口 + 16K 上限实际最多承载 80K 输入，原裸窗口分母会把用量低估 cap/window（此处 ≈17%；小上下文窗口模型比例更高）；上限未披露、显式配置或探测失败时保持裸窗口行为，`/acp status` 展示扣减明细（raw − reservation）。经 `/acp config` 改动 `modelContextLimit`/`autoModelContextLimit` 会清空窗口缓存，改完即重探 |
-| `nudgeMinContextLimitPct` | 内核默认 `0.45` | Nudge 窗口下界（用量占比）——仅作配置校验，增长路径的触发没有百分比下限——与 billion-context-pi 相同的默认值（运行时热调：`/acp config`） |
-| `nudgeMaxContextLimitPct` | engine 默认 `0.70`（内核/pi 默认 `0.75`） | 过限线：超过此值则无论增长与否都触发 nudge——刻意低于宿主 compaction-basic 的 80% 自动压缩线，保证强制 nudge 先触发；显式配置优先（`coreOverrides.nudge` 同名键优先级更高，见下）（运行时热调：`/acp config`） |
-| `nudgeEmergencyThresholdPct` | engine 默认 `0.85`（内核/pi 默认 `0.95`） | 紧急 nudge（绕过每轮去重，但每个 user turn 最多注入 3 次——issue #108）——从 `0.95` 下调：95% 时模型已无操作空间且会被 80% 自动压缩线遮蔽；显式配置优先（`coreOverrides.nudge` 同名键优先级更高，见下）（运行时热调：`/acp config`） |
-| `preset` | — | （可选）一句话选择 nudge 的激进程度：`preserve` / `relaxed` / `balanced` / `efficient` / `aggressive`（详见下文「预设」）。只填充你**未显式设置**的三个 nudge 阈值，优先级 显式值 > `preset` > engine 默认；未知名称在构造期报错，与显式阈值合并后若窗口反向（`min` / `max` / `emergency` 顺序错误）同样在构造期报错。不影响其他键（`modelContextLimit` / `autoNudge` / `prompts` / `coreOverrides`） （组合行专用：`preset` 尚未接入 `/acp config`，见 issue #75 后续） |
+| `modelContextLimit` | 自动探测（回退 `128000`） | 用于内核压力决策的上下文窗口；显式配置时优先且跳过探测。省略时优先读宿主会话投影 `contextPressure.contextWindow`（按**当前真实路由**披露的新窗口，切模型会话自动跟随，无需重启），无投影时再从模型 API 探测；显式配置同样跳过输出预留扣减（分母完全由操作者定义）（运行时热调：`/acp-prune config`） |
+| `autoModelContextLimit` | `true` | 从模型 API 自动探测真实窗口（`agent.ctx.llm.resolveModelInfo`）；探测失败回退默认值，`/acp-prune` 命令展示窗口来源（模型工具 `acp_status` 不含窗口信息）。省略时窗口先读宿主投影（`windowFor` → `projectedContextWindow`，`src/window.ts`）再走探测；投影与探测在 `autoModelContextLimit: false` 时均跳过。探测失败会在宿主日志与 `/acp-prune` 面板提示（`restart to re-probe`）——失败结果同样被缓存，修复网关后需重启或显式设置 `modelContextLimit` 才会重新探测。探测成功后还会**扣减 adapter 的每请求输出上限**（`defaultMaxTokens`，窗口末端每请求保证的输出预留）：所有下游压力决策（nudge 档位、truncate、growth）以「可持续输入预算」（窗口 − 输出预留）为分母——96K 窗口 + 16K 上限实际最多承载 80K 输入，原裸窗口分母会把用量低估 cap/window（此处 ≈17%；小上下文窗口模型比例更高）；上限未披露、显式配置或探测失败时保持裸窗口行为，`/acp-prune status` 展示扣减明细（raw − reservation）。经 `/acp-prune config` 改动 `modelContextLimit`/`autoModelContextLimit` 会清空窗口缓存，改完即重探 |
+| `nudgeMinContextLimitPct` | 内核默认 `0.45` | Nudge 窗口下界（用量占比）——仅作配置校验，增长路径的触发没有百分比下限——与 billion-context-pi 相同的默认值（运行时热调：`/acp-prune config`） |
+| `nudgeMaxContextLimitPct` | engine 默认 `0.70`（内核/pi 默认 `0.75`） | 过限线：超过此值则无论增长与否都触发 nudge——刻意低于宿主 compaction-basic 的 80% 自动压缩线，保证强制 nudge 先触发；显式配置优先（`coreOverrides.nudge` 同名键优先级更高，见下）（运行时热调：`/acp-prune config`） |
+| `nudgeEmergencyThresholdPct` | engine 默认 `0.85`（内核/pi 默认 `0.95`） | 紧急 nudge（绕过每轮去重，但每个 user turn 最多注入 3 次——issue #108）——从 `0.95` 下调：95% 时模型已无操作空间且会被 80% 自动压缩线遮蔽；显式配置优先（`coreOverrides.nudge` 同名键优先级更高，见下）（运行时热调：`/acp-prune config`） |
+| `preset` | — | （可选）一句话选择 nudge 的激进程度：`preserve` / `relaxed` / `balanced` / `efficient` / `aggressive`（详见下文「预设」）。只填充你**未显式设置**的三个 nudge 阈值，优先级 显式值 > `preset` > engine 默认；未知名称在构造期报错，与显式阈值合并后若窗口反向（`min` / `max` / `emergency` 顺序错误）同样在构造期报错。不影响其他键（`modelContextLimit` / `autoNudge` / `prompts` / `coreOverrides`） （组合行专用：`preset` 尚未接入 `/acp-prune config`，见 issue #75 后续） |
 | `coreOverrides` | — | 任何其他 acp-kernel `Config` 覆盖（billion-context-pi 的 `coreOverrides` 逃生口）。合并顺序：内核默认 → 顶层 pct 配置 → `coreOverrides.nudge` 最后落地——同名键以它为准（只读：组合行专用，不经 settings 层） |
 | `autoTools` | `true` | 在 `ctx.tools` 注册四个模型工具 |
-| `autoCommand` | `true` | 在 `ctx.commands` 注册 `/acp` 命令 |
-| `autoNudge` | `true` | 当内核建议时向 `agent/pre-step` 注入 nudge（运行时热调：`/acp config`） |
+| `autoCommand` | `true` | 在 `ctx.commands` 注册 `/acp-prune` 命令 |
+| `autoNudge` | `true` | 当内核建议时向 `agent/pre-step` 注入 nudge（运行时热调：`/acp-prune config`） |
 | `settingsEnabled` | `true`（未配置即启用） | （可选）整体关闭运行时设置集成（组合行专用，不进 settings 层——开关不能关掉自己；关闭后组合行 `config:` 仍是唯一生效通道） |
 | `prompts` | — | （可选）自定义提示词文案：nudge / 范围表 / system prompt / 工具描述按槽位覆盖（模板 + 命名占位符，构造期校验；见上文「自定义提示词文案」与 [docs/configurable-prompts-design.md](docs/configurable-prompts-design.md)） |
 
@@ -265,9 +265,9 @@ DSH 的每个模型请求都派生自其 append-only 会话日志（*surface*）
 
 - **只填未设的阈值**：`preset` 仅填充你没有显式设置的 `nudge*ContextLimitPct`；同时写了 `preset` 和某个阈值时，该阈值以你的显式值为准（优先级 显式 > preset > 默认）。
 - **不碰其他旋钮**：`modelContextLimit`、`autoNudge`、`prompts`、`coreOverrides` 完全不受影响；`coreOverrides.nudge` 仍最后落地、同名键最高优先。
-- **查看当前档位**：`/acp status` 会打印生效的 `preset` 及其**真实生效的**三个阈值——这一行镜像 `kernelConfigFor` 的合并顺序，所以你在其上做的显式覆盖、以及 `coreOverrides.nudge` 里的同名键都会如实显示。
+- **查看当前档位**：`/acp-prune status` 会打印生效的 `preset` 及其**真实生效的**三个阈值——这一行镜像 `kernelConfigFor` 的合并顺序，所以你在其上做的显式覆盖、以及 `coreOverrides.nudge` 里的同名键都会如实显示。
 - **拼错即报错**：未知名称在引擎构造期直接抛错并列出合法值（与自定义提示词模板同一约定），不会静默回退默认。注意 bundle 行本身不带 `config`，`preset` 只能由你自己的同 id `compaction-acp` 行提供；该行构造失败即挂载失败，profile 会在你修好配置前一直起不来（fail-fast 的既定行为）。
-- **运行时热切换**：预设目前走组合配置（安装 / `cordis.patch.yml`）；待 #75 的 settings.yaml 热加载落地后，可在 `/acp config` 里改。本 PR 先让它在组合层可用。
+- **运行时热切换**：预设目前走组合配置（安装 / `cordis.patch.yml`）；待 #75 的 settings.yaml 热加载落地后，可在 `/acp-prune config` 里改。本 PR 先让它在组合层可用。
 - **反向窗口直接报错**：与显式阈值合并后若出现 `min > max`、`max > emergency` 或 `min > emergency`（例如 `preset: 'preserve'` 配 `nudgeMaxContextLimitPct: 0.5`），引擎在构造期抛错并列出三个值。内核对这种配置只打警告、不会拒绝，所以这道校验由引擎在 `resolveAcpConfig` 里补上。
 - **与宿主 80% 线赛跑的是 `max`**：反复触发的过限提醒（`OVER-LIMIT`）由 `max` 决定；`preserve` / `relaxed` 的 emergency（0.93 / 0.90）高于宿主 compaction-basic 的 80% 线，只是超过它之后的标签升级，宿主先压缩时不会到达。
 - **`min` 是首见提醒与 T2/T3 块数触发的地板**：内核 0.0.63 在运行时读它两处——① `firstSightMassReady`（从未提醒过、还没有基线、用量 ≥ `min` 且待压内容达到增长下限时立刻提醒一次，理由串带 `[first-sight mass]`）；② `tierCountUsageFloor`（T2/T3 的「块数达标」触发同样要求用量 ≥ `min`）。常规 T1 增长提醒不看 `min`（由 `max` 与 `growthRatio` 决定），所以五档之间的主要差异仍来自 `max` 与 `emergency`，但更低的 `min` 会让首见提醒来得更早。
@@ -301,7 +301,7 @@ src/
 ├── system-prompt.ts# M4: 一次性 ACP 指引段（让 nudge 保持简短）
 ├── config.ts       # 内核配置组装（阈值 + coreOverrides）
 ├── window.ts       # 自动上下文窗口探测（宿主投影优先，LLM 运行时探测回退，兜底 128000）+ 输出预留探测（defaultMaxTokens，windowFor 内扣除）
-└── commands.ts     # M4: /acp 斜杠命令
+└── commands.ts     # M4: /acp-prune 斜杠命令
 ```
 
 ## License

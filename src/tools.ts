@@ -48,7 +48,7 @@ import type { PresetName } from './presets.ts'
 export interface ToolEnvironment extends KernelConfigInput {
   readonly kernel: CompressionCore
   readonly store: AcpStateStore
-  /** Display-only: the named preset that produced the nudge thresholds above, if any (`/acp status` names it). Never read by the kernel path. */
+  /** Display-only: the named preset that produced the nudge thresholds above, if any (`/acp-prune status` names it). Never read by the kernel path. */
   readonly preset?: PresetName
   /** Resolve the effective context window for an agent (optional: status falls back to modelContextLimit). */
   readonly windowFor?: (agent: Agent) => Promise<AcpWindow>
@@ -62,7 +62,7 @@ export interface ToolEnvironment extends KernelConfigInput {
    */
   readonly compressCallIdsToHide?: Set<string>
   /**
-   * Read/write access to the runtime settings layer for `/acp config`.
+   * Read/write access to the runtime settings layer for `/acp-prune config`.
    * Absent surfaces (never expected — the engine always builds one) would
    * degrade the command to advice text.
    */
@@ -98,7 +98,7 @@ function requireAgent(exec: ToolRunContext): Agent {
  * Resolve the effective context window for a tool or command run: probe the
  * agent's real window via `windowFor` when provided, otherwise fall back to
  * the environment's `modelContextLimit`. Shared by the compress and
- * acp_status tool handlers and the `/acp` command so the resolution logic
+ * acp_status tool handlers and the `/acp-prune` command so the resolution logic
  * lives in exactly one place (issue #63 — the tools used the 128K fallback
  * for pressure decisions even when auto-detection had found a larger window).
  */
@@ -745,7 +745,7 @@ interface DecompressArgs {
 
 /** Resolve a block arg to its durable compaction id: exact `bN` kernel ref
  *  first (acp_status shows `bN`), then the compaction-id prefix match that
- *  search_context and /acp have always used. The `bN` branch is exact
+ *  search_context and /acp-prune have always used. The `bN` branch is exact
  *  (`/^b\d+$/` with `$`), so a UUID that happens to start with `b1` cannot be
  *  shadowed — full UUIDs and 8-char prefixes never match the anchored regex. */
 function resolveBlockId(session: Session, arg: string): string | null {

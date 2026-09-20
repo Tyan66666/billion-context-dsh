@@ -59,7 +59,7 @@ export interface AcpWindow {
   readonly outputReserved?: number
 }
 
-/** Human label for an AcpWindow's source (used by /acp status). */
+/** Human label for an AcpWindow's source (used by /acp-prune status). */
 export function windowSourceLabel(window: AcpWindow): string {
   if (window.source === 'explicit') return 'configured'
   if (window.source === 'projection') {
@@ -68,7 +68,7 @@ export function windowSourceLabel(window: AcpWindow): string {
   if (window.source === 'auto') {
     return `auto-detected from ${window.provider ?? '?'}/${window.model ?? '?'}`
   }
-  if (window.probeFailed === true) return 'default (auto-detection failed — see /acp config)'
+  if (window.probeFailed === true) return 'default (auto-detection failed — see /acp-prune config)'
   return 'default (auto-detection unavailable)'
 }
 
@@ -142,7 +142,7 @@ export function liveRoute(agent: Agent): { provider: string; model: string } | n
  * resolved against, in ONE place: the session's live `request/context` route,
  * falling back to `agent.options` only before the session has recorded any
  * route. `windowFor` (src/index.ts), the `compress` tool (src/tools.ts) and
- * `/acp compress` (src/commands.ts) all need this exact pair; three hand-copied
+ * `/acp-prune compress` (src/commands.ts) all need this exact pair; three hand-copied
  * copies is precisely how a stale-route bug gets fixed in one call site and
  * left behind in the others.
  */

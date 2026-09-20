@@ -12,7 +12,7 @@
 #      idempotent and keeps the plugin self-sufficient on every supported DSH.)
 #   2. `compaction-acp` — the ACP engine, mounted at the HOST plane, so its
 #      model tools (`compress`, `decompress`, `search_context`, `acp_status`),
-#      the `/acp` command, the advisory nudge, and the guidance section reach
+#      the `/acp-prune` command, the advisory nudge, and the guidance section reach
 #      EVERY mode (standard / code / minimal / cordis / custom presets) of the
 #      profile the plugin was installed into.
 #

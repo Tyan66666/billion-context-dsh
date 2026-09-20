@@ -40,12 +40,12 @@ npm install --prefix ~/.dsh/profiles/web ./billion-context-dsh-0.2.1.tgz
 dsh plugin --profile web add billion-context-dsh
 ```
 
-装完重启 `dsh`（bundle 层在启动时组合）即生效：四个模型工具、`/acp` 命令、nudge、
+装完重启 `dsh`（bundle 层在启动时组合）即生效：四个模型工具、`/acp-prune` 命令、nudge、
 窗口自动探测默认全开，**无需手写任何组合行**。需要自定义 `config`（`modelContextLimit`
 / `prompts` / nudge 阈值）时，在 profile 的 `cordis.patch.yml` 里写一个**同 id**
 （`compaction-acp`）的行并附 `config:` 即可覆盖 bundle 默认行（见 §2 的例子）。
 六个标量键（`modelContextLimit` / `autoModelContextLimit` / nudge 三阈值 / `autoNudge`）
-还可以**运行时热调**：编辑 `~/.dsh/settings.yaml` 的 `compaction-acp` 段或用 `/acp config`
+还可以**运行时热调**：编辑 `~/.dsh/settings.yaml` 的 `compaction-acp` 段或用 `/acp-prune config`
 子命令，改动立即生效、无需重启（`settingsEnabled: false` 可整体关闭该集成——见 README
 「运行时设置」）。
 
@@ -74,7 +74,7 @@ dsh plugin --profile web add github:Tyan66666/billion-context-dsh#v0.2.19
 编辑 `~/.dsh/profiles/web/cordis.patch.yml`（你的 profile 的补丁文件），追加：
 
 ```yaml
-# ACP 作为全局压缩后端：四个模型工具 + `/acp` 命令 + nudge + ACP 提示词段，
+# ACP 作为全局压缩后端：四个模型工具 + `/acp-prune` 命令 + nudge + ACP 提示词段，
 # 对每个模式（standard / code / minimal / cordis / 自定义预设）都生效。
 # 通常应禁用 host 的 compaction-basic（同一 realm 内两个后端同时
 # provide `ctx.compaction` 会冲突），但注意：dsh 0.1.0-rc.6+ 上 web-app
@@ -111,7 +111,7 @@ dsh plugin --profile web add github:Tyan66666/billion-context-dsh#v0.2.19
         #     acpStatus: '报告 ACP 块账本：压缩块数、回收 token、当前上下文压力。'
 ```
 
-作用：host 平面注册 `ctx.compaction` + 四个模型工具 + `/acp` 命令 + `agent/pre-step` nudge 监听，所有模式共享一份。
+作用：host 平面注册 `ctx.compaction` + 四个模型工具 + `/acp-prune` 命令 + `agent/pre-step` nudge 监听，所有模式共享一份。
 
 注意：shipped 预设（standard / code / cordis）各自内部仍带着 realm 级 `dsh-compaction-basic` 兜底（shipped 安装不可改），所以这些模式里"自动压力压缩"仍由 basic 兜底，但 ACP 的 `compress` 工具、nudge、提示词段照常可用；minimal 与不带 compaction realm 的预设直接使用 host 的 ACP 引擎。
 
@@ -183,7 +183,7 @@ cd /Users/yintianan/GitHub/billion-context-dsh
 npm run typecheck && npm test && npm run build
 ```
 
-162 个测试覆盖：seam 挂载、窗口探测、CJK 感知 token 估算、消息投影、压缩事务（事件序列 + surface 遮蔽）、日志重建账本、四工具端到端、nudge 注入/去重/紧急绕过、可配置提示词模板与校验、**影子价格宿主词汇端到端**（真实 TokenMeter + SessionProjectionRegistry 复现 issue #54：claim == 宿主 meter 价、投影 messageTokens 非负、/acp compress resolved 边界、prune 宿主定价）、**T2 蒸馏可用性**（issue #60：nudge tier seqs 首尾直接压成 tier-2 块端到端；每次压缩结果都报告 tier——含 tier 1，无静默降级）。
+162 个测试覆盖：seam 挂载、窗口探测、CJK 感知 token 估算、消息投影、压缩事务（事件序列 + surface 遮蔽）、日志重建账本、四工具端到端、nudge 注入/去重/紧急绕过、可配置提示词模板与校验、**影子价格宿主词汇端到端**（真实 TokenMeter + SessionProjectionRegistry 复现 issue #54：claim == 宿主 meter 价、投影 messageTokens 非负、/acp-prune compress resolved 边界、prune 宿主定价）、**T2 蒸馏可用性**（issue #60：nudge tier seqs 首尾直接压成 tier-2 块端到端；每次压缩结果都报告 tier——含 tier 1，无静默降级）。
 
 ## 6. 回滚
 
