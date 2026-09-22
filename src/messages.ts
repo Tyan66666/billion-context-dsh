@@ -355,11 +355,35 @@ function contentBlocksOfEvent(event: SessionEvent): unknown {
  * Whether a surface user message is a compaction checkpoint node (already
  * compressed). Defined here (not in region.ts) so the classifier below and
  * region.ts share ONE implementation.
+ *
+ * Recognizes BOTH persisted shapes of `compactCheckpointSource` output
+ * (issue #166):
+ *  - legacy (dsh-compaction ≤0.1.6 line): `{ kind: 'plugin', plugin: 'compact' }`
+ *  - 0.1.7+ line: `{ kind: 'compact-checkpoint' }` — verified against the
+ *    published dsh-compaction@0.1.7-alpha.1 tarball (lib/types/checkpoint.js).
+ * Both must stay recognized forever: a session compressed on an older host is
+ * read in its legacy shape there, while on 0.1.7 the host's V3→V4 migration
+ * rewrites every legacy row to the new shape when the log opens — so the same
+ * log can surface either shape depending on where it is opened.
  */
 export function isCheckpointNode(event: SessionEvent): boolean {
   if (event.type !== 'user/message') return false
-  const source = (event.data as { source?: { plugin?: string } }).source
-  return source?.plugin === 'compact'
+  const source = (event.data as { source?: { kind?: string; plugin?: string } }).source
+  if (!source) return false
+  return source.plugin === 'compact' || source.kind === 'compact-checkpoint'
+}
+
+/**
+ * The durable compaction id a checkpoint node carries, in EITHER persisted
+ * shape (`compactionId` sits at the top level of `source` in both), or
+ * undefined for non-checkpoint events and for malformed checkpoint rows that
+ * lost their id. The ONE reader for this field — never re-derive the
+ * checkpoint predicate at the call site (issue #166).
+ */
+export function checkpointCompactionIdOf(event: SessionEvent): string | undefined {
+  if (!isCheckpointNode(event)) return undefined
+  const source = (event.data as { source?: { compactionId?: unknown } }).source
+  return typeof source?.compactionId === 'string' ? source.compactionId : undefined
 }
 
 /**
@@ -375,7 +399,9 @@ export function isCheckpointNode(event: SessionEvent): boolean {
  *   compress-pair replacement stubs. Their content is derived from
  *   already-visible messages, so folding them into an adjacent real segment
  *   is zero-loss — this preserves main's behavior for engine-authored rows.
- * - `checkpoint` — compaction summary nodes (`plugin: 'compact'`).
+ * - `checkpoint` — compaction summary nodes, either persisted shape of
+ *   `compactCheckpointSource` output (`plugin: 'compact'` or 0.1.7's
+ *   `kind: 'compact-checkpoint'`; see isCheckpointNode).
  *   Distillation is an explicit act; never folded into any segment.
  * - `instruction` — host-authored policy/instructions: AGENTS.md injections
  *   (both host shapes), skill catalogs, and ANY unknown `kind:'plugin'` row.
