@@ -349,7 +349,13 @@ export function buildNudge(
   )
   const message = createUserMessage({
     content: [{ type: 'text', text }],
-    source: { kind: 'plugin', plugin: 'acp-nudge' },
+    // V4 producer kind (issue #163): DSH ≥0.1.7's V4 admission rejects the
+    // legacy wrapper shape `{ kind: 'plugin', plugin: … }` outright (a wedged
+    // batch fails the NEXT turn with "format v4 message requires a
+    // producer-owned source kind"). `plugin:<name>` is exactly what the host's
+    // own V3→V4 migration emits for unregistered plugins, and DSH 0.1.5
+    // sessions accept it too (probe-verified), so no version gate is needed.
+    source: { kind: 'plugin:acp-nudge' },
   })
   return { message, emergency }
 }

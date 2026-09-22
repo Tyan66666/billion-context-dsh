@@ -15,6 +15,19 @@ import type { CoreMessage } from 'acp-kernel'
 import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
 import { eventAtOf, sessionEventsOf } from './session-events.ts'
 
+// DSH ≥0.1.7's V4 session format admits producer-owned source kinds
+// ('plugin:<name>') and rejects the legacy wrapper shape
+// `{ kind: 'plugin', plugin: '<name>' }` (issue #163). dsh-llm's
+// MessageSourceMap predates V4 admission, so register this plugin's two
+// producer kinds on its documented merge-extensibility seam ("plugins add
+// their own kinds"). Type-level only — no runtime effect.
+declare module '@deepseek-ai/dsh-llm/message' {
+  interface MessageSourceMap {
+    acpNudge: { kind: 'plugin:acp-nudge' }
+    acpPrune: { kind: 'plugin:billion-context-dsh' }
+  }
+}
+
 /**
  * Extract plain text from a DSH content block array or string.
  *
@@ -419,17 +432,45 @@ const HOST_INSTRUCTION_KINDS: ReadonlySet<string> = new Set([
 ])
 
 /**
- * True for AGENTS.md instruction rows in BOTH host shapes: the hook shape
- * (`kind:'agent-instructions'`, form 'instructions') and the baseline shape
- * (`kind:'plugin'` + plugin 'agent-instructions'). Shared by the newest-row
- * scan and the range scanner so protection and folding always agree on what
- * counts as an AGENTS.md row.
+ * Resolve the owning plugin name from either durable source shape: the legacy
+ * V3 wrapper `{ kind: 'plugin', plugin: '<name>' }` or the V4 producer kind
+ * `'plugin:<name>'`. DSH 0.1.7's V3→V4 migration rewrites every unregistered
+ * plugin row into the latter on file open, so both shapes coexist on a live
+ * surface until a session has been fully rewritten (issue #163). Returns
+ * undefined when neither shape is present, or when the name is missing,
+ * non-string, or empty — callers then keep their conservative fallback.
+ */
+export function sourcePluginOf(
+  source: { kind?: unknown; plugin?: unknown } | undefined,
+): string | undefined {
+  if (source === undefined || typeof source !== 'object') return undefined
+  const kind = source.kind
+  if (kind === 'plugin') {
+    return typeof source.plugin === 'string' && source.plugin.length > 0 ? source.plugin : undefined
+  }
+  if (typeof kind === 'string' && kind.startsWith('plugin:')) {
+    const name = kind.slice('plugin:'.length)
+    return name.length > 0 ? name : undefined
+  }
+  return undefined
+}
+
+/**
+ * True for AGENTS.md instruction rows in ALL host shapes: the hook shape
+ * (`kind:'agent-instructions'`, form 'instructions'), the legacy V3 wrapper
+ * (`kind:'plugin'` + plugin 'agent-instructions'), and the V4 producer kind
+ * (`kind:'plugin:agent-instructions'`) that DSH 0.1.7's migration rewrites
+ * legacy rows into on file open (issue #163) — a migrated session must keep
+ * its newest-row pin, or the current copy becomes foldable and the
+ * compress → re-inject loop returns. Shared by the newest-row scan and the
+ * range scanner so protection and folding always agree on what counts as an
+ * AGENTS.md row.
  */
 export function isAgentInstructionsRow(event: SessionEvent): boolean {
   if (event.type !== 'user/message') return false
   const source = (event.data as { source?: { kind?: string; plugin?: string } }).source
   if (!source) return false
-  return source.kind === 'agent-instructions' || (source.kind === 'plugin' && source.plugin === 'agent-instructions')
+  return source.kind === 'agent-instructions' || sourcePluginOf(source) === 'agent-instructions'
 }
 
 export function classifySurfaceEvent(event: SessionEvent): SurfaceEventClass {
@@ -441,9 +482,16 @@ export function classifySurfaceEvent(event: SessionEvent): SurfaceEventClass {
   if (!source) return 'real' // user turn written without a source: genuine content
   const kind = source.kind
   if (kind === 'user') return 'real' // real user turn (host stamps {kind:'user'})
-  if (kind === 'plugin') {
-    if (source.plugin !== undefined && METADATA_PLUGINS.has(source.plugin)) return 'metadata'
-    if (source.plugin !== undefined && REAL_CONTENT_PLUGINS.has(source.plugin)) return 'real'
+  // Plugin-attributed rows arrive in two shapes: the legacy V3 wrapper
+  // `{ kind: 'plugin', plugin: '<name>' }` and the V4 producer kind
+  // `'plugin:<name>'` that DSH 0.1.7's V3→V4 migration rewrites every
+  // unregistered plugin row into on file open (issue #163). Both classify by
+  // the SAME name table; a legacy wrapper without a parseable name stays
+  // conservative (instruction), exactly as before this change.
+  const plugin = sourcePluginOf(source)
+  if (kind === 'plugin' || plugin !== undefined) {
+    if (plugin !== undefined && METADATA_PLUGINS.has(plugin)) return 'metadata'
+    if (plugin !== undefined && REAL_CONTENT_PLUGINS.has(plugin)) return 'real'
     // Unknown plugin names are policy rows until proven otherwise: a future
     // presence-driven injection must never silently become compressible.
     return 'instruction'
@@ -472,6 +520,10 @@ export function isRealUserTurn(event: SessionEvent): boolean {
   // Host content rows that are NOT the user speaking (dynamic-context snapshot,
   // approval notice, deferred tool context): foldable, but they must never win
   // the protection window — that is exactly the bug class issue #71 fixes.
-  if (source?.plugin !== undefined && REAL_CONTENT_PLUGINS.has(source.plugin)) return false
+  // Both source shapes resolve through sourcePluginOf (issue #163); see also
+  // the out-of-scope follow-up for host rows renamed to direct kinds without
+  // any plugin field in DSH 0.1.7.
+  const plugin = sourcePluginOf(source)
+  if (plugin !== undefined && REAL_CONTENT_PLUGINS.has(plugin)) return false
   return source?.kind !== 'subagent-report' && source?.kind !== 'subagent-settled'
 }
