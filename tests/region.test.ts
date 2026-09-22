@@ -546,6 +546,19 @@ test('M5: stripOrphanedSurfaceToolMessages removes orphan results and orphan cal
     2,
     'each hidden node leaves one prune note',
   )
+  const pruneNoteRows = session.snapshotEvents().filter((event) => {
+    if (event.type !== 'user/message') return false
+    const content = (event.data as { content?: Array<{ type?: string; text?: string }> }).content
+    return content?.some((block) => block.type === 'text' && block.text === PRUNE_NOTE) === true
+  })
+  assert.equal(pruneNoteRows.length, 2, 'both prune notes are durable user/message rows')
+  for (const row of pruneNoteRows) {
+    assert.equal(
+      (row.data as { source?: { kind?: string } }).source?.kind,
+      'plugin:billion-context-dsh',
+      'prune tombstones carry the producer-owned source kind DSH 0.1.7 V4 admission accepts (issue #163)',
+    )
+  }
   // The pairing cache is healthy again and the surface yields compressible spans.
   assert.doesNotThrow(() => resolveSurfaceRange(session, 1, session.surface.nodes[session.surface.nodes.length - 1]!))
   assert.doesNotThrow(() => buildCompressibleSeqRanges(session, wholeSurfaceRangeView(session), { preserveRecent: 0 }), 'orphan cleanup leaves the range table computable')

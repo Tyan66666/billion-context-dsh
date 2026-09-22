@@ -16,6 +16,21 @@ import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
 import { eventAtOf, sessionEventsOf } from './session-events.ts'
 
 /**
+ * DSH 0.1.7's V4 session format spells a producer-owned plugin row
+ * `kind: 'plugin:<name>'` — its V3→V4 migration emits exactly that for
+ * unregistered plugins, and the new admission check rejects the legacy
+ * `kind: 'plugin'` wrapper ("format v4 message requires a producer-owned
+ * source kind"). The pinned 0.1.5-line dsh-llm predates the spelling; its
+ * `MessageSourceMap` documents itself as merge-extensible, so this module
+ * merge adds the vocabulary — type-only, erased at build time. See #163.
+ */
+declare module '@deepseek-ai/dsh-llm/message' {
+  interface MessageSourceMap {
+    'plugin-producer': { kind: `plugin:${string}` }
+  }
+}
+
+/**
  * Extract plain text from a DSH content block array or string.
  *
  * Recursive: a real DSH `tool-result` block is `{ type: 'tool-result',
@@ -441,9 +456,13 @@ export function classifySurfaceEvent(event: SessionEvent): SurfaceEventClass {
   if (!source) return 'real' // user turn written without a source: genuine content
   const kind = source.kind
   if (kind === 'user') return 'real' // real user turn (host stamps {kind:'user'})
-  if (kind === 'plugin') {
-    if (source.plugin !== undefined && METADATA_PLUGINS.has(source.plugin)) return 'metadata'
-    if (source.plugin !== undefined && REAL_CONTENT_PLUGINS.has(source.plugin)) return 'real'
+  // DSH 0.1.7 V4 emission and the host's own V3→V4 migration both spell
+  // plugin rows `plugin:<name>`; the legacy `kind: 'plugin'` wrapper (logs
+  // written before 0.1.7) must keep classifying identically — see #163.
+  if (kind === 'plugin' || (kind !== undefined && kind.startsWith('plugin:'))) {
+    const pluginName = kind === 'plugin' ? source.plugin : kind.slice('plugin:'.length)
+    if (pluginName !== undefined && METADATA_PLUGINS.has(pluginName)) return 'metadata'
+    if (pluginName !== undefined && REAL_CONTENT_PLUGINS.has(pluginName)) return 'real'
     // Unknown plugin names are policy rows until proven otherwise: a future
     // presence-driven injection must never silently become compressible.
     return 'instruction'
@@ -472,6 +491,13 @@ export function isRealUserTurn(event: SessionEvent): boolean {
   // Host content rows that are NOT the user speaking (dynamic-context snapshot,
   // approval notice, deferred tool context): foldable, but they must never win
   // the protection window — that is exactly the bug class issue #71 fixes.
-  if (source?.plugin !== undefined && REAL_CONTENT_PLUGINS.has(source.plugin)) return false
+  // Both spellings resolve to the plugin name (issue #163: V4 rows carry it in
+  // `kind` as `plugin:<name>`).
+  const pluginName = source?.kind === 'plugin'
+    ? source.plugin
+    : source?.kind !== undefined && source.kind.startsWith('plugin:')
+      ? source.kind.slice('plugin:'.length)
+      : undefined
+  if (pluginName !== undefined && REAL_CONTENT_PLUGINS.has(pluginName)) return false
   return source?.kind !== 'subagent-report' && source?.kind !== 'subagent-settled'
 }

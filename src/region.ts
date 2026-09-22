@@ -666,9 +666,9 @@ function isToolEvent(event: SessionEvent): boolean {
 // `isCheckpointNode` now lives in src/messages.ts (imported above) so the range
 // scanner, the protected-tail scan and `classifySurfaceEvent` cannot drift
 // apart. A local `isPruneTombstone` was dropped for the same reason: the prune
-// tombstone is written with `source: { kind: 'plugin', plugin:
-// 'billion-context-dsh' }` (see `hideSurfaceSeqs`), which `classifySurfaceEvent`
-// files under `metadata`, so `isRealUserTurn` already refuses it tail protection.
+// tombstone is written with `source: { kind: 'plugin:billion-context-dsh' }`
+// (see `hideSurfaceSeqs`), which `classifySurfaceEvent` files under
+// `metadata`, so `isRealUserTurn` already refuses it tail protection.
 
 /**
  * Whether a surface node is a host-owned system prompt (`system/message`, new
@@ -733,7 +733,9 @@ function hideSurfaceSeqs(
   const body = text !== undefined && text.trim().length > 0 ? text : PRUNE_NOTE
   session.append('user/message', createUserMessage({
     content: [{ type: 'text', text: body }],
-    source: { kind: 'plugin', plugin: 'billion-context-dsh' },
+    // Producer-owned spelling for DSH 0.1.7 V4 admission; see #163 and the
+    // MessageSourceMap merge in messages.ts.
+    source: { kind: 'plugin:billion-context-dsh' },
   }), {
     surfaceOp: { op: 'replace', startSeq: start as SurfaceSeq, endSeq: end as SurfaceSeq },
     sourceEventSeqs: [...seqs] as SurfaceSeq[],

@@ -349,7 +349,11 @@ export function buildNudge(
   )
   const message = createUserMessage({
     content: [{ type: 'text', text }],
-    source: { kind: 'plugin', plugin: 'acp-nudge' },
+    // DSH 0.1.7 V4 admission rejects the retired `kind: 'plugin'` wrapper
+    // ("format v4 message requires a producer-owned source kind"); write the
+    // producer-owned spelling the host's own migration emits (see #163 and
+    // the MessageSourceMap merge in messages.ts).
+    source: { kind: 'plugin:acp-nudge' },
   })
   return { message, emergency }
 }
