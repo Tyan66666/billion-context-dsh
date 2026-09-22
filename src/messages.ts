@@ -381,9 +381,11 @@ export function isCheckpointNode(event: SessionEvent): boolean {
  * predicates that drift apart).
  *
  * - `real` — genuine conversation content (user turns without an injected
- *   source, assistant prose/tool-calls, tool results, sub-agent relay rows).
- *   This is the only class that may win "last real user message" protection
- *   (minus relay rows, see `isRealUserTurn`).
+ *   source, assistant prose/tool-calls, tool results, sub-agent relay rows,
+ *   and host content channels in BOTH spellings: legacy plugin names and the
+ *   DSH >= 0.1.7 direct-kind renames, issue #169). This is the only class
+ *   that may win "last real user message" protection (minus all non-user
+ *   rows, see `isRealUserTurn`).
  * - `metadata` — the engine's own ephemeral rows: nudge echoes and
  *   compress-pair replacement stubs. Their content is derived from
  *   already-visible messages, so folding them into an adjacent real segment
@@ -391,12 +393,13 @@ export function isCheckpointNode(event: SessionEvent): boolean {
  * - `checkpoint` — compaction summary nodes (`plugin: 'compact'`).
  *   Distillation is an explicit act; never folded into any segment.
  * - `instruction` — host-authored policy/instructions: AGENTS.md injections
- *   (both host shapes), skill catalogs, and ANY unknown `kind:'plugin'` row.
- *   Folding these is unsafe (the model would lose live policy text, and the
- *   host re-injects the current AGENTS.md copy when it disappears — the
- *   compress → re-inject loop this PR fixes). Unknown plugin names fall here
- *   deliberately: a future host injection must never silently become
- *   compressible content.
+ *   (both host shapes), skill catalogs, host compaction summary rows
+ *   (`compact-basic`, issue #169), and ANY unknown `kind:'plugin'` row or
+ *   unaudited direct kind. Folding these is unsafe (the model would lose
+ *   live policy text, and the host re-injects the current AGENTS.md copy
+ *   when it disappears — the compress → re-inject loop this PR fixes).
+ *   Unknown channel names fall here deliberately in BOTH namespaces: a
+ *   future host injection must never silently become compressible content.
  */
 export type SurfaceEventClass = 'real' | 'metadata' | 'checkpoint' | 'instruction'
 
@@ -425,10 +428,36 @@ const REAL_CONTENT_PLUGINS: ReadonlySet<string> = new Set([
   'tools-ptc',
 ])
 
+/**
+ * DSH >= 0.1.7 (V4 format) renames the SAME host channels out of the plugin
+ * namespace into DIRECT kinds without any plugin field (the V3→V4 migration's
+ * rename map, audited from @deepseek-ai/dsh-session-persistence-jsonl
+ * 0.1.7-alpha.1): '@deepseek-ai/dsh-system-prompt' -> 'runtime-context',
+ * 'tools-ptc'/'tools-code-mode' -> 'ptc-mode'. Pre-migration logs keep the
+ * legacy plugin shape, so both spellings must classify identically
+ * (issue #169). Same semantics as their plugin counterparts: real content,
+ * foldable, never the user speaking.
+ */
+const REAL_CONTENT_KINDS: ReadonlySet<string> = new Set([
+  'runtime-context', // dynamic-context snapshot (was '@deepseek-ai/dsh-system-prompt')
+  'ptc-mode', // deferred tool context (was 'tools-ptc' / 'tools-code-mode')
+])
+
+/** Audited relay kinds: not the user speaking, but genuine conversation content. */
+const AUDITED_RELAY_KINDS: ReadonlySet<string> = new Set([
+  'subagent-report',
+  'subagent-settled',
+])
+
 /** Known host policy kinds that must never be folded (safe-listing beyond `plugin`). */
 const HOST_INSTRUCTION_KINDS: ReadonlySet<string> = new Set([
   'agent-instructions', // AGENTS.md injection (hook shape: {kind:'agent-instructions', form:'instructions'})
   'skill-catalog', // skill catalog (form:'catalog')
+  // Host compaction summary row (DSH >= 0.1.7; was plugin 'dsh-compaction-basic').
+  // That legacy name was never whitelisted, so its rows were barriers already —
+  // the renamed spelling keeps exactly that treatment instead of silently
+  // becoming foldable content (issue #169).
+  'compact-basic',
 ])
 
 /**
@@ -496,11 +525,18 @@ export function classifySurfaceEvent(event: SessionEvent): SurfaceEventClass {
     // presence-driven injection must never silently become compressible.
     return 'instruction'
   }
-  if (kind !== undefined && HOST_INSTRUCTION_KINDS.has(kind)) return 'instruction'
-  // Sub-agent relay rows and any future kind: treat as real content for
-  // compressibility, but they must not win "last real user message" protection
-  // (see isRealUserTurn) — a relay is not the user speaking.
-  return 'real'
+  // Direct kinds (no plugin field). DSH >= 0.1.7's rename map moves host
+  // channels out of the plugin namespace into direct kinds (issue #169), so
+  // the conservative default must hold here too: only AUDITED kinds are real
+  // content; everything else is a barrier until proven otherwise. A row whose
+  // source carries no usable kind keeps its pre-0.1.7 treatment (real).
+  if (typeof kind !== 'string') return 'real'
+  if (HOST_INSTRUCTION_KINDS.has(kind)) return 'instruction'
+  if (REAL_CONTENT_KINDS.has(kind) || AUDITED_RELAY_KINDS.has(kind)) return 'real'
+  // Unaudited direct kind: a future host channel must never silently become
+  // compressible content or win user-turn protection (rule 16) — same default
+  // as unknown plugin names above.
+  return 'instruction'
 }
 
 /**
@@ -520,10 +556,12 @@ export function isRealUserTurn(event: SessionEvent): boolean {
   // Host content rows that are NOT the user speaking (dynamic-context snapshot,
   // approval notice, deferred tool context): foldable, but they must never win
   // the protection window — that is exactly the bug class issue #71 fixes.
-  // Both source shapes resolve through sourcePluginOf (issue #163); see also
-  // the out-of-scope follow-up for host rows renamed to direct kinds without
-  // any plugin field in DSH 0.1.7.
+  // Legacy plugin shapes resolve through sourcePluginOf (issue #163); DSH
+  // >= 0.1.7 renames the same channels to direct kinds without any plugin
+  // field (issue #169) — REAL_CONTENT_KINDS covers those spellings.
   const plugin = sourcePluginOf(source)
   if (plugin !== undefined && REAL_CONTENT_PLUGINS.has(plugin)) return false
-  return source?.kind !== 'subagent-report' && source?.kind !== 'subagent-settled'
+  const kind = source?.kind
+  if (typeof kind === 'string' && REAL_CONTENT_KINDS.has(kind)) return false
+  return kind !== 'subagent-report' && kind !== 'subagent-settled'
 }
