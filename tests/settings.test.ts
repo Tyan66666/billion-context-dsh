@@ -468,3 +468,67 @@ test('M6: a settings service WITHOUT installSection degrades gracefully (issue #
     await fiber.dispose()
   }
 })
+
+
+// ── Issue #176: a composed preset must reach the settings layer too ─────────
+// Every kernel consumer reads the six scalar keys through the live settings
+// source, never through `this.config` — so the preset has to be present in the
+// base layer and the seeded snapshot, or it silently never fires.
+
+test('M6: a composed preset seeds the base layer AND the live reads (issue #176)', async () => {
+  const root = new Context()
+  await root.plugin(MemorySettingsProvider)
+  const { fiber, engine } = await mountEngine(root, { preset: 'aggressive' })
+  try {
+    // Exactly the three preset-filled threshold keys — not the full resolved
+    // snapshot (that would over-attribute untouched keys as composed) and not
+    // the empty raw-row subset (the bug: schema defaults won over the preset).
+    assert.deepEqual(engine.env.settingsCommand?.describe()?.base, {
+      nudgeMinContextLimitPct: 0.3,
+      nudgeMaxContextLimitPct: 0.5,
+      nudgeEmergencyThresholdPct: 0.7,
+    })
+    // And every kernel-facing read sees them — env getters and kernelConfigFor.
+    assert.equal(engine.env.nudgeMinContextLimitPct, 0.3)
+    assert.equal(engine.env.nudgeMaxContextLimitPct, 0.5)
+    assert.equal(engine.env.nudgeEmergencyThresholdPct, 0.7)
+    assert.equal(kernelConfigFor(engine.env).nudge.maxContextLimitPct, 0.5)
+    // A runtime override still wins over the composed preset...
+    const provider = root.get('settings') as MemorySettingsProvider
+    provider.publishForTest({ [ACP_SETTINGS_NAMESPACE]: { nudgeMaxContextLimitPct: 0.55 } })
+    await flushRounds()
+    assert.equal(engine.env.nudgeMaxContextLimitPct, 0.55)
+    // ...and the other two keys stay at their preset values.
+    assert.equal(engine.env.nudgeMinContextLimitPct, 0.3)
+    assert.equal(engine.env.nudgeEmergencyThresholdPct, 0.7)
+  } finally {
+    await fiber.dispose()
+  }
+})
+
+test('M6: /acp-prune config attributes a preset-filled key to `base`, reset returns to the preset (issue #176)', async () => {
+  const root = new Context()
+  await root.plugin(MemorySettingsProvider)
+  const { fiber, engine } = await mountEngine(root, { preset: 'aggressive' })
+  try {
+    const list = await runAcp(engine.env, 'config')
+    assert.match(list, /nudgeMaxContextLimitPct[^\n]*base/)
+    // A key the composition did NOT preset still attributes to the default...
+    assert.match(list, /autoNudge[^\n]*default/)
+
+    const setResult = await runAcp(engine.env, 'config set nudgeMaxContextLimitPct 0.55')
+    assert.match(setResult, /✓/)
+    await flushRounds()
+    assert.equal(engine.env.nudgeMaxContextLimitPct, 0.55)
+
+    // Resetting drops back to the COMPOSED preset value, not the engine default
+    // (a runtime reset restores what the composition chose).
+    const resetResult = await runAcp(engine.env, 'config reset nudgeMaxContextLimitPct')
+    assert.match(resetResult, /composition value 0\.5/)
+    await flushRounds()
+    assert.equal(engine.env.nudgeMaxContextLimitPct, 0.5)
+  } finally {
+    await fiber.dispose()
+  }
+})
+

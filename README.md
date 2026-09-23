@@ -264,6 +264,7 @@ DSH 的每个模型请求都派生自其 append-only 会话日志（*surface*）
 | `aggressive` | 0.30 | 0.50 | 0.70 | 精简上下文，更早更频繁地压缩 |
 
 - **只填未设的阈值**：`preset` 仅填充你没有显式设置的 `nudge*ContextLimitPct`；同时写了 `preset` 和某个阈值时，该阈值以你的显式值为准（优先级 显式 > preset > 默认）。
+- **preset 同样落到运行时设置层**：组合 preset 填出的三个阈值注册为 settings 层的 `base` 层——`/acp-prune config list` 把它们归因为 `source: base`，`/acp-prune config reset <key>` 退回的是 **preset 值**而非引擎默认（运行时 reset 恢复的是组合的选择）；未配 preset 时行为完全不变。
 - **不碰其他旋钮**：`modelContextLimit`、`autoNudge`、`prompts`、`coreOverrides` 完全不受影响；`coreOverrides.nudge` 仍最后落地、同名键最高优先。
 - **查看当前档位**：`/acp-prune status` 会打印生效的 `preset` 及其**真实生效的**三个阈值——这一行镜像 `kernelConfigFor` 的合并顺序，所以你在其上做的显式覆盖、以及 `coreOverrides.nudge` 里的同名键都会如实显示。
 - **拼错即报错**：未知名称在引擎构造期直接抛错并列出合法值（与自定义提示词模板同一约定），不会静默回退默认。注意 bundle 行本身不带 `config`，`preset` 只能由你自己的同 id `compaction-acp` 行提供；该行构造失败即挂载失败，profile 会在你修好配置前一直起不来（fail-fast 的既定行为）。

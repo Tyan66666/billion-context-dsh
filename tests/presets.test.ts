@@ -210,6 +210,55 @@ test('config: a same-name key in coreOverrides.nudge outranks the preset (docume
   assert.equal(overridden.nudge.maxContextLimitPct, 0.95, 'coreOverrides.nudge lands last')
 })
 
+// --- Live settings snapshot: the preset must reach the kernel-side reads (issue #176) ---
+
+test('config: a composed preset fills the LIVE settings snapshot, not just this.config (issue #176)', () => {
+  // The bug: every kernel consumer (nudge, compress tool, /acp-prune compress,
+  // windowFor) reads the six scalar keys through the live settings source —
+  // never through the preset-resolved `this.config`. Seeding that source from
+  // the RAW composition row dropped the preset (the row holds only `preset`,
+  // none of the three threshold keys), so a preset-only row ran at the engine
+  // defaults (0.70/0.85, kernel min 0.45) while `env.preset` still advertised
+  // the tier name. Assert on the env getters AND kernelConfigFor — the side
+  // resolveAcpConfig alone cannot see.
+  for (const name of PRESET_NAMES) {
+    const engine = new AcpCompactionEngine(new Context(), { preset: name })
+    const p = PRESETS[name]
+    assert.equal(engine.config.nudgeMinContextLimitPct, p.nudgeMinContextLimitPct, `${name}: config min`)
+    assert.equal(engine.env.nudgeMinContextLimitPct, p.nudgeMinContextLimitPct, `${name}: env min`)
+    assert.equal(engine.env.nudgeMaxContextLimitPct, p.nudgeMaxContextLimitPct, `${name}: env max`)
+    assert.equal(engine.env.nudgeEmergencyThresholdPct, p.nudgeEmergencyThresholdPct, `${name}: env emergency`)
+    const nudge = kernelConfigFor(engine.env).nudge
+    assert.equal(nudge.minContextLimitPct, p.nudgeMinContextLimitPct, `${name}: kernel min`)
+    assert.equal(nudge.maxContextLimitPct, p.nudgeMaxContextLimitPct, `${name}: kernel max`)
+    assert.equal(nudge.emergencyThresholdPct, p.nudgeEmergencyThresholdPct, `${name}: kernel emergency`)
+  }
+})
+
+test('config: an explicit threshold on top of a preset wins in the LIVE snapshot too (issue #176)', () => {
+  // 0.55 sits inside aggressive's window (min 0.3 / emergency 0.7): the engine
+  // rejects a composition whose resolved thresholds invert (assertNudgeThresholdOrder).
+  const engine = new AcpCompactionEngine(new Context(), { preset: 'aggressive', nudgeMaxContextLimitPct: 0.55 })
+  assert.equal(engine.env.nudgeMaxContextLimitPct, 0.55, 'explicit wins over the preset')
+  assert.equal(kernelConfigFor(engine.env).nudge.maxContextLimitPct, 0.55)
+  // The two keys the operator did NOT write still come from the preset — under
+  // the regression they fell through to the engine defaults instead (min
+  // undefined→kernel 0.45, emergency 0.85).
+  assert.equal(engine.env.nudgeMinContextLimitPct, PRESETS.aggressive.nudgeMinContextLimitPct)
+  assert.equal(engine.env.nudgeEmergencyThresholdPct, PRESETS.aggressive.nudgeEmergencyThresholdPct)
+})
+
+test('config: without a preset the live snapshot keeps today defaults exactly (no behavior drift)', () => {
+  const engine = new AcpCompactionEngine(new Context(), {})
+  assert.equal(engine.env.nudgeMinContextLimitPct, undefined)
+  assert.equal(engine.env.nudgeMaxContextLimitPct, 0.7)
+  assert.equal(engine.env.nudgeEmergencyThresholdPct, 0.85)
+  const nudge = kernelConfigFor(engine.env).nudge
+  assert.equal(nudge.minContextLimitPct, defaultConfig(128000).nudge.minContextLimitPct, 'kernel default min applies')
+  assert.equal(nudge.maxContextLimitPct, 0.7)
+  assert.equal(nudge.emergencyThresholdPct, 0.85)
+})
+
 // --- End-to-end: the preset actually changes the nudge decision -------------
 
 function fakeAgent(session: Session): Agent {

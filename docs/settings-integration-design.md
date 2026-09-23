@@ -213,6 +213,16 @@ function filterSettingsEntry(config: AcpConfig): AcpSettingsInput {
 
 纯函数，单测直测。未列出的键继续只从 `this.config`（组合层）读取，行为不变。
 
+**preset 补齐（issue #176）**：entry 不能只是 raw 组合行的六个键子集——所有内核消费方
+（nudge / compress 工具 / /acp-prune compress / windowFor）都经活设置源读这六个键、从不读
+preset 解析后的 `this.config`；只播种 raw 子集时 `{ preset: 'aggressive' }` 行会被 schema
+默认值（0.70/0.85）静默盖过 preset（#75 Phase 1 把活读取切到 readSettingsSource 后引入的回归）。
+因此实际注册的 entry 是 `presetFilledSettingsEntry(config)`（src/index.ts）：raw 行六键子集 +
+（当 `config.preset` 存在时）preset 为**缺省键**填的三个阈值值——显式写的键仍优先
+（explicit > preset > default 在活读取这一层同样成立）。副作用（有意为之，已按行为变更披露）：
+这三个键在 `/acp-prune config list` 归因为 `source: base`，reset 回落到 **composed preset 值**而非
+引擎默认（运行时 reset 恢复的是组合的选择）；无 preset 时 entry 与旧行为完全一致。
+
 ### 4.3 活值接线：getter 背书的 env（照抄 agent-loop 形态)
 
 ```ts
@@ -220,11 +230,11 @@ function filterSettingsEntry(config: AcpConfig): AcpSettingsInput {
 export interface SettingsRuntimeSource { (): AcpSettings }
 
 // src/index.ts 构造器内
-const baseEntry = filterSettingsEntry(this.config)
+const compositionEntry = presetFilledSettingsEntry(config)   // raw 行六键子集 + preset 补齐阈值（§4.2）
 let source: SettingsRuntimeSource = () => ({
-  // 初始活源 = 过滤后的组合子集经引擎默认值补齐（settings 服务接管前/缺席时的等价兜底，
-  // 与服务脱离时 installSection 回落的同一个 filtered 对象同源同形）
-  ...resolveAcpConfig(baseEntry),
+  // 初始活源 = 组合子集经引擎默认值补齐（settings 服务接管前/缺席时的等价兜底，
+  // 与服务脱离时 installSection 回落的同一个 entry 同源同形）
+  ...resolveAcpSettings(compositionEntry),
 })
 // 上次已应用的快照——onChange 无参回调（helper 不透传 watch 的 next/prev），前值必须自己记。
 // 直接引用构造期闭包变量当 prev 是评审抓出的悬垂 bug：它会永远停在初始值。

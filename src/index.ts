@@ -55,6 +55,7 @@ import {
   makeSettingsCommandSurface,
   resolveAcpSettings,
   type AcpSettings,
+  type AcpSettingsInput,
   type SettingsCommandSurface,
 } from './settings.ts'
 import { PRESETS, PRESET_NAMES, isPresetName, resolvePreset, type NudgePreset, type PresetName } from './presets.ts'
@@ -256,6 +257,35 @@ function resolvePresetThresholds(base: AcpConfig, config: Partial<AcpConfig>): A
 }
 
 /**
+ * The settings-layer view of the RAW composition row: its six scalar knobs,
+ * plus — when the row names a preset — the preset values for the thresholds
+ * the row leaves unset.
+ *
+ * Every kernel consumer reads those six knobs through `readSettingsSource()`,
+ * never from `this.config` (where `resolveAcpConfig` already applied the
+ * preset). Seeding the live snapshot and the seam's base layer from the raw
+ * row alone would therefore drop the preset entirely: a preset-only row
+ * (`{ preset: 'aggressive' }`) resolves to `{}` there, and the schema
+ * defaults (0.70 / 0.85) silently win — issue #176. Filling the absent
+ * thresholds with the preset's values keeps explicit > preset > default on
+ * the live read path exactly as on `this.config` (only ABSENT keys are
+ * filled, so an explicit value on the row still outranks its preset).
+ */
+function presetFilledSettingsEntry(config: Partial<AcpConfig>): AcpSettingsInput {
+  const entry = filterSettingsEntry(config)
+  if (config.preset === undefined) return entry
+  // Safe to re-resolve: an unknown name already threw in resolveAcpConfig,
+  // which runs earlier in the same constructor.
+  const preset = resolvePreset(config.preset)
+  return {
+    ...entry,
+    nudgeMinContextLimitPct: config.nudgeMinContextLimitPct ?? preset.nudgeMinContextLimitPct,
+    nudgeMaxContextLimitPct: config.nudgeMaxContextLimitPct ?? preset.nudgeMaxContextLimitPct,
+    nudgeEmergencyThresholdPct: config.nudgeEmergencyThresholdPct ?? preset.nudgeEmergencyThresholdPct,
+  }
+}
+
+/**
  * Construction-time guard on the resolved nudge thresholds.
  *
  * The kernel tolerates an inverted window: `validateConfig` only *warns* when a
@@ -362,9 +392,17 @@ export class AcpCompactionEngine extends CompactionEngine {
     // engine defaults merged in; using it would turn every uncomposed key into a
     // `base` override that shadows the schema default (so /acp-prune config list would
     // report `base` for keys nobody composed, and a reset would keep the value).
-    // `current` is the resolved snapshot reads start from; the two differ only
-    // in which keys are PRESENT, never in the values they resolve to.
-    const compositionEntry = filterSettingsEntry(config)
+    // One deliberate exception (issue #176): when the row names a preset, the
+    // preset values for the thresholds the row leaves unset ARE added — every
+    // kernel consumer reads the six knobs through `readSettingsSource()`, never
+    // `this.config`, so without them a preset-only row resolves to `{}` here
+    // and the schema defaults (0.70 / 0.85) silently win. Consequence: for a
+    // composed preset, /acp-prune config list attributes those threshold keys to
+    // `base` and a runtime reset falls back to the preset value, not the
+    // engine default. `current` is the resolved snapshot reads start from; the
+    // two differ only in which keys are PRESENT, never in the values they
+    // resolve to.
+    const compositionEntry = presetFilledSettingsEntry(config)
     let current: AcpSettings = resolveAcpSettings(compositionEntry)
     this.readSettingsSource = () => current
     const engine = this
