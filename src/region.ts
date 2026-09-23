@@ -22,6 +22,7 @@ import { createUserMessage, type ContentBlock } from '@deepseek-ai/dsh-llm'
 import { defaultCountTokens } from 'acp-kernel'
 import {
   classifySurfaceEvent,
+  checkpointCompactionIdOf,
   extractEventText,
   attachmentsOfEvent,
   mediaBlocksOfEvent,
@@ -556,9 +557,10 @@ function summarySeqIndex(events: readonly SessionEvent[]): Map<string, number> {
   const index = new Map<string, number>()
   for (const event of events) {
     if (event.type !== 'user/message') continue
-    const source = (event.data as { source?: { plugin?: string; compactionId?: string } }).source
-    const compactionId = source?.plugin === 'compact' ? source.compactionId : undefined
-    if (compactionId !== undefined && !index.has(compactionId)) index.set(compactionId, event.seq)
+    // Both host checkpoint shapes (issue #168) — the shared extractor keeps
+    // this index and the classifier from drifting apart.
+    const compactionId = checkpointCompactionIdOf(event)
+    if (compactionId !== null && !index.has(compactionId)) index.set(compactionId, event.seq)
   }
   return index
 }
@@ -1348,10 +1350,11 @@ export function blockRegistry(session: Session): AcpBlockRegistryEntry[] {
  */
 export function blockRefForSummarySeq(session: Session, seq: number): string | null {
   const event = eventAtOf(session, seq)
-  if (event?.type !== 'user/message') return null
-  const source = (event.data as { source?: { plugin?: string; compactionId?: string } }).source
-  if (source?.plugin !== 'compact' || source.compactionId === undefined) return null
-  const entry = blockRegistry(session).find((r) => r.blockId === source.compactionId)
+  if (event === undefined) return null
+  // Both host checkpoint shapes (issue #168) via the shared extractor.
+  const compactionId = checkpointCompactionIdOf(event)
+  if (compactionId === null) return null
+  const entry = blockRegistry(session).find((r) => r.blockId === compactionId)
   if (entry === undefined) return null
   return entry.kernelBlockId
 }
@@ -1388,10 +1391,9 @@ export function summarySeqOfKernelBlock(session: Session, kernelBlockId: string)
 /** The durable block whose checkpoint node sits at `seq` (or null). */
 function checkpointBlockIdOf(events: readonly SessionEvent[], seq: number): string | null {
   const event = events[seq]
-  if (event?.type !== 'user/message') return null
-  const source = (event.data as { source?: { plugin?: string; compactionId?: string } }).source
-  if (source?.plugin !== 'compact' || source.compactionId === undefined) return null
-  return source.compactionId
+  if (event === undefined) return null
+  // Both host checkpoint shapes (issue #168) via the shared extractor.
+  return checkpointCompactionIdOf(event)
 }
 
 /**

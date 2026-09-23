@@ -5,7 +5,7 @@
 > **修订记录(v2,吸收首轮子代理代码评审 3×P1 + 6×P2,全部源码级验证):**
 > - **P1-1**:**删除 §4.2 手写映射表**——`rebuildBlockLedger` 返回**全部** `compaction/summary` 块(含已被蒸馏的 inactive 父块),原"ledger 只含 active 块"表述是事实错误;`active` 必须用 `!consumed.has(blockId)` 判定。
 > - **P1-2**:改用 **`env.store.stateFor(session)`**(live 内存态,已由 processTurn 维护)或 **`rebuildKernelBlocks`**(`src/state.ts:25-86`,log 重建)作为 `CompressionState` 来源——两者均已正确处理 `active`/`directBlockIds`(父块内核 bN,非 compaction UUID)/`runId`/`survivedCount`/`generation`/legacy 回退;不再新增 adapter。
-> - **P1-3**:**`buildStatusReport` 的 `messages` 必须排除 checkpoint 摘要节点**(`source.plugin === 'compact'` 的 `user/message`,见 `src/region.ts:383-390,392-396` 写入、`405` 的 `summarySeqOfCompaction` 识别)——否则摘要同时计入 `summaryTokens`(经 block.summary)与 `totalText`(经投影的 text 消息),**双重计数**,破坏"字节对齐上游"目标。
+> - **P1-3**:**`buildStatusReport` 的 `messages` 必须排除 checkpoint 摘要节点**(checkpoint 摘要 `user/message`,由 `isCheckpointNode` 判定——旧宿主 `source.plugin === 'compact'`,0.1.7+ 另含 `source.kind === 'compact-checkpoint'`,issue #168;见 `src/region.ts:383-390,392-396` 写入、`405` 的 `summarySeqOfCompaction` 识别)——否则摘要同时计入 `summaryTokens`(经 block.summary)与 `totalText`(经投影的 text 消息),**双重计数**,破坏"字节对齐上游"目标。
 > - **P2-1**:topic 未进 ledger,块行将恒显 `(no topic)`——§6 增补"在 `compaction/summary` 记录 topic"(推荐,小改动)。
 > - **P2-2**:§6.1 明确 `handleStatus` 调 processTurn 时 `tokenCount` 用 `resolveTokenCount(agent, surfaceMessages)`(遵守硬性规则 2),且**不持久化 turn.state**(避免同 turn 二次推进 nudge 基线;`Nudge:` 行只用 `turn.nudge.reason`)。
 > - **P2-3**:§9 scope 钻取后续项加 ref 兼容性预警(`seq#callId` 自映射值在 `renderUncompressedRanges`/`renderMessageDrilldown` 的 `/\d+/` 解析与连续合并逻辑下语义漂移)。
@@ -188,9 +188,9 @@ buildStatusReport(state: CompressionState, messages: CoreMessage[], countTokens:
 
 **消息集（P1-3 关键约束）**：传给 `buildStatusReport` 的 `messages` 必须**排除 checkpoint 摘要节点**：
 
-- checkpoint 节点 = `source.plugin === 'compact'` 的 `user/message`（`src/region.ts:392-396` 写入，`405` 的 `summarySeqOfCompaction` 即按此识别），在 surface 上投影为 `id=seq` 的 text CoreMessage；
+- checkpoint 节点 = checkpoint 摘要 `user/message`（`isCheckpointNode`:旧宿主 `source.plugin === 'compact'`,0.1.7+ `{ kind: 'compact-checkpoint', compactionId }`,issue #168;`src/region.ts:392-396` 写入，`405` 的 `summarySeqOfCompaction` 即按此识别），在 surface 上投影为 `id=seq` 的 text CoreMessage；
 - 它不在任何 block 的 `effectiveMessageIds` 里（effective 是**原始消息** id），若不排除，`collectVisible` 会把它计入 `totalText`，而同一份摘要又经 `block.summary` 计入 `summaryTokens`——**双重计数**，`text` 百分比虚高，偏离上游字节基准（上游 §3.2 `text=498` 不含 39-token 摘要）；
-- 实现：`surfaceEventsOf(session)` 后按事件 `source.plugin === 'compact'` 过滤，再 `eventsToCoreMessages`；`messageRefs.byRaw` 自然只覆盖非 checkpoint 消息（id 自映射即可——kernel `refForRaw` 无格式校验，`index.js:25-27`；overview 不输出 ref 值，`renderOverview` 仅读 breakdown 数字）。
+- 实现：`surfaceEventsOf(session)` 后按事件 `isCheckpointNode`（两种宿主形状,见上）过滤，再 `eventsToCoreMessages`；`messageRefs.byRaw` 自然只覆盖非 checkpoint 消息（id 自映射即可——kernel `refForRaw` 无格式校验，`index.js:25-27`；overview 不输出 ref 值，`renderOverview` 仅读 breakdown 数字）。
 
 **tokenCount 口径（P2-2）**：`handleStatus` 调 `processTurn` 时 `tokenCount` 用 `resolveTokenCount(agent, surfaceMessages)`（surface 口径，与 `handleCompress`/`buildNudge` 一致，遵守硬性规则 2）；**不持久化 turn.state**（`env.store.set` 不调用），避免同 turn 二次推进 nudge 基线、`Nudge:` 行只用 `turn.nudge.reason`。
 
@@ -265,7 +265,7 @@ scope:'compressed' for block drilldown.
 ## 6. 接线改动（逐文件）
 
 1. **`src/tools.ts`** `handleStatus`（441-464）：
-   - **不新增 adapter**：`state` 用 `env.store.stateFor(session)`（或 `rebuildKernelBlocks`，§4.2）；`messages` 用 `surfaceEventsOf(session)` 过滤 `source.plugin === 'compact'` 后 `eventsToCoreMessages`（P1-3）；
+   - **不新增 adapter**：`state` 用 `env.store.stateFor(session)`（或 `rebuildKernelBlocks`，§4.2）；`messages` 用 `surfaceEventsOf(session)` 过滤 `isCheckpointNode`（两种宿主形状,issue #168）后 `eventsToCoreMessages`（P1-3）；
    - 调 `env.kernel.processTurn`（`tokenCount` = `resolveTokenCount(agent, surfaceMessages)`，P2-2）取原始 `turn.nudge`——**不能**用 `buildNudge`（`shouldInject=false` 时返回 null，拿不到 idle reason）；
    - **不持久化** turn.state（P2-2）；渲染 `buildStatusReport(state, messages, defaultCountTokens, {})` + `Nudge: ${...} — ${turn.nudge.reason}` 行 + `Surface:` 行；
    - 删除窗口/总量行；同步更新工具描述导入。

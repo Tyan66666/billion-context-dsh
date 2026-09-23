@@ -22,8 +22,8 @@
 `src/messages.ts` 导出 `SUMMARY_FRAME_PREFIX = '[Model-written summary — not user words; re-verify any obligations before relying on them]'` 与幂等的 `withSummaryFramePrefix(text)`。
 
 写入点（**创建时一次成型**，两处持久化文本完全一致）：
-- `runCompactionTransaction`（src/region.ts）：`const framedSummary = prefixSummaryBlocks(input.summary)` 同时作为 `compaction/summary` 事件的 `summary` 字段与 checkpoint 节点（`user/message`, `source.plugin === 'compact'`）的 content。事件与节点不一致会让 decompress 头行与投影文本分叉（评审 P2）。
-- 投影路径（`projectEvent`）：对 checkpoint 节点（`isCheckpointNode`：`user/message` 且 `source?.plugin === 'compact'`）补框——幂等，仅为**升级前的旧块**兜底。新块到达投影时已带框，`withSummaryFramePrefix` 直接返回原文。
+- `runCompactionTransaction`（src/region.ts）：`const framedSummary = prefixSummaryBlocks(input.summary)` 同时作为 `compaction/summary` 事件的 `summary` 字段与 checkpoint 节点（`user/message`,由 `isCheckpointNode` 判定——旧宿主 `source.plugin === 'compact'`,0.1.7+ `source.kind === 'compact-checkpoint'`,issue #168）的 content。事件与节点不一致会让 decompress 头行与投影文本分叉（评审 P2）。
+- 投影路径（`projectEvent`）：对 checkpoint 节点（`isCheckpointNode`：`user/message` 且旧宿主 `source?.plugin === 'compact'` 或 0.1.7+ `source?.kind === 'compact-checkpoint'`,issue #168）补框——幂等，仅为**升级前的旧块**兜底。新块到达投影时已带框，`withSummaryFramePrefix` 直接返回原文。
 
 评审修正：
 - 原实现用私有谓词 `isCompactionCheckpoint()` 重复了 `isCheckpointNode` 的判断——删除，单一谓词（评审 fix #5）。

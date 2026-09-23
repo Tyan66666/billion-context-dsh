@@ -368,11 +368,39 @@ function contentBlocksOfEvent(event: SessionEvent): unknown {
  * Whether a surface user message is a compaction checkpoint node (already
  * compressed). Defined here (not in region.ts) so the classifier below and
  * region.ts share ONE implementation.
+ *
+ * Recognizes BOTH host shapes (issue #168): the ≤0.1.6 wrapper
+ * `{ kind: 'plugin', plugin: 'compact', compactionId }` and the 0.1.7+
+ * producer-owned kind `{ kind: 'compact-checkpoint', compactionId }` written
+ * by dsh-compaction's `compactCheckpointSource()` (verified against the
+ * published 0.1.7-alpha.1 artifact: the marker object is exactly
+ * `{ kind: 'compact-checkpoint' }` plus `compactionId` and an optional
+ * `sourceCommandId`). The 0.1.7 V3→V4 migration rewrites pre-0.1.7 sessions
+ * to the new shape, so both shapes coexist on one surface and both must be
+ * recognized — a row that misses this predicate classifies as `real`, which
+ * double-counts its summary text in acp_status, can steal the protected-tail
+ * window, and hides it from every distillation entry point below.
  */
 export function isCheckpointNode(event: SessionEvent): boolean {
   if (event.type !== 'user/message') return false
-  const source = (event.data as { source?: { plugin?: string } }).source
-  return source?.plugin === 'compact'
+  const source = (event.data as { source?: { kind?: string; plugin?: string } }).source
+  return source?.plugin === 'compact' || source?.kind === 'compact-checkpoint'
+}
+
+/**
+ * The durable compaction id stamped on a checkpoint summary node, reading BOTH
+ * host shapes (see {@link isCheckpointNode}). Returns null when the event is
+ * not a checkpoint node or carries no id — a malformed row still CLASSIFIES
+ * as a checkpoint (it must never read as real content) but has no block to
+ * link to. Single shared extractor for the ledger index (`summarySeqIndex`),
+ * the distill-edge resolver (`blockRefForSummarySeq`) and the decompress
+ * recursion (`checkpointBlockIdOf`) — those sites must not re-derive the shape
+ * check themselves (issue #168).
+ */
+export function checkpointCompactionIdOf(event: SessionEvent): string | null {
+  if (!isCheckpointNode(event)) return null
+  const source = (event.data as { source?: { compactionId?: unknown } }).source
+  return typeof source?.compactionId === 'string' ? source.compactionId : null
 }
 
 /**
@@ -390,7 +418,9 @@ export function isCheckpointNode(event: SessionEvent): boolean {
  *   compress-pair replacement stubs. Their content is derived from
  *   already-visible messages, so folding them into an adjacent real segment
  *   is zero-loss — this preserves main's behavior for engine-authored rows.
- * - `checkpoint` — compaction summary nodes (`plugin: 'compact'`).
+ * - `checkpoint` — compaction summary nodes (both host shapes, see
+ *   `isCheckpointNode`: legacy `plugin: 'compact'` and 0.1.7+
+ *   `kind: 'compact-checkpoint'`, issue #168).
  *   Distillation is an explicit act; never folded into any segment.
  * - `instruction` — host-authored policy/instructions: AGENTS.md injections
  *   (both host shapes), skill catalogs, host compaction summary rows
