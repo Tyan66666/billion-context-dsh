@@ -18,7 +18,7 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { Context } from '@deepseek-ai/cordis'
+import { Context, Service, type Message } from '@deepseek-ai/cordis'
 import { SettingsProvider, type SettingsNamespace } from '@deepseek-ai/dsh-settings'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { Session } from '@deepseek-ai/dsh-session'
@@ -65,15 +65,44 @@ async function flushRounds(rounds = 3): Promise<void> {
   }
 }
 
-/** Mount the real engine as a composition-row-like plugin on a fresh fork of `root`. */
-async function mountEngine(root: Context, config: Partial<AcpConfig> = {}): Promise<{ fiber: { dispose: () => Promise<void> }; engine: AcpCompactionEngine }> {
+/**
+ * Mount the real engine as a composition-row-like plugin on a fresh fork of
+ * `root`. `prepare` runs BEFORE construction — used to register log exporters
+ * that must exist before the engine's constructor may emit.
+ */
+async function mountEngine(root: Context, config: Partial = {}, prepare?: (ctx: Context) => void): Promise<{ fiber: { dispose: () => Promise<void> }; engine: AcpCompactionEngine }> {
   let engine: AcpCompactionEngine | undefined
   const fiber = root.plugin((ctx) => {
+    prepare?.(ctx)
     engine = new AcpCompactionEngine(ctx, config)
   })
   await fiber
   if (engine === undefined) throw new Error('engine did not mount')
   return { fiber, engine }
+}
+
+/**
+ * Stand-in for dsh-settings >= 0.1.7 (issue #173): the service was renamed to
+ * SettingsForms and `installSection` removed; its section API keys off profile
+ * entry ids instead of plugin namespaces. Registered under the same `settings`
+ * name so the engine's inject fires exactly like on a real 0.1.7 host. The
+ * fixture mirrors the 0.1.7 public surface (configure/describe/update/replace/
+ * mutate) and deliberately carries NO installSection — a fixture that grew the
+ * method back would make the regression test vacuous (rule 5: fixtures mirror
+ * real host structures).
+ */
+class FormsLikeSettingsService extends Service {
+  static provide = 'settings'
+  readonly writable = false
+  configure(_presentation?: unknown): () => void {
+    return () => {}
+  }
+  describe(): unknown[] {
+    return []
+  }
+  async update(_ns: string, _patch: Record<string, unknown>): Promise<void> {}
+  async replace(_ns: string, _section: Record<string, unknown>): Promise<void> {}
+  async mutate(_ns: string, _ops: readonly unknown[]): Promise<void> {}
 }
 
 /** Drive /acp-prune through the real command handler (config paths never touch the agent). */
@@ -198,10 +227,20 @@ test('M6: command surface degrades without a service', async () => {
 test('M6: engine env reads LIVE settings — an external edit hot-applies', async () => {
   const root = new Context()
   await root.plugin(MemorySettingsProvider)
-  const { fiber, engine } = await mountEngine(root)
+  // Cordis drops warn-level messages at its default threshold, so capture them
+  // through an explicit-level exporter registered before construction.
+  const logs: Message[] = []
+  const { fiber, engine } = await mountEngine(root, {}, (ctx) => {
+    ctx.logger.exporter({ levels: { default: 3 }, export: (message) => { logs.push(message) } })
+  })
   try {
     assert.equal(engine.env.modelContextLimit, DEFAULT_CONTEXT_WINDOW)
     assert.equal(engine.env.nudgeMaxContextLimitPct, 0.7)
+    // The capability probe must stay silent on a supported host (issue #173).
+    assert.ok(
+      !logs.some((m) => m.type === 'warn' && String(m.args[0]).includes('installSection')),
+      'no spurious installSection warn on a supported host',
+    )
     const provider = root.get('settings') as MemorySettingsProvider
     provider.publishForTest({ [ACP_SETTINGS_NAMESPACE]: { nudgeMaxContextLimitPct: 0.6 } })
     await flushRounds()
@@ -390,6 +429,41 @@ test('M6: reset keeps keys the six-key schema does not know (no silent data loss
     assert.equal(user?.handWritten, 'keep-me')
     assert.equal(user?.nudgeMaxContextLimitPct, undefined)
     assert.equal(engine.env.nudgeMaxContextLimitPct, 0.7)
+  } finally {
+    await fiber.dispose()
+  }
+})
+
+// ── Issue #173: host settings service without installSection (dsh-settings >= 0.1.7) ───────────────────
+
+test('M6: a settings service WITHOUT installSection degrades gracefully (issue #173)', async () => {
+  const root = new Context()
+  await root.plugin(FormsLikeSettingsService)
+  const forms = root.get('settings') as FormsLikeSettingsService
+  assert.ok(!('installSection' in forms), 'fixture mirrors 0.1.7: no installSection method')
+  // Pre-fix, construction threw `TypeError: ...installSection is not a function`
+  // here and the host logged it as a startup error (dist/index.js stack in #173).
+  const logs: Message[] = []
+  const { fiber, engine } = await mountEngine(root, { nudgeMaxContextLimitPct: 0.66 }, (ctx) => {
+    ctx.logger.exporter({ levels: { default: 3 }, export: (message) => { logs.push(message) } })
+  })
+  try {
+    // No registration happened → the command surface reports unavailable and
+    // the knobs keep their composition values (readSettingsSource untouched).
+    assert.equal(engine.env.settingsCommand?.available, false)
+    assert.equal(engine.env.nudgeMaxContextLimitPct, 0.66)
+    // One warn explains the degradation; nothing logs an ERROR for what is a
+    // supported out-of-range host line, not a broken integration.
+    const warns = logs.filter((m) => m.type === 'warn' && String(m.args[0]).includes('installSection'))
+    assert.equal(warns.length, 1, 'exactly one warn names the missing capability')
+    assert.ok(!logs.some((m) => m.type === 'error'), 'no error-level log for a degraded optional section')
+    // /acp-prune config stays usable: list shows the composition values with
+    // no registered layers, and writes degrade to guidance instead of hitting
+    // the foreign service API (whose updates would throw entry-id errors).
+    const list = await runAcp(engine.env, 'config')
+    assert.match(list, /nudgeMaxContextLimitPct\s+0\.66\s+default/)
+    const setResult = await runAcp(engine.env, 'config set nudgeMaxContextLimitPct 0.5')
+    assert.match(setResult, /no settings provider/)
   } finally {
     await fiber.dispose()
   }

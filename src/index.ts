@@ -393,6 +393,26 @@ export class AcpCompactionEngine extends CompactionEngine {
       // keep reading the last published value and later settings.yaml edits
       // would silently stop applying.
       ctx.inject(['settings'], (settingsCtx) => {
+        // Capability probe (issue #173): dsh-settings >= 0.1.7 renamed the
+        // service (SettingsForms) and removed installSection entirely — its
+        // section API keys off profile entry ids + meta.volatile schema fields,
+        // which /acp-prune config's describe/update/replace surface does not
+        // speak. That line sits outside our peer range, but hosts run newer
+        // seams than their declared peers; the unconditional call threw a
+        // TypeError in the constructor and logged a startup ERROR even though
+        // only this OPTIONAL section was affected. Absent → one warn, no
+        // registration, and NO service capture either: capturing the foreign
+        // handle would make /acp-prune config report available and fail every
+        // write with opaque entry-id errors. Values keep flowing from the
+        // composition row through the untouched readSettingsSource thunk.
+        if (typeof settingsCtx.settings?.installSection !== 'function') {
+          this.ctx.logger.warn(
+            'billion-context-dsh: host settings service has no installSection (removed in dsh-settings >= 0.1.7) — '
+            + 'the compaction-acp settings section is not registered; the six knobs keep their composition values '
+            + 'and /acp-prune config reports the section unavailable',
+          )
+          return undefined
+        }
         settingsCtx.settings.installSection(ctx, ACP_SETTINGS_NAMESPACE, AcpSettingsSchema, compositionEntry, {
           // The seam's source type follows the entry it registered, so `source`
           // is a partial view of the settings; re-resolve it into a

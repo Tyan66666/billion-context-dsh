@@ -164,7 +164,7 @@ compaction-acp:
 /acp-prune config reset all
 ```
 
-窗口相关键（`modelContextLimit` / `autoModelContextLimit`）改动会清空窗口探测缓存——下一次 pre-step 按新值重新探测（探测失败也会被缓存，正是靠这个机制在修复网关后重新探测）。无 settings provider 的纯 npm 安装组合下 `/acp-prune config` 降级为指引文案；`settingsEnabled: false` 可整体关闭该集成（组合行专用，不进 settings 层——开关不能关掉自己）。设计细节见 [docs/settings-integration-design.md](docs/settings-integration-design.md)。
+窗口相关键（`modelContextLimit` / `autoModelContextLimit`）改动会清空窗口探测缓存——下一次 pre-step 按新值重新探测（探测失败也会被缓存，正是靠这个机制在修复网关后重新探测）。无 settings provider 的纯 npm 安装组合下 `/acp-prune config` 降级为指引文案；DSH 0.1.7+ 宿主线（settings 服务已移除 `installSection`，在本插件声明的 peer 区间之外）同样干净降级：启动时记一条 warn，六个键改由组合行 `config:` 调整，引擎与工具不受影响（issue #173）；`settingsEnabled: false` 可整体关闭该集成（组合行专用，不进 settings 层——开关不能关掉自己）。设计细节见 [docs/settings-integration-design.md](docs/settings-integration-design.md)。
 
 **单模式生效（agent preset 的 `compaction` realm）**。先在该 realm 内*禁用（或删除）原有的 `dsh-compaction-basic` 行*，再插入本引擎——同一 realm 内两个后端不能并存：
 
