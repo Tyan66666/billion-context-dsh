@@ -387,7 +387,42 @@ private onSettingsChanged(prev: AcpSettings, next: AcpSettings): void {
 - `tests/peer-range.test.ts` 把 dsh-settings 并入共享的 `seamPeers` 数组（现五项），与其余四个
   接缝 peer 共用同一组 0.1.5 断言；原先的 dsh-settings 专属双元组测试块已删除。
 
-## 5. 明确不做的事（及优先级语义）
+ ### 4.8 能力探测：无 installSection 的宿主优雅降级（issue #173，v0.2.26+）
+
+ **背景**：dsh-settings 在 0.1.7 全线（alpha.1 / alpha.2 / rc.1 逐一核验过 npm 产物）做了破坏性重构——
+ 服务类改名 `SettingsProvider` → `SettingsForms`，`installSection` 被移除，新 API
+ （`configure/describe/update/replace/mutate`）面向 profile entry id + schema 上的 `meta.volatile`
+ 字段，与「插件注册自建 namespace」的旧语义不是一一对应。我们的 peer 区间
+ （`>=0.1.5-alpha.1 <0.1.6-0`）本就把 0.1.7 挡在外面，但真实环境里用户确实会在 0.1.7 宿主上装我们：
+ 此前引擎在注入回调里无条件调用 `settingsCtx.settings.installSection(...)`，抛出
+ `TypeError: ...installSection is not a function`（#173 实机 stack，dist/index.js:6206），
+ cordis 把它记成**启动 error**——而引擎本体与四个工具在同一次运行中全部正常，
+ 这条 error 只会让使用者误判插件整体失效。
+
+ **修复**（src/index.ts 注入回调顶部）：调用前做能力探测——
+ `typeof settingsCtx.settings?.installSection !== 'function'` 时记**一条 warn**
+ （说明缺失的能力、后果与替代路径），不捕获服务句柄、不动 `readSettingsSource`
+ （保持组合层快照），回调返回 `undefined`（没注册任何东西，无需 disposer）。
+ 不捕获句柄是有意的：0.1.7 服务的写路径按 entry id 寻址且要求 volatile 字段，
+ 捕获后 `/acp-prune config` 会报 `available: true` 而每次写入抛 entry 错误——
+ 比干净降级更糟。
+
+ **降级后的行为面**：引擎核心 / 四个工具 / nudge 完全不受影响；
+ `/acp-prune config list` 照旧渲染表格（值来自组合行/默认，source 列全为 default）；
+ `set`/`reset` 返回既有的「no settings provider」指引文案（指向组合行编辑）。
+
+ **本文档范围之外**：迁移到 SettingsForms API 是完整的接缝线移植任务
+ （五个接缝逐一核验 + `meta.volatile` schema 标注 + 按 house rule 显式拓宽 peer 区间），
+ 单独立项跟踪（自 #173 分析中新开的 issue，编号见该 issue 的评论），不在本修复内做。
+
+ **测试**（tests/settings.test.ts）：`FormsLikeSettingsService` fixture 镜像 0.1.7 表面
+ （有 configure/describe/update/replace/mutate、无 installSection）→ 构造不抛、
+ 恰好一条 warn 点名缺失能力、无 error 级日志、`settingsCommand.available === false`、
+ 旋钮保持组合值、`config set` 落到指引文案；首个 E2E 用例补了反向断言
+ （受支持的宿主上探测必须静默）。注：cordis 日志默认阈值丢弃 warn 级消息，
+ 断言前需注册带 `levels: { default: 3 }` 的 exporter 才能观测到。
+
+ ## 5. 明确不做的事（及优先级语义）
 
 | 项 | 决定 | 理由 |
 |---|---|---|
@@ -513,6 +548,12 @@ v2 状态：R1–R5 已由评审核验关闭，遗留两个实现期验证门（
 
 ## 修订记录
 
+- **v4（issue #173，能力探测）**：dsh-settings 0.1.7 全线移除 `installSection`
+ （服务改名 `SettingsForms`），超区间安装时在启动期抛 TypeError 污染日志。
+ 注入回调加 `typeof` 能力探测：缺失时记一条 warn 并干净降级（不注册、不捕获句柄、
+ 不动 readSettingsSource），`/acp-prune config` 走既有指引文案。新增 §4.8；
+ SettingsForms 迁移单独立项。回归测试：tests/settings.test.ts #173 用例
+ （fixture 镜像 0.1.7 表面）+ 受支持宿主静默断言。
 - **v3（0.1.5 接缝对齐，仅文档）**：PR #130 初版基于 dsh-settings 0.1.0-rc.6 的自由函数
   `installSettingsSection` + `settingsNamespace()` 编写；宿主线升到 0.1.5 后两者都已删除
   （`installSection` 成为 provider 方法、namespace 变普通字符串字面量），源代码与测试已经适配。

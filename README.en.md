@@ -167,7 +167,7 @@ compaction-acp:
 /acp-prune config reset all
 ```
 
-Changing a window key (`modelContextLimit` / `autoModelContextLimit`) clears the window-probe cache — the next pre-step re-probes under the new values (probe failures are cached too, so this is also how a fixed gateway gets re-probed). In provider-less plain-npm compositions `/acp-prune config` degrades to advice text; `settingsEnabled: false` disables the integration entirely (composition-row-only — the switch is deliberately NOT part of the settings layer: it cannot turn itself off). Design details: [docs/settings-integration-design.md](docs/settings-integration-design.md).
+Changing a window key (`modelContextLimit` / `autoModelContextLimit`) clears the window-probe cache — the next pre-step re-probes under the new values (probe failures are cached too, so this is also how a fixed gateway gets re-probed). In provider-less plain-npm compositions `/acp-prune config` degrades to advice text; on DSH lines ≥0.1.7, where the host settings service no longer provides `installSection` (outside this plugin's declared peer range), the engine degrades cleanly too — one startup warning, the six keys stay adjustable through the composition-row `config:`, engine and tools unaffected (issue #173); `settingsEnabled: false` disables the integration entirely (composition-row-only — the switch is deliberately NOT part of the settings layer: it cannot turn itself off). Design details: [docs/settings-integration-design.md](docs/settings-integration-design.md).
 
 **Per-mode — an agent preset's `compaction` realm.** First *disable (or delete) the realm's existing `dsh-compaction-basic` row*, then mount this engine — two backends cannot coexist in the same realm:
 

@@ -35,7 +35,7 @@ src/
 ├── config.ts       # kernel config assembly (thresholds + coreOverrides)
 ├── host-tokens.ts  # shadow-price pricing: host-vocabulary mirror (estimateHostContent/estimateHostMessage/hostPriceEvent) + shadowedTokensViaMeter (ctx.tokenMeter.measure preferred, mirror fallback) + `mediaPriceViaMeter` (routed image/file structural surcharge for the range table) — rules 12/19
 ├── window.ts       # auto context-window detection (session projection first, LLM runtime probe fallback, default 128000) + output-reservation probe (defaultMaxTokens, subtracted in windowFor) + routeFor/liveRoute (the session's live request/context route — the ONE route source for the cap and the compression provenance)
-├── settings.ts     # M6: runtime settings integration — six scalar knobs hot-editable via ~/.dsh/settings.yaml / /acp-prune config (SettingsProvider.installSection seam; the composition base MUST be filtered to schema-known keys — raw rows carry prompts/coreOverrides/countTokens that must never enter the settings layer); see docs/settings-integration-design.md
+├── settings.ts     # M6: runtime settings integration — six scalar knobs hot-editable via ~/.dsh/settings.yaml / /acp-prune config (SettingsProvider.installSection seam; the composition base MUST be filtered to schema-known keys — raw rows carry prompts/coreOverrides/countTokens that must never enter the settings layer) + capability probe for hosts whose settings service lacks installSection (warn + clean degrade, issue #173); see docs/settings-integration-design.md
 └── commands.ts     # M4: /acp-prune slash command (status / compress / decompress / config)
 
 scripts/e2e/
