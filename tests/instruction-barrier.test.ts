@@ -102,6 +102,14 @@ test('PR1: classifySurfaceEvent buckets host policy rows; real content stays rea
   assert.equal(ev({ kind: 'plugin', plugin: 'acp-nudge' }), 'metadata')
   assert.equal(ev({ kind: 'plugin', plugin: 'billion-context-dsh' }), 'metadata')
 
+  // DSH 0.1.7 V4 spelling (what src writes now, and what the host's V3→V4
+  // migration rewrites old rows into): same buckets, both spellings readable.
+  assert.equal(ev({ kind: 'plugin:acp-nudge' }), 'metadata', 'producer-owned nudge spelling')
+  assert.equal(ev({ kind: 'plugin:billion-context-dsh' }), 'metadata', 'producer-owned prune-tombstone spelling')
+  assert.equal(ev({ kind: 'plugin:agent-instructions' }), 'instruction', 'producer-owned instruction spelling')
+  assert.equal(ev({ kind: 'plugin:future-unknown' }), 'instruction', 'unknown producer-owned names stay policy')
+  assert.equal(ev({ kind: 'plugin:user-approval' }), 'real', 'real-content plugin in producer-owned form')
+
   // Compaction checkpoints.
   assert.equal(ev({ kind: 'plugin', plugin: 'compact' }), 'checkpoint')
 
@@ -120,6 +128,8 @@ test('PR1: classifySurfaceEvent buckets host policy rows; real content stays rea
   assert.equal(isRealUserTurn({ type: 'user/message', seq: 2, data: { source: instructionSource('.\u0000AGENTS.md', 'v1') } } as never), false)
   assert.equal(isRealUserTurn({ type: 'user/message', seq: 3, data: { source: { kind: 'subagent-report' } } } as never), false)
   assert.equal(isRealUserTurn({ type: 'tool/result', seq: 4, data: {} } as never), false)
+  assert.equal(isRealUserTurn({ type: 'user/message', seq: 5, data: { source: { kind: 'plugin:acp-nudge' } } } as never), false, 'producer-owned metadata row never wins the tail (issue #163)')
+  assert.equal(isRealUserTurn({ type: 'user/message', seq: 6, data: { source: { kind: 'plugin:user-approval' } } } as never), false, 'producer-owned real-content row never wins the tail (issue #163)')
 })
 
 test('PR1: the range table splits at instruction rows — no offered range contains one', () => {
@@ -181,11 +191,14 @@ test('PR1: engine-authored metadata rows stay foldable — a nudge echo never sp
   appendTurn(session, 1)
   appendUser(session, longText('q0', 0))            // seq 1
   appendAssistant(session, longText('a0', 1), 1, 1) // seq 2
-  // The engine's own nudge echo (src/nudge.ts writes plugin 'acp-nudge'). Its
-  // content is derived from already-visible messages, so main folds it into the
-  // adjacent real segment — if the classifier ever filed it as a barrier, the
-  // range table would fragment for no gain. This test pins that parity.
+  // The engine's own nudge echo (src/nudge.ts writes kind 'plugin:acp-nudge'
+  // since issue #163; the legacy `kind: 'plugin'` spelling must keep working
+  // for pre-0.1.7 logs). Its content is derived from already-visible messages,
+  // so main folds it into the adjacent real segment — if the classifier ever
+  // filed it as a barrier, the range table would fragment for no gain. This
+  // test pins that parity for BOTH spellings.
   const echoSeq = appendPluginRow(session, { kind: 'plugin', plugin: 'acp-nudge' })
+  const echoSeqV4 = appendPluginRow(session, { kind: 'plugin:acp-nudge' })
   appendUser(session, longText('q1', 2))
   appendAssistant(session, longText('a1', 3), 1, 3)
 
@@ -194,10 +207,19 @@ test('PR1: engine-authored metadata rows stay foldable — a nudge echo never sp
     'metadata',
     'a nudge echo is engine-authored metadata, never a barrier',
   )
+  assert.equal(
+    classifySurfaceEvent(sessionEventsOf(session)[echoSeqV4]!),
+    'metadata',
+    'the producer-owned spelling classifies as metadata too (issue #163)',
+  )
   const ranges = buildCompressibleSeqRanges(session, wholeSurfaceRangeView(session), { preserveRecent: 0 })
   assert.ok(
     ranges.some((range) => range.start <= echoSeq && echoSeq <= range.end),
     `a range must fold ACROSS the nudge echo (seq ${echoSeq}) — metadata rows are not barriers`,
+  )
+  assert.ok(
+    ranges.some((range) => range.start <= echoSeqV4 && echoSeqV4 <= range.end),
+    'the producer-owned nudge echo folds across a range the same way (issue #163)',
   )
 })
 

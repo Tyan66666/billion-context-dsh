@@ -55,6 +55,7 @@ test('M4: buildNudge injects a compressible-range table under pressure', () => {
 
   const outcome = buildNudge(fakeAgent(session), env, lastNudgeTurn, emergencyNudges)
   assert.ok(outcome !== null, 'a nudge is produced under pressure')
+  assert.equal(outcome!.message.source.kind, 'plugin:acp-nudge', 'the echo carries the producer-owned source kind DSH 0.1.7 V4 admission accepts (issue #163)')
   const text = outcome!.message.content.map((block) => (block as { text?: string }).text ?? '').join('')
   assert.match(text, /compress/i)
   assert.match(text, /seq \d+\.\.\d+/, 'the range table uses surface seq refs')
