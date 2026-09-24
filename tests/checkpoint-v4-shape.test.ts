@@ -150,8 +150,12 @@ test('#166: checkpointCompactionIdOf reads the id from both shapes and degrades 
   assert.equal(checkpointCompactionIdOf(at(legacy)), 'c-legacy')
   assert.equal(checkpointCompactionIdOf(at(v4)), 'c-v4')
   assert.equal(checkpointCompactionIdOf(at(v4WithCommand)), 'c-v4-cmd')
-  assert.equal(checkpointCompactionIdOf(at(v4NoId)), undefined, 'missing compactionId degrades to undefined')
-  assert.equal(checkpointCompactionIdOf(at(plainUser)), undefined, 'non-checkpoint events carry no id')
+  // 合并 pr/170 时修正：本函数契约是 `string | null`（src/messages.ts:400），因为它的
+  // 全部消费点（src/region.ts:563 / :1356 / :1396，均由 pr/172 写入）按 `!== null` /
+  // `=== null` 判定。pr/170 原断言写 undefined —— 那是它自己分支上 `string | undefined`
+  // 版本的配套断言，两个 PR 从未同时存在。若改回 undefined，三处消费点会静默失效。
+  assert.equal(checkpointCompactionIdOf(at(v4NoId)), null, 'missing compactionId degrades to null')
+  assert.equal(checkpointCompactionIdOf(at(plainUser)), null, 'non-checkpoint events carry no id')
 })
 
 test('#166: ledger resolves the summarySeq of a 0.1.7-shape checkpoint (core regression)', () => {
