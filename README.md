@@ -42,7 +42,7 @@
 与 DSH 内置的自动压缩（用自动生成的摘要替换一段范围）不同，billion-context-dsh：
 
 - **模型驱动** —— 摘要由模型自己书写，没有第二次 LLM 摘要调用
-- **只建议、不强令** —— 自动策略只 *nudge*（提醒），是否压缩、何时压缩由模型决定
+- **只建议、不强令** —— 自动策略只 *nudge*（提醒），是否压缩、何时压缩由模型决定（唯一的例外：provider 确认的上下文超窗会让引擎自己抢救一次——见配置表的 `maxOverflowRetries`）
 - **持久且可恢复** —— 压缩范围成为 checkpoint 节点，原文保留在 append-only 会话日志中；`decompress` 可恢复，`search_context` 可在块内查找
 - **长任务稳得住** —— 每一步都接着前面的成果走，关键结论持续可用、不断叠加，超长任务更容易跑完
 - **上下文始终精简** —— 每次请求都只用少量、精炼的上下文，只保留关键信息；不做大段统一压缩，细节不随之衰失，token 消耗自然更低
@@ -248,6 +248,7 @@ DSH 的每个模型请求都派生自其 append-only 会话日志（*surface*）
 | `autoTools` | `true` | 在 `ctx.tools` 注册四个模型工具 |
 | `autoCommand` | `true` | 在 `ctx.commands` 注册 `/acp-prune` 命令 |
 | `autoNudge` | `true` | 当内核建议时向 `agent/pre-step` 注入 nudge（运行时热调：`/acp-prune config`） |
+| `maxOverflowRetries` | `1` | 宿主确认的上下文超窗（`CONTEXT_WINDOW_EXCEEDED`）自动抢救预算：超窗时引擎挑一段**最大且合规**的范围做一次紧急压缩（摘要是引擎自己写的标记，不调模型——请求刚被拒，本就没有模型回合可写摘要；原文都留在日志里，`search_context`/`decompress` 找得回来），然后应答宿主的 `agent/request-error` 让该请求重试。预算按请求计数，模型有进展（落一条 assistant 消息）或 agent 回到 idle 即重置；`0` 关闭这个自动动作（错误原样抛给用户）。这是 ACP 唯一的自动压缩动作——压力侧始终只 nudge、由模型决定（组合行专用，不进 settings 层；原理与取舍见 [docs/overflow-recovery-design.md](docs/overflow-recovery-design.md)） |
 | `settingsEnabled` | `true`（未配置即启用） | （可选）整体关闭运行时设置集成（组合行专用，不进 settings 层——开关不能关掉自己；关闭后组合行 `config:` 仍是唯一生效通道） |
 | `prompts` | — | （可选）自定义提示词文案：nudge / 范围表 / system prompt / 工具描述按槽位覆盖（模板 + 命名占位符，构造期校验；见上文「自定义提示词文案」与 [docs/configurable-prompts-design.md](docs/configurable-prompts-design.md)） |
 

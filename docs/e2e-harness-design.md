@@ -26,7 +26,7 @@
 8. **挂死兜底（修「跑不完」，不只「跑完不退出」）** — 三层防护: ① `harness.mjs` `waitForIdle` 用 `Promise.race` 给每轮 60s 超时（timer `unref()`，不拖事件循环），agent 永不 idle 时带清晰报错失败而非挂死; ② `e2e.yml` job 级 `timeout-minutes: 10`（套件本身 ~3s，10 分钟宽裕，兜住任何「跑不完」回归，否则烧 Actions 默认 6 小时）; ③ runner 成功/失败路径都显式 `process.exit`，假服务 `close()`+`closeAllConnections()` 释放句柄。占位符笔误（`{{U9}}`）在 `render` 直接 throw，不当场炸就绕进引擎错误链。
 9. **fixture 必须越过内核的 nudge 收益下限（acp-kernel 0.0.63 起）** — 内核 `decideNudge` 在压力下要求「最大待压缩范围 ≥ `minPressureBenefitTokens`」（默认 `max(5000, round(window * 0.01))`，`node_modules/acp-kernel/dist/index.js:2687`），且 `pendingByTier` 丢掉小于 `config.compress.minCompressRange`（默认 5000 chars，`dist/index.js:324`）的范围；fixture 太小时内核**静默抑制**（`shouldInject=false`，理由串 "usage X% but max pending N < min benefit M tokens — suppressed: rewriting below the benefit floor reclaims almost nothing while usage stays high"），于是所有「nudge 注入过」类断言整片变红而引擎不报任何错。本仓实测：window 2000 时下限 5016 tokens，原 fixture（`count: 110`，最大范围 2554 tokens）被抑制；warm filler 放大到 `count: 250`（~15.5K chars/轮）后 EMERGENCY 注入恢复、e2e 全绿。0.0.63 另新增 `firstSightMassReady` 首见门（`lastNudgeShownTokens === 0 && baseline === 0 && usage >= minContextLimitPct && max(t1Eff, t2Pen, t3Pen) >= nudgeGrowthTokens`）——两者都是内核决策，引擎不绕开（rule 7）：调 fixture，不改引擎。
 
-## Scenario 与断集（4 套，41 项）
+## Scenario 与断集（5 套）
 
 | scenario | 配置 | 断集 |
 |---|---|---|
@@ -34,6 +34,7 @@
 | nudge-rhythm | window 24000; 5 轮小历史 + 2 轮大历史（~16K chars） | 小历史时无注入; 大历史后注入（观测: 仅最后请求——投影锚滞后一轮）; 不每轮注入（rule: advisory 节奏）; **nudge 范围表: 表头 oldest first、行带 `[tool X% | text Y%]` 份额、seq 升序**（rule 3） |
 | compress-then-decompress | basic 基础上 + `decompress {"blockId":"b1"}` 轮 | basic 全断 + decompress 结果含原始文本（日志重建路径）; compress 结果报 tier; decompress 不新增 compaction 事件 |
 | acp-status | window 2000; 3 轮 warm filler + compress 轮 + `acp_status {}` 轮 | 报告存在; 含 `CONTEXT BREAKDOWN` / `COMPRESSED BLOCKS`（kernel `buildStatusReport`，rule 9 非手搓）; 块 `b1` 行 + `Checkpoint seqs` 行（蒸馏入口，issue #60 P2）; `Surface:` seq 锚; `Nudge:` 决策行; **不含 `estimated context`/`context window`**（窗口语义属人侧 `/acp-prune`，rule 9） |
+| overflow-recovery | window 2000; 3 轮 warm filler（`count: 250`）+ `Please reply briefly.`；第 4 个脚本回复是 `{"kind":"error"}`（HTTP 400 + DeepSeek 的 "maximum context length" 文案，`dsh-llm-deepseek` 归一化为 `CONTEXT_WINDOW_EXCEEDED`），第 5 个是成功 text | 脚本超窗以失败请求抵达 loop（`errorIdx ≥ 0`）; **loop 重试且重试请求成功**（`requests[errorIdx+1].kind === 'text'`）; 紧急压缩 start/end 配对; `compaction/summary` 文本含 `context-overflow emergency compaction`（引擎 marker，非模型摘要）; block topic 含 `context-overflow recovery`; durable replace 节点落地; 恢复后对话继续 |
 
 ## 二期（未实现，记录取舍）
 
@@ -47,3 +48,4 @@
 `node scripts/e2e/run-e2e.mjs` → 41/41 PASS `e2e PASS`（~2.5s，进程干净退出——runner 显式 `process.exit`，假服务 `close()`+`closeAllConnections()`）。关键观测: basic 5 请求（nudge 在请求 4,5 EMERGENCY; 遮蔽 4518 host-token; prune 隐藏 compress 对; compress 后线请求含 summary、原文消失）; rhythm 7 请求（nudge 仅请求 7）; decompress 7 请求（b1 结果含 'Note 0: the pruning section'，无新 compaction 事件）; acp-status 7 请求（报告含 kernel 段头、`b1`+`Checkpoint seqs`、`Surface:` 锚，不含窗口语义行）。`npm run test:e2e` 同绿。
 - **2026-09-11（wire 级前缀检查，#111/#126）**: `npm run test:e2e` → **54/54 PASS**。新增检查断言的是**假 LLM 收到的请求体原文**——provider 唯一能用来做缓存键的东西——而不是内部投影：原始 envelope（`"messages"` 之前的字节，含 key 顺序与空白）逐字稳定、`tools` 数组逐字稳定、leading message 在请求 2 之后逐字稳定（请求 1 可能早于一次性 ACP 指引注入）、无 compaction 的场景全程 append-only（前一次请求的消息列表必须是后一次请求的逐字前缀）。变异验证：改第 2 个请求 body 的尾部 + `messages[1]` → append-only 检查 FAIL（`request #2 message 1`）；改原始 body 开头 + leading 消息 → envelope 与 leading 检查在 4 个场景全部 FAIL。
 - **2026-09-12（acp-kernel 0.0.63 升级，issue #122）**: `npm run test:e2e` → **4 场景全绿（`e2e PASS`）**。basic-compress / compress-then-decompress 的 warm filler 由 `count: 110` 放大到 `250`（`scripts/e2e/scenarios/*.json`）以越过内核 nudge 收益下限（约束 9）；nudge-rhythm / acp-status 不受影响。
+- **2026-09-24（第 5 个场景：上下文超窗自动恢复，PR #153 采用）**: `npm run test:e2e` → **5 场景 65/65 PASS（`e2e PASS`）**。新增 `overflow-recovery`：window 2000 + 3 轮 warm filler（`count: 250`），第 4 个脚本回复返回 HTTP 400 的 "maximum context length"（`dsh-llm-deepseek` 归一化为 `CONTEXT_WINDOW_EXCEEDED`）→ 引擎紧急压缩一次（marker 摘要 + durable replace，`starts=1 ends=1`）→ **宿主重试该请求并成功**（`requests: text,text,text,error,text`；重试请求的线级 body 里原文已消失、marker 已出现）；断集见上表。原 4 场景断集不变。

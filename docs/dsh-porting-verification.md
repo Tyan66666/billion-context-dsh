@@ -79,7 +79,7 @@ PROBE OK
 ## 第二部分：验证中发现的关键架构事实
 
 1. **region 事务不在 seam 里**：durable 替换事务（`compactSurfaceRegion`，~400 行：范围校验 → `compaction/start` 锁 → 摘要 → `compaction/summary` + `user/message` replace → `compaction/end`）实现在 `compaction-basic/src/region.ts` 内部且**未导出**。ACP 后端要复用事务机制只有两条路：自带一份（按同一模式重写，源码可见可照抄），或把事务机制**上游化到 seam 包**（更符合 seam 哲学：seam 拥有事务、后端拥有策略，是一个干净的小型 DSH 贡献）。
-2. **自动触发的接缝**与 compaction-basic 相同：`agent/pre-step`（pressure）与 `agent/request-error`（context-overflow 恢复，`CONTEXT_WINDOW_EXCEEDED_CODE`）。ACP 引擎照抄这两个 listener 即可。
+2. **自动触发的接缝**与 compaction-basic 相同：`agent/pre-step`（pressure）与 `agent/request-error`（context-overflow 恢复，`CONTEXT_WINDOW_EXCEEDED_CODE`）。**现状（采用 PR #153 后）**：压力侧**故意不照抄**——`agent/pre-step` 只注入 nudge，压缩与否由模型决定（设计决策 3）；超窗半侧已实现——`agent/request-error` 确认 `CONTEXT_WINDOW_EXCEEDED_CODE` → 引擎自写 marker 摘要做一次紧急隐藏 → `{kind:'retry'}`，预算 `maxOverflowRetries`（默认 1）。没有这个监听器时错误被原样重抛、没有重试。详见 docs/overflow-recovery-design.md。
 3. **checkpoint 溯源协议已就绪**：任何后端的替换消息都必须用 `compactCheckpointSource(compactionId)` 标记，`isCompactCheckpointSource` 识别——ACP 的"块摘要节点"可直接复用这个协议（块 id 作为消息内容的一部分，`compactionId` 作为事务标识）。
 4. **seq 即 ref** 的数据基础存在：`session.surface.nodes` 给出有序 seq 列表，模型侧引用可用 seq 范围（由 nudge/注入消息携带映射表），无需给历史消息打内存标签。
 5. **配置文件路径**：web 组合 `~/.dsh/profiles/node_modules/@deepseek-ai/dsh-web-app/cordis.patch.yml` 挂载 `agent-presets`（default: standard）；preset 本体在 `apps/cli/config/agent-presets/standard/`；host 平面行在 `dsh-base/cordis.patch.yml`。
@@ -111,7 +111,7 @@ PROBE OK
 | D1 | **ref 机制**：放弃内存打 `<acp>` 标签，改用"seq 即 ref"，nudge/注入消息携带 seq→内容映射表 | V4：无内存改写钩子；V2 架构事实 4 |
 | D2 | **压缩落地**：模型 `compress` 工具 → durable `surfaceOp: {op:'replace'}` 遮蔽范围，摘要 = 模型写的 summary（正是 ACP 省 token 的卖点，无需二次 LLM 摘要调用） | V2、V5 |
 | D3 | **decompress**：读取日志原始事件，replace 回原文 | V5 |
-| D4 | **自动触发**：`agent/pre-step` + `agent/request-error`，与 compaction-basic 相同 | V2 架构事实 2 |
+| D4 | **自动触发**：`agent/pre-step` + `agent/request-error`，与 compaction-basic 相同（压力侧只 nudge、不自动摘要；超窗侧已实现：引擎写 marker 摘要做一次紧急隐藏并让宿主重试，预算 `maxOverflowRetries`，PR #153） | V2 架构事实 2；docs/overflow-recovery-design.md |
 | D5 | **块状态**：ACP block 状态写成会话日志事件（如 `acp/block`，回放/checkpoint 免费）或 `ctx.storage` key | V5、V3 |
 | D6 | **搜索**：`search_context` 从日志重建统一文档集（块摘要 + 被遮蔽的原始消息），交给 acp-kernel `searchBlocks`（默认 hybrid：BM25 词干化 + CJK bigram + 字符 n-gram 模糊）；**信任内核**——引擎不设无命中闸门/阈值（曾有一版 BM25 闸门过滤 fuzzy 假阳性，实测误杀 6/46 条同义词与词干化查询，违反"算法归内核"原则后移除），评分直接呈现，弱命中（fuzzy 兜底分 ≈0.3 上下）由模型凭分数判断；消息命中回链最内层所属块 | V3、V1 |
 | D7 | **nudge**：pre-step 注入（现有注入通道，会成为日志中的 `user/message`） | V4 中 pre-step 语义 |

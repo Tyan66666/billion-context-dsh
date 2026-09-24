@@ -1,0 +1,18 @@
+{
+  "name": "overflow-recovery",
+  "persona": "You are a concise coding agent.",
+  "engine": { "modelContextLimit": 2000, "autoCommand": false },
+  "userTurns": [
+    { "filler": { "topic": "pruning", "count": 250 } },
+    { "filler": { "topic": "ledger", "count": 250 } },
+    { "filler": { "topic": "regions", "count": 250 } },
+    "Please reply briefly."
+  ],
+  "responses": [
+    { "kind": "text", "filler": { "topic": "pruning", "count": 250 } },
+    { "kind": "text", "filler": { "topic": "ledger", "count": 250 } },
+    { "kind": "text", "filler": { "topic": "regions", "count": 250 } },
+    { "kind": "error" },
+    { "kind": "text", "text": "Recovered after the emergency context-overflow compaction: the oldest exchange is now one recovery block." }
+  ]
+}

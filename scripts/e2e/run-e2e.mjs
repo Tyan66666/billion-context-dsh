@@ -1,6 +1,6 @@
 import { runScenario } from './harness.mjs'
 import { readFileSync } from 'node:fs'
-const scenarioNames = ['basic-compress', 'nudge-rhythm', 'compress-then-decompress', 'acp-status']
+const scenarioNames = ['basic-compress', 'nudge-rhythm', 'compress-then-decompress', 'acp-status', 'overflow-recovery']
 const countsOf = (events) => {
   const starts = events.filter((event) => event.type === 'compaction/start').length
   const ends = events.filter((event) => event.type === 'compaction/end').length
@@ -136,6 +136,25 @@ const checksStatus = (result) => {
   list.push(['report excludes window-semantics rows (human-side /acp-prune)', !report.includes('estimated context') && !report.includes('context window'), ''])
   return list
 }
+const overflowMarkersOf = (events) => {
+  return events.filter((event) => event.type === 'compaction/summary').map((event) => deepText(event.data.summary ?? ''))
+}
+const overflowTopicsOf = (events) => {
+  return events.filter((event) => event.type === 'compaction/summary').map((event) => deepText(event.data.rawOutput ?? ''))
+}
+const checksOverflow = (result) => {
+  const list = []
+  const counts = countsOf(result.events)
+  const errorIdx = result.requests.findIndex((request) => request.kind === 'error')
+  list.push(['scripted overflow reached the loop as a failed request', errorIdx >= 0, `errorIdx=${errorIdx}`])
+  list.push(['loop retried and the retry request succeeded', errorIdx >= 0 && result.requests[errorIdx + 1]?.kind === 'text', `requests=${result.requests.length}`])
+  list.push(['emergency compaction start/end paired', counts.starts >= 1 && counts.ends === counts.starts, `starts=${counts.starts} ends=${counts.ends}`])
+  list.push(['emergency summary is the overflow recovery marker', overflowMarkersOf(result.events).some((text) => text.includes('context-overflow emergency compaction')), ''])
+  list.push(['recovery block labeled context-overflow recovery', overflowTopicsOf(result.events).some((raw) => raw.includes('context-overflow recovery')), ''])
+  list.push(['durable replace node landed', surfaceOpOf(result.events), ''])
+  list.push(['conversation continued after recovery', continuationOf(result.events, lastEndSeq(result.events)), ''])
+  return list
+}
 // Prompt-cache guard at the WIRE level. The request body is the only thing a provider
 // can key a cache on, so pin the parts of it that must not move across a scenario's LLM
 // calls. `raw` is the exact body string the fake LLM received (fake-llm.mjs keeps it);
@@ -190,7 +209,7 @@ const cachePrefixChecks = (result) => {
   }
   return list
 }
-const checksOf = { 'basic-compress': checksBasic, 'nudge-rhythm': checksRhythm, 'compress-then-decompress': checksDecompress, 'acp-status': checksStatus }
+const checksOf = { 'basic-compress': checksBasic, 'nudge-rhythm': checksRhythm, 'compress-then-decompress': checksDecompress, 'acp-status': checksStatus, 'overflow-recovery': checksOverflow }
 const loadScenario = async (name) => {
   return JSON.parse(readFileSync(new URL(`./scenarios/${name}.json`, import.meta.url), 'utf8'))
 }

@@ -134,8 +134,10 @@ function mediaSuffixOf(range: SeqCompressibleRange): string {
  * Lazy per-seq media price. The FIRST lookup triggers one meter measurement, so
  * the range walk only asks about seqs that really carry an attachment — a
  * media-free session never pays for the measurement (issue #117, issue #110).
+ * Exported for the context-overflow recovery path, which ranks ranges with the
+ * same vocabulary as the nudge table.
  */
-function meterMediaPriceResolver(
+export function meterMediaPriceResolver(
   agent: Agent,
   session: import('@deepseek-ai/dsh-session').Session,
 ): MediaPriceOf {

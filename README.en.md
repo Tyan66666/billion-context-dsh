@@ -42,7 +42,7 @@ When conversations get long, the model runs out of context. Most tools hard-trun
 Unlike DSH's built-in auto-compaction (which replaces a range with an automatically generated summary), billion-context-dsh:
 
 - **Model-driven** — the model writes the summary itself; there is no second LLM summarization call
-- **Advisory, never imperative** — automatic policy only *nudges*; the model decides whether and when to compress
+- **Advisory, never imperative** — automatic policy only *nudges*; the model decides whether and when to compress (one exception: a provider-confirmed context overflow lets the engine recover once by itself — see `maxOverflowRetries` in the configuration table)
 - **Durable & recoverable** — a compressed range becomes a checkpoint node, the originals stay in the append-only session log; `decompress` restores them, `search_context` finds information inside blocks
 - **Long tasks hold steady** — every step builds on the results before it; key conclusions stay usable and compound, so very long tasks actually finish
 - **Context stays lean** — every request rides on a small, distilled slice of context with only the key information; no bulk compression of large ranges, so details don't decay with it — and tokens stay low
@@ -251,6 +251,7 @@ This project reuses `acp-kernel`'s compression core and `billion-context-pi`'s d
 | `autoTools` | `true` | Register the four model tools on `ctx.tools` |
 | `autoCommand` | `true` | Register the `/acp-prune` command on `ctx.commands` |
 | `autoNudge` | `true` | Inject the nudge into `agent/pre-step` (runtime-adjustable: `/acp-prune config`) |
+| `maxOverflowRetries` | `1` | Budget for automatic recovery from a provider-confirmed context overflow (`CONTEXT_WINDOW_EXCEEDED`): the engine hides the largest eligible range with a marker summary it writes itself (no model call — the request was just rejected, so there is no model turn to write one; every original stays in the session log and `search_context`/`decompress` find it again), then answers the host's `agent/request-error` so the request is retried. The budget counts per request and resets once the model makes progress (an assistant message lands) or the agent goes idle; `0` disables the automatic action (the error surfaces unchanged). This is ACP's ONLY automatic compaction action — the pressure side stays nudge-only, the model decides (composition-only, not in the settings layer; rationale and trade-offs in [docs/overflow-recovery-design.md](docs/overflow-recovery-design.md)) |
 | `settingsEnabled` | `true` (enabled when unset) | (optional) Disable the runtime-settings integration entirely (composition-row-only, deliberately NOT in the settings layer — the switch cannot turn itself off; with it off the composition-row `config:` stays the only effective channel) |
 | `prompts` | — | (optional) Custom prompt copy: per-slot overrides for nudge / range table / system prompt / tool descriptions (template + named placeholders, validated at construction; see “Custom prompt copy” above and [docs/configurable-prompts-design.md](docs/configurable-prompts-design.md)) |
 

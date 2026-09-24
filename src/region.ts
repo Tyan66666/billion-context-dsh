@@ -495,7 +495,13 @@ export function runCompactionTransaction(
     // B1: frame the model-written summary ONCE at creation and write the SAME framed
     // blocks to both the durable compaction/summary event and the checkpoint node
     // below — log readers (search, acp_status, ledger) must never see different text
-    // than what the model sees in context (review item: prefix/raw mismatch).
+    // than what the model sees in context (review item: prefix/raw mismatch). The
+    // engine-written emergency overflow marker opts out (`framed: false`): it is
+    // not model-written, so the provenance prefix would mislabel it.
+    // Engine-written summaries (the overflow marker) stay unframed because
+    // `withSummaryFramePrefix` recognizes them by content — one rule shared with
+    // the projection net in src/messages.ts, so what the model sees and what the
+    // decompress header reads back are the same bytes.
     const framedSummary = prefixSummaryBlocks(input.summary)
     seqs.push(session.append('compaction/summary', {
       compactionId,

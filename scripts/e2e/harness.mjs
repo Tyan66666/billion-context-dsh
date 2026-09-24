@@ -8,7 +8,7 @@ const expandText = (entry) => {
   return entry.text
 }
 const expand = (entries) => entries.map((entry) => {
-  if (entry.kind === 'tool') return entry
+  if (entry.kind === 'tool' || entry.kind === 'error') return entry
   if (entry.kind === 'text') return { ...entry, text: expandText(entry) }
   return typeof entry === 'string' ? entry : expandText(entry)
 })

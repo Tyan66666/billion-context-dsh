@@ -61,7 +61,24 @@ const handler = (req, res) => {
   writeDone(res)
   res.end()
   state.requests.push({ kind: 'tool', name: turn.name, raw: body, body: parsed })
-}
+  return
+  }
+  if (turn.kind === 'error') {
+  // A scripted provider failure: HTTP 400 with DeepSeek's context-length
+  // overflow wording, which dsh-llm-deepseek normalizes to the
+  // CONTEXT_WINDOW_EXCEEDED code the engine's agent/request-error listener
+  // recovers from.
+  res.writeHead(turn.status ?? 400, { 'content-type': 'application/json' })
+  res.end(JSON.stringify(turn.body ?? {
+    error: {
+      message: "This model's maximum context length is 2000 tokens. However, you requested more tokens in the input. Please reduce the length of the messages.",
+      type: 'invalid_request_error',
+      code: 'invalid_request_error'
+    }
+  }))
+  state.requests.push({ kind: 'error', status: turn.status ?? 400, raw: body, body: parsed })
+  return
+  }
 })
 }
 const openSse = (res) => {

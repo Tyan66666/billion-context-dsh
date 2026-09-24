@@ -195,7 +195,37 @@ export function buildToolCallIndex(events: readonly SessionEvent[]): ReadonlyMap
 export const SUMMARY_FRAME_PREFIX = '[Model-written summary — not user words; re-verify any obligations before relying on them]'
 
 export function withSummaryFramePrefix(text: string): string {
-  return text.startsWith(SUMMARY_FRAME_PREFIX) ? text : `${SUMMARY_FRAME_PREFIX}\n${text}`
+  if (text.startsWith(SUMMARY_FRAME_PREFIX)) return text
+  // Engine-written summaries are exempt: the frame claims a provenance they do
+  // not have ("Model-written …"). Deciding that HERE — in the one function the
+  // creation write (region.ts `prefixSummaryBlocks`) and the projection net
+  // (`projectEvent`) both go through — keeps the durable text and the
+  // model-visible text identical by construction, instead of by two call-site
+  // conditions that drift apart.
+  if (isEngineWrittenSummary(text)) return text
+  return `${SUMMARY_FRAME_PREFIX}\n${text}`
+}
+
+/**
+ * The lead-in of a summary the ENGINE writes itself — today only the
+ * context-overflow emergency marker (src/index.ts `compactForOverflow`).
+ * Recognition is by content, not by caller: the writer and both framing sites
+ * share this ONE literal.
+ */
+export const ENGINE_SUMMARY_LEAD = '[engine-written summary — context-overflow emergency compaction'
+
+export function isEngineWrittenSummary(text: string): boolean {
+  return text.startsWith(ENGINE_SUMMARY_LEAD)
+}
+
+/**
+ * The block summary the automatic overflow recovery writes. It is the engine's
+ * own note — not model-written text, not user words — saying which range was
+ * hidden to get the request under the window and where the originals still
+ * live (the append-only log: search_context/decompress rebuild from it).
+ */
+export function overflowMarkerSummary(hiddenCount: number): string {
+  return `${ENGINE_SUMMARY_LEAD}: ${hiddenCount} surface message(s) hidden because the provider rejected the request as exceeding the context window. The originals are intact in the session log — use search_context or decompress (see acp_status) to read them, or re-run the compress tool over this range to write a proper summary.]`
 }
 
 export function projectEvent(event: SessionEvent, toolNames?: ReadonlyMap<string, string>): CoreMessage[] {
