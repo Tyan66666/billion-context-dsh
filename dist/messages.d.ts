@@ -12,6 +12,16 @@
  */
 import type { CoreMessage } from 'acp-kernel';
 import type { Session, SessionEvent } from '@deepseek-ai/dsh-session';
+declare module '@deepseek-ai/dsh-llm/message' {
+    interface MessageSourceMap {
+        acpNudge: {
+            kind: 'plugin:acp-nudge';
+        };
+        acpPrune: {
+            kind: 'plugin:billion-context-dsh';
+        };
+    }
+}
 /**
  * Extract plain text from a DSH content block array or string.
  *
@@ -139,9 +149,11 @@ export declare function isCheckpointNode(event: SessionEvent): boolean;
  * predicates that drift apart).
  *
  * - `real` — genuine conversation content (user turns without an injected
- *   source, assistant prose/tool-calls, tool results, sub-agent relay rows).
- *   This is the only class that may win "last real user message" protection
- *   (minus relay rows, see `isRealUserTurn`).
+ *   source, assistant prose/tool-calls, tool results, sub-agent relay rows,
+ *   and host content channels in BOTH spellings: legacy plugin names and the
+ *   DSH >= 0.1.7 direct-kind renames, issue #169). This is the only class
+ *   that may win "last real user message" protection (minus all non-user
+ *   rows, see `isRealUserTurn`).
  * - `metadata` — the engine's own ephemeral rows: nudge echoes and
  *   compress-pair replacement stubs. Their content is derived from
  *   already-visible messages, so folding them into an adjacent real segment
@@ -149,22 +161,40 @@ export declare function isCheckpointNode(event: SessionEvent): boolean;
  * - `checkpoint` — compaction summary nodes (`plugin: 'compact'`).
  *   Distillation is an explicit act; never folded into any segment.
  * - `instruction` — host-authored policy/instructions: AGENTS.md injections
- *   (both host shapes), skill catalogs, and ANY unknown `kind:'plugin'` row.
- *   Folding these is unsafe (the model would lose live policy text, and the
- *   host re-injects the current AGENTS.md copy when it disappears — the
- *   compress → re-inject loop this PR fixes). Unknown plugin names fall here
- *   deliberately: a future host injection must never silently become
- *   compressible content.
+ *   (both host shapes), skill catalogs, host compaction summary rows
+ *   (`compact-basic`, issue #169), and ANY unknown `kind:'plugin'` row or
+ *   unaudited direct kind. Folding these is unsafe (the model would lose
+ *   live policy text, and the host re-injects the current AGENTS.md copy
+ *   when it disappears — the compress → re-inject loop this PR fixes).
+ *   Unknown channel names fall here deliberately in BOTH namespaces: a
+ *   future host injection must never silently become compressible content.
  */
 export type SurfaceEventClass = 'real' | 'metadata' | 'checkpoint' | 'instruction';
 /** Plugin names the engine itself authors — safe to fold into real segments. */
 export declare const METADATA_PLUGINS: ReadonlySet<string>;
 /**
- * True for AGENTS.md instruction rows in BOTH host shapes: the hook shape
- * (`kind:'agent-instructions'`, form 'instructions') and the baseline shape
- * (`kind:'plugin'` + plugin 'agent-instructions'). Shared by the newest-row
- * scan and the range scanner so protection and folding always agree on what
- * counts as an AGENTS.md row.
+ * Resolve the owning plugin name from either durable source shape: the legacy
+ * V3 wrapper `{ kind: 'plugin', plugin: '<name>' }` or the V4 producer kind
+ * `'plugin:<name>'`. DSH 0.1.7's V3→V4 migration rewrites every unregistered
+ * plugin row into the latter on file open, so both shapes coexist on a live
+ * surface until a session has been fully rewritten (issue #163). Returns
+ * undefined when neither shape is present, or when the name is missing,
+ * non-string, or empty — callers then keep their conservative fallback.
+ */
+export declare function sourcePluginOf(source: {
+    kind?: unknown;
+    plugin?: unknown;
+} | undefined): string | undefined;
+/**
+ * True for AGENTS.md instruction rows in ALL host shapes: the hook shape
+ * (`kind:'agent-instructions'`, form 'instructions'), the legacy V3 wrapper
+ * (`kind:'plugin'` + plugin 'agent-instructions'), and the V4 producer kind
+ * (`kind:'plugin:agent-instructions'`) that DSH 0.1.7's migration rewrites
+ * legacy rows into on file open (issue #163) — a migrated session must keep
+ * its newest-row pin, or the current copy becomes foldable and the
+ * compress → re-inject loop returns. Shared by the newest-row scan and the
+ * range scanner so protection and folding always agree on what counts as an
+ * AGENTS.md row.
  */
 export declare function isAgentInstructionsRow(event: SessionEvent): boolean;
 export declare function classifySurfaceEvent(event: SessionEvent): SurfaceEventClass;
