@@ -3363,6 +3363,9 @@ function makePreview(text, query, len) {
   return prefix + text.slice(start, end).trim() + suffix;
 }
 
+// src/index.ts
+import { CONTEXT_WINDOW_EXCEEDED_CODE } from "@deepseek-ai/dsh-llm";
+
 // src/lru.ts
 var DEFAULT_SESSION_CACHE_LIMIT = 512;
 var LruMap = class extends Map {
@@ -3478,8 +3481,17 @@ function buildToolCallIndex(events) {
 }
 var SUMMARY_FRAME_PREFIX = "[Model-written summary \u2014 not user words; re-verify any obligations before relying on them]";
 function withSummaryFramePrefix(text) {
-  return text.startsWith(SUMMARY_FRAME_PREFIX) ? text : `${SUMMARY_FRAME_PREFIX}
+  if (text.startsWith(SUMMARY_FRAME_PREFIX)) return text;
+  if (isEngineWrittenSummary(text)) return text;
+  return `${SUMMARY_FRAME_PREFIX}
 ${text}`;
+}
+var ENGINE_SUMMARY_LEAD = "[engine-written summary \u2014 context-overflow emergency compaction";
+function isEngineWrittenSummary(text) {
+  return text.startsWith(ENGINE_SUMMARY_LEAD);
+}
+function overflowMarkerSummary(hiddenCount) {
+  return `${ENGINE_SUMMARY_LEAD}: ${hiddenCount} surface message(s) hidden because the provider rejected the request as exceeding the context window. The originals are intact in the session log \u2014 use search_context or decompress (see acp_status) to read them, or re-run the compress tool over this range to write a proper summary.]`;
 }
 function projectEvent(event, toolNames) {
   switch (event.type) {
@@ -6151,6 +6163,9 @@ var DEFAULT_CONFIG = {
   autoTools: true,
   autoCommand: true,
   autoNudge: true,
+  // Same default as the host's compaction-basic policy: one owned retry per
+  // unrelieved overflow, then the original error is preserved.
+  maxOverflowRetries: 1,
   // Nudge thresholds: engine defaults 0.70/0.85 — deliberately below the
   // kernel/billion-context-pi 0.75/0.95. 0.95 leaves no room to act before
   // the API rejects, and the host's compaction-basic line (thresholdRatio
@@ -6164,7 +6179,11 @@ var DEFAULT_CONFIG = {
 function resolveAcpConfig(config = {}) {
   const resolved = resolvePresetThresholds({ ...DEFAULT_CONFIG, ...config }, config);
   assertNudgeThresholdOrder(resolved);
-  return resolved;
+  const maxOverflowRetries = resolved.maxOverflowRetries ?? 1;
+  if (!Number.isInteger(maxOverflowRetries) || maxOverflowRetries < 0) {
+    throw new Error(`maxOverflowRetries must be a non-negative integer (got ${maxOverflowRetries})`);
+  }
+  return { ...resolved, maxOverflowRetries };
 }
 function resolvePresetThresholds(base, config) {
   if (base.preset === void 0) return base;
@@ -6232,6 +6251,10 @@ var AcpCompactionEngine = class extends CompactionEngine {
   settingsCommand;
   /** Per route the adapter's per-request output cap (the output reservation); null = undisclosed. */
   outputReservationCache = /* @__PURE__ */ new Map();
+  /** Per-agent context-overflow recovery budget (mirrors the host's `overflowRetries`). */
+  overflowRetries = /* @__PURE__ */ new Map();
+  /** Per-session overflow agents, so session progress can reset the recovery budget. */
+  overflowSessions = /* @__PURE__ */ new Map();
   constructor(ctx, config = {}) {
     super(ctx);
     this.config = resolveAcpConfig(config);
@@ -6343,6 +6366,13 @@ var AcpCompactionEngine = class extends CompactionEngine {
       });
     }
     ctx.on("session/event", (session, event) => {
+      if (event.type === "assistant/message") {
+        const overflowAgent = this.overflowSessions.get(session);
+        if (overflowAgent !== void 0) {
+          this.overflowRetries.delete(overflowAgent);
+          this.overflowSessions.delete(session);
+        }
+      }
       if (event.type !== "tool/result") return;
       const message = event.data.message;
       const block = message.content[0];
@@ -6372,6 +6402,49 @@ var AcpCompactionEngine = class extends CompactionEngine {
       );
       if (outcome === null) return decision;
       return { kind: "enter", messages: [...decision.messages, outcome.message] };
+    });
+    ctx.on("agent/status", ({ agent, status }) => {
+      if (status !== "idle") return;
+      this.overflowRetries.delete(agent);
+      this.overflowSessions.delete(agent.session);
+    });
+    ctx.on("agent/request-error", async ({ agent, failure, signal }, next) => {
+      if (failure.code !== CONTEXT_WINDOW_EXCEEDED_CODE || signal.aborted) return next();
+      this.overflowSessions.set(agent.session, agent);
+      const retries = this.overflowRetries.get(agent) ?? 0;
+      const max = this.config.maxOverflowRetries ?? 1;
+      if (retries >= max) {
+        this.ctx.logger.warn(
+          `billion-context-dsh: context-overflow recovery budget spent (${max} retries) for session ${agent.session.id}; preserving the original request error`
+        );
+        return next();
+      }
+      const generation = agent.session.surface.replaceGeneration;
+      let result;
+      try {
+        result = await this.compactForOverflow(agent, signal);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (!signal.aborted && agent.session.surface.replaceGeneration > generation) {
+          this.ctx.logger.warn(
+            `billion-context-dsh: context-overflow compaction failed after durable surface progress: ${message}; retrying from the replacement surface`
+          );
+          this.overflowRetries.set(agent, retries + 1);
+          return { kind: "retry" };
+        }
+        this.ctx.logger.warn(
+          `billion-context-dsh: context-overflow compaction failed: ${message}; ${signal.aborted ? "cancellation prevents retry" : "preserving the original request error"}`
+        );
+        return next();
+      }
+      if (signal.aborted || agent.session.surface.replaceGeneration <= generation) return next();
+      if (result !== null) {
+        this.ctx.logger.info(
+          `compaction (context overflow recovery): shadowed ${result.shadowedSeqs.length} surface nodes (seqs ${result.start}-${result.end}, ~${result.shadowedTokenCount} tokens)`
+        );
+      }
+      this.overflowRetries.set(agent, retries + 1);
+      return { kind: "retry" };
     });
     const systemPrompt = ctx.get("systemPrompt");
     if (systemPrompt !== void 0) {
@@ -6495,6 +6568,81 @@ var AcpCompactionEngine = class extends CompactionEngine {
   applyReservation(window, cap) {
     if (cap === null || cap >= window.limit) return window;
     return { ...window, rawLimit: window.limit, outputReserved: cap, limit: window.limit - cap };
+  }
+  /**
+   * Best-effort emergency compaction for one provider-confirmed context
+   * overflow: pick the largest eligible (guarded, tool-pairing-balanced)
+   * surface range and land the normal durable transaction with a fixed
+   * engine-written marker summary. No LLM call — the provider just rejected
+   * the request for being too large, so there is no model turn available to
+   * write a summary; the originals stay in the append-only log, so
+   * search_context still indexes them, decompress restores them, and the
+   * model can re-run the compress tool over the marker later to write a real
+   * summary. Returns null when nothing eligible exists (nothing to reclaim).
+   */
+  async compactForOverflow(agent, signal) {
+    signal.throwIfAborted();
+    const session = agent.session;
+    const state = this.store.stateFor(session);
+    const coreMessages = allLogMessages(session);
+    const surfaceMessages = eventsToCoreMessages(surfaceEventsOf(session));
+    const tokenCount = resolveTokenCount(agent, surfaceMessages);
+    const window = await this.windowFor(agent);
+    const config = kernelConfigFor({ ...this.env, modelContextLimit: window.limit });
+    const turn = this.kernel.processTurn({ messages: coreMessages, state, config, tokenCount, renderTags: "none" });
+    this.store.set(session, turn.state);
+    const byRaw = turn.state.messageRefs.byRaw;
+    let firstSeq;
+    let lastSeq;
+    for (const seq of session.surface.nodes) {
+      if (byRaw[String(seq)] === void 0) continue;
+      firstSeq ??= seq;
+      lastSeq = seq;
+    }
+    if (firstSeq === void 0 || lastSeq === void 0) return null;
+    const view = {
+      ranges: [{ startRef: byRaw[String(firstSeq)], endRef: byRaw[String(lastSeq)] }],
+      refs: { byRef: turn.state.messageRefs.byRef }
+    };
+    const ranges = buildCompressibleSeqRanges(session, view, {
+      preserveRecent: 5,
+      mediaPriceOf: meterMediaPriceResolver(agent, session)
+    });
+    if (ranges.length === 0) return null;
+    const best = ranges.reduce((largest, range) => range.tokens > largest.tokens ? range : largest);
+    const startRef = byRaw[String(best.start)];
+    const endRef = byRaw[String(best.end)];
+    if (startRef === void 0 || endRef === void 0) return null;
+    const summary = overflowMarkerSummary(best.count);
+    const applied = this.kernel.applyCompression({
+      ranges: [{ startRef, endRef, summary, topic: "context-overflow recovery" }],
+      messages: coreMessages,
+      state: turn.state,
+      config
+    });
+    if (applied.result.blocksCreated === 0) return null;
+    this.store.set(session, applied.state);
+    const previousIds = new Set(turn.state.blocks.map((block) => block.blockId));
+    const created = applied.state.blocks.find((block) => !previousIds.has(block.blockId));
+    if (created === void 0) return null;
+    const shadowed = shadowedSeqsOf(session, best.start, best.end);
+    if (shadowed.length === 0) return null;
+    const shadowedTokenCount = shadowedTokensViaMeter(session, shadowed, agent.ctx);
+    const { provider, model } = routeFor(agent);
+    runCompactionTransaction(session, {
+      start: best.start,
+      end: best.end,
+      shadowedSeqs: shadowed,
+      summary: [{ type: "text", text: summary }],
+      shadowedTokenCount,
+      provider,
+      model,
+      topic: "context-overflow recovery",
+      kernelBlockId: created.blockId,
+      directMessageIds: created.directMessageIds,
+      effectiveMessageIds: created.effectiveMessageIds
+    });
+    return { start: best.start, end: best.end, shadowedSeqs: shadowed, shadowedTokenCount };
   }
   /** ACP is model-driven: automatic pressure policy never summarizes by itself. */
   async compactIfNeeded(_agent, _trigger, signal) {

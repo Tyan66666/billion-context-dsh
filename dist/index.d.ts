@@ -116,6 +116,15 @@ export interface AcpConfig {
     /** Inject the nudge into `agent/pre-step` when the kernel recommends it. Default true. */
     readonly autoNudge: boolean;
     /**
+     * How many consecutive provider-confirmed context-overflow failures one
+     * agent may answer with an emergency compaction + retry before the original
+     * error is preserved (mirrors compaction-basic's `maxOverflowRetries`;
+     * default 1, the host's own default). The budget resets when the agent
+     * makes progress (an assistant message lands) or returns to idle, so a
+     * request that cannot be repaired cannot retry forever.
+     */
+    readonly maxOverflowRetries?: number;
+    /**
      * Escape hatch: disable the runtime-settings integration entirely
      * (composition-layer ONLY — deliberately not exposed through the settings
      * layer itself: a switch that turns off its own plumbing could not be
@@ -163,6 +172,10 @@ export declare class AcpCompactionEngine extends CompactionEngine {
     readonly settingsCommand: SettingsCommandSurface;
     /** Per route the adapter's per-request output cap (the output reservation); null = undisclosed. */
     private readonly outputReservationCache;
+    /** Per-agent context-overflow recovery budget (mirrors the host's `overflowRetries`). */
+    private readonly overflowRetries;
+    /** Per-session overflow agents, so session progress can reset the recovery budget. */
+    private readonly overflowSessions;
     constructor(ctx: Context, config?: Partial<AcpConfig>);
     /**
      * Resolve the effective context window for an agent. An explicitly
@@ -208,6 +221,18 @@ export declare class AcpCompactionEngine extends CompactionEngine {
      * (degenerate config) — the raw-window behavior is preserved.
      */
     private applyReservation;
+    /**
+     * Best-effort emergency compaction for one provider-confirmed context
+     * overflow: pick the largest eligible (guarded, tool-pairing-balanced)
+     * surface range and land the normal durable transaction with a fixed
+     * engine-written marker summary. No LLM call — the provider just rejected
+     * the request for being too large, so there is no model turn available to
+     * write a summary; the originals stay in the append-only log, so
+     * search_context still indexes them, decompress restores them, and the
+     * model can re-run the compress tool over the marker later to write a real
+     * summary. Returns null when nothing eligible exists (nothing to reclaim).
+     */
+    private compactForOverflow;
     /** ACP is model-driven: automatic pressure policy never summarizes by itself. */
     compactIfNeeded(_agent: CompactionAgentContext, _trigger: CompactionTrigger, signal: AbortSignal): Promise<CompactionResult | null>;
     /** Explicit idle-session compaction: ACP leaves the decision to the model. */

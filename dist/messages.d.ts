@@ -99,6 +99,21 @@ export declare function buildToolCallIndex(events: readonly SessionEvent[]): Rea
  */
 export declare const SUMMARY_FRAME_PREFIX = "[Model-written summary \u2014 not user words; re-verify any obligations before relying on them]";
 export declare function withSummaryFramePrefix(text: string): string;
+/**
+ * The lead-in of a summary the ENGINE writes itself — today only the
+ * context-overflow emergency marker (src/index.ts `compactForOverflow`).
+ * Recognition is by content, not by caller: the writer and both framing sites
+ * share this ONE literal.
+ */
+export declare const ENGINE_SUMMARY_LEAD = "[engine-written summary \u2014 context-overflow emergency compaction";
+export declare function isEngineWrittenSummary(text: string): boolean;
+/**
+ * The block summary the automatic overflow recovery writes. It is the engine's
+ * own note — not model-written text, not user words — saying which range was
+ * hidden to get the request under the window and where the originals still
+ * live (the append-only log: search_context/decompress rebuild from it).
+ */
+export declare function overflowMarkerSummary(hiddenCount: number): string;
 export declare function projectEvent(event: SessionEvent, toolNames?: ReadonlyMap<string, string>): CoreMessage[];
 /** Project a session's message events into CoreMessage[] in log order. */
 export declare function eventsToCoreMessages(events: readonly SessionEvent[], toolNames?: ReadonlyMap<string, string>): CoreMessage[];
