@@ -1,6 +1,6 @@
 # billion-context-dsh
 
-> **⚠️ Beta notice** — this project (v0.2.25) and the [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) are both in **public beta**: do not use in engineering / production environments.
+> **⚠️ Beta notice** — this project (v0.2.26) and the [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) are both in **public beta**: do not use in engineering / production environments.
 
 **Model-driven context management (Active Context Pruning / ACP) for the DeepSeek Harness.** The model decides *when* and *what* to compress — not a hard limit. Ported from [billion-context-pi](https://github.com/ranxianglei/billion-context-pi) (by [ranxianglei](https://github.com/ranxianglei), MIT); the compression core [acp-kernel](https://github.com/ranxianglei/acp-kernel) is reused verbatim.
 
