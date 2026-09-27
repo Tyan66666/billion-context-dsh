@@ -1,25 +1,32 @@
 /**
- * M6 — runtime settings integration tests (phase 1, issue #75).
+ * M6 — runtime settings integration tests (phase 1, issue #75; the 0.1.7
+ * forms line, issue #174).
  *
  * Coverage map (design doc §6):
  *  - pure units: filterSettingsEntry whitelist, engine-default mirror,
  *    schema default parity, schema boundaries (integer / inclusive pct),
  *    parseSettingValue (incl. the `false` regression), describeSettingsChange
  *    diff flags, command-surface degradation without a service;
- *  - E2E: a REAL engine on a bare cordis Context with an in-memory settings
- *    provider — external edits hot-apply to the live env, /acp-prune config
- *    list/set/reset round-trips, the kill switch ignores the provider;
+ *  - E2E on BOTH supported host lines through the REAL engine on a bare cordis
+ *    Context: the legacy installSection line (dsh-settings <= 0.1.6 — an
+ *    in-memory provider whose publishes hot-apply to the live env) and the
+ *    forms line (>= 0.1.7 SettingsForms — profile-entry-id addressing, writes
+ *    committed into the fiber's volatile config refs, optimistic revisions);
+ *  - /acp-prune config list/set/reset round-trips on both lines; the kill
+ *    switch ignores the provider;
  *  - regression locks added in review: the filtered `base` entry, the
  *    seam-to-window gate, the kernelConfigFor output, provider detach
  *    fallback, and reset preserving hand-written keys;
  *  - V1 gate: dispose-then-remount the same namespace (HMR-style reload)
- *    must not hit "settings namespace is already registered".
+ *    must not hit "settings namespace is already registered";
+ *  - degrade path: a settings service speaking NEITHER API logs one warn and
+ *    keeps the composition values available (issue #173).
  */
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { Context, Service, type Message } from '@deepseek-ai/cordis'
-import { SettingsProvider, type SettingsNamespace } from '@deepseek-ai/dsh-settings'
+import { SettingsConflictError } from '@deepseek-ai/dsh-settings'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { Session } from '@deepseek-ai/dsh-session'
 import {
@@ -27,34 +34,114 @@ import {
   AcpSettingsSchema,
   describeSettingsChange,
   filterSettingsEntry,
+  isVolatileRef,
   makeSettingsCommandSurface,
   parseSettingValue,
   resolveAcpSettings,
   SETTING_DEFAULTS,
+  VOLATILE_WRITE,
 } from '../src/settings.ts'
 import { AcpCompactionEngine, resolveAcpConfig, type AcpConfig } from '../src/index.ts'
 import { kernelConfigFor } from '../src/config.ts'
 import { acpCommand } from '../src/commands.ts'
 import type { ToolEnvironment } from '../src/tools.ts'
 import { DEFAULT_CONTEXT_WINDOW } from '../src/window.ts'
+import { buildTextSession } from './helpers.ts'
 
-/** In-memory settings provider: load/persist over a plain map; tests push external edits through publishForTest. */
-class MemorySettingsProvider extends SettingsProvider {
+function fakeAgent(session: Session): Agent {
+  return {
+    id: session.id,
+    session,
+    options: { provider: 'test-provider', model: 'test-model' },
+    ctx: new Context(),
+  } as unknown as Agent
+}
+
+/**
+ * Stand-in for dsh-settings <= 0.1.6's SettingsProvider. The real class has no
+ * runtime value on the 0.1.7 baseline (type-only there), so the fixture is
+ * standalone: it implements the installSection registration contract the
+ * engine's legacy branch consumes — a LIVE schema-resolved source thunk, async
+ * change notification, provider-side describe/update/replace — mirroring the
+ * 0.1.5 semantics line for line (rule 5: fixtures mirror real host structures).
+ */
+class LegacySettingsProvider extends Service {
   static provide = 'settings'
   readonly writable = true
-  private stored: Record<string, unknown> = {}
+  private ns = ''
+  private schema: ((input: Record<string, unknown>) => Record<string, unknown>) | undefined
+  private entry: Record<string, unknown> = {}
+  private user: Record<string, unknown> = {}
+  private resolved: Record<string, unknown> = {}
+  private revision = 0
+  private setSourceHook: ((source: () => Record<string, unknown>) => void) | undefined
+  private onChangeHook: (() => void) | undefined
 
-  protected override async load(): Promise<Record<string, unknown>> {
-    return this.stored
-  }
-
-  protected override async persist(ns: SettingsNamespace, section: Record<string, unknown>): Promise<void> {
-    this.stored[String(ns)] = section
+  installSection(
+    _ctx: unknown,
+    namespace: string,
+    schema: unknown,
+    entry: Record<string, unknown>,
+    hooks: { setSource: (source: () => Record<string, unknown>) => void; onChange: () => void },
+  ): void {
+    // Overwrite-on-duplicate mirrors per-fiber registration: an HMR remount
+    // re-registers the same namespace cleanly instead of throwing.
+    this.ns = String(namespace)
+    this.schema = schema as (input: Record<string, unknown>) => Record<string, unknown>
+    this.entry = entry
+    this.setSourceHook = hooks.setSource
+    this.onChangeHook = hooks.onChange
+    this.resolved = this.schema({ ...this.entry })
+    // The registered source must stay LIVE: later publishes re-resolve through
+    // it, exactly like the real provider's setSource thunk.
+    hooks.setSource(() => this.resolved)
+    hooks.onChange()
   }
 
   /** Simulate an external edit (someone editing settings.yaml on disk). */
   publishForTest(doc: Record<string, unknown>): void {
-    this.publish(doc)
+    const section = doc[this.ns]
+    if (typeof section !== 'object' || section === null || Array.isArray(section)) return
+    this.user = section as Record<string, unknown>
+    this.commit(this.resolveWith(this.user))
+  }
+
+  describe(): Array<{ ns: string; autoGenerate: boolean; schema: unknown; revision: number; value: Record<string, unknown>; base: Record<string, unknown>; user: Record<string, unknown> }> {
+    if (this.ns === '') return []
+    return [{ ns: this.ns, autoGenerate: false, schema: this.schema, revision: this.revision, value: this.resolved, base: this.entry, user: this.user }]
+  }
+
+  async update(ns: string, patch: Record<string, unknown>, _expectedRevision?: number): Promise<void> {
+    this.assertNs(ns)
+    const nextUser = { ...this.user, ...patch }
+    const resolved = this.resolveWith(nextUser) // throws ValidationError before anything mutates
+    this.user = nextUser
+    this.commit(resolved)
+  }
+
+  async replace(ns: string, section: Record<string, unknown>, _expectedRevision?: number): Promise<void> {
+    this.assertNs(ns)
+    const resolved = this.resolveWith(section)
+    this.user = section
+    this.commit(resolved)
+  }
+
+  private assertNs(ns: string): void {
+    if (String(ns) !== this.ns) throw new Error(`unknown settings namespace ${String(ns)}`)
+  }
+
+  private resolveWith(user: Record<string, unknown>): Record<string, unknown> {
+    const schema = this.schema
+    if (schema === undefined) throw new Error('settings section not registered')
+    return schema({ ...this.entry, ...user })
+  }
+
+  private commit(next: Record<string, unknown>): void {
+    const prev = this.resolved
+    this.resolved = next
+    if (JSON.stringify(prev) === JSON.stringify(next)) return
+    this.revision += 1
+    queueMicrotask(() => this.onChangeHook?.())
   }
 }
 
@@ -82,27 +169,108 @@ async function mountEngine(root: Context, config: Partial = {}, prepare?: (ctx: 
 }
 
 /**
- * Stand-in for dsh-settings >= 0.1.7 (issue #173): the service was renamed to
- * SettingsForms and `installSection` removed; its section API keys off profile
- * entry ids instead of plugin namespaces. Registered under the same `settings`
- * name so the engine's inject fires exactly like on a real 0.1.7 host. The
- * fixture mirrors the 0.1.7 public surface (configure/describe/update/replace/
- * mutate) and deliberately carries NO installSection — a fixture that grew the
- * method back would make the regression test vacuous (rule 5: fixtures mirror
- * real host structures).
+ * A volatile ref pair mirroring cosmokit's createVolatile shape: a frozen
+ * object exposing get() plus the Symbol.for('cosmokit.volatile.write') write
+ * key. Built with the engine's own VOLATILE_WRITE symbol so isVolatileRef is
+ * guaranteed to recognize it — no cosmokit dependency in the test tree.
  */
-class FormsLikeSettingsService extends Service {
+interface TestVolatileRef {
+  get(): unknown
+}
+
+function makeVolatileRef(initial: unknown): { ref: TestVolatileRef; write: (value: unknown) => void } {
+  let current = initial
+  const write = (value: unknown): void => {
+    current = value
+  }
+  return { ref: Object.freeze({ get: () => current, [VOLATILE_WRITE]: write }) as TestVolatileRef, write }
+}
+
+/**
+ * Stand-in for dsh-settings >= 0.1.7's SettingsForms (issue #174): addressed
+ * by profile entry id, optimistic revisions, and writes committed INTO the
+ * consuming fiber's config refs — the live carrier of the profile entry on
+ * that line. Deliberately carries NO installSection (removed on this line,
+ * issue #173). The ctor receives the entry's OWN written knobs (its
+ * options.config); the inherited layers below the entry stay empty here, so a
+ * field reset lands on undefined and the schema defaults take over — exactly
+ * like a bare test root.
+ */
+class FormsSettingsService extends Service {
   static provide = 'settings'
-  readonly writable = false
-  configure(_presentation?: unknown): () => void {
-    return () => {}
+  readonly writable = true
+  private sections: Array<{ key: string; ref: TestVolatileRef; write: (value: unknown) => void; written: boolean }>
+  private revision = 0
+
+  constructor(ctx: Context, knobs: Record<string, unknown>) {
+    super(ctx, 'settings')
+    this.sections = Object.entries(knobs).map(([key, value]) => {
+      // Production reality: the loader hands the plugin the SAME volatile refs
+      // SettingsForms later commits into — wrap only plain values, or updates
+      // would land in a nested cell the engine never reads.
+      const cell = isVolatileRef(value)
+        ? { ref: value as TestVolatileRef, write: (next: unknown): void => { (value as Record<symbol, (v: unknown) => void>)[VOLATILE_WRITE](next) } }
+        : makeVolatileRef(value)
+      return { ...cell, key, written: true }
+    })
   }
-  describe(): unknown[] {
-    return []
+
+  describe(): Array<{ ns: string; autoGenerate: boolean; schema: unknown; revision: number; value: Record<string, unknown>; base: Record<string, unknown>; user: Record<string, unknown> }> {
+    const value: Record<string, unknown> = {}
+    const user: Record<string, unknown> = {}
+    for (const section of this.sections) {
+      const current = section.ref.get()
+      if (current === undefined) continue
+      value[section.key] = current
+      if (section.written) user[section.key] = current
+    }
+    return [{ ns: ACP_SETTINGS_NAMESPACE, autoGenerate: false, schema: {}, revision: this.revision, value, base: {}, user }]
   }
-  async update(_ns: string, _patch: Record<string, unknown>): Promise<void> {}
-  async replace(_ns: string, _section: Record<string, unknown>): Promise<void> {}
-  async mutate(_ns: string, _ops: readonly unknown[]): Promise<void> {}
+
+  async update(ns: string, patch: Record<string, unknown>, expectedRevision?: number): Promise<void> {
+    this.assertNs(ns)
+    this.assertRevision(expectedRevision)
+    for (const [key, value] of Object.entries(patch)) {
+      // Unknown keys never reach here in production: the command surface
+      // validates against the six known keys before calling.
+      const section = this.sections.find((candidate) => candidate.key === key)
+      if (section === undefined) continue
+      section.write(value)
+      section.written = true
+    }
+    this.revision += 1
+  }
+
+  async replace(ns: string, section: Record<string, unknown>, expectedRevision?: number): Promise<void> {
+    this.assertNs(ns)
+    this.assertRevision(expectedRevision)
+    // Reset every live field to the (empty) inherited layers, then apply the
+    // replacement — mirrors the host's "reset-all-then-set" contract.
+    for (const candidate of this.sections) {
+      candidate.write(undefined)
+      candidate.written = false
+    }
+    for (const [key, value] of Object.entries(section)) {
+      const target = this.sections.find((candidate) => candidate.key === key)
+      if (target === undefined) continue
+      target.write(value)
+      target.written = true
+    }
+    this.revision += 1
+  }
+
+  private assertNs(ns: string): void {
+    if (String(ns) !== ACP_SETTINGS_NAMESPACE) throw new Error(`no profile entry named ${String(ns)}`)
+  }
+
+  private assertRevision(expected: number | undefined): void {
+    if (expected !== undefined && expected !== this.revision) throw new SettingsConflictError(ACP_SETTINGS_NAMESPACE, expected, this.revision)
+  }
+}
+
+/** Speaks neither the legacy installSection API nor the forms API — the degrade path (issue #173). */
+class BareSettingsService extends Service {
+  static provide = 'settings'
 }
 
 /** Drive /acp-prune through the real command handler (config paths never touch the agent). */
@@ -226,7 +394,7 @@ test('M6: command surface degrades without a service', async () => {
 
 test('M6: engine env reads LIVE settings — an external edit hot-applies', async () => {
   const root = new Context()
-  await root.plugin(MemorySettingsProvider)
+  await root.plugin(LegacySettingsProvider)
   // Cordis drops warn-level messages at its default threshold, so capture them
   // through an explicit-level exporter registered before construction.
   const logs: Message[] = []
@@ -241,7 +409,7 @@ test('M6: engine env reads LIVE settings — an external edit hot-applies', asyn
       !logs.some((m) => m.type === 'warn' && String(m.args[0]).includes('installSection')),
       'no spurious installSection warn on a supported host',
     )
-    const provider = root.get('settings') as MemorySettingsProvider
+    const provider = root.get('settings') as LegacySettingsProvider
     provider.publishForTest({ [ACP_SETTINGS_NAMESPACE]: { nudgeMaxContextLimitPct: 0.6 } })
     await flushRounds()
     assert.equal(engine.env.nudgeMaxContextLimitPct, 0.6)
@@ -252,7 +420,7 @@ test('M6: engine env reads LIVE settings — an external edit hot-applies', asyn
 
 test('M6: /acp-prune config list/set/reset round-trips through a real provider', async () => {
   const root = new Context()
-  await root.plugin(MemorySettingsProvider)
+  await root.plugin(LegacySettingsProvider)
   const { fiber, engine } = await mountEngine(root)
   try {
     const list = await runAcp(engine.env, 'config')
@@ -288,12 +456,12 @@ test('M6: /acp-prune config list/set/reset round-trips through a real provider',
 
 test('M6: settingsEnabled false is a kill switch — composition values stay, provider ignored', async () => {
   const root = new Context()
-  await root.plugin(MemorySettingsProvider)
+  await root.plugin(LegacySettingsProvider)
   const { fiber, engine } = await mountEngine(root, { settingsEnabled: false, nudgeMaxContextLimitPct: 0.66 })
   try {
     assert.equal(engine.env.nudgeMaxContextLimitPct, 0.66)
     assert.equal(engine.env.settingsCommand?.available, false)
-    const provider = root.get('settings') as MemorySettingsProvider
+    const provider = root.get('settings') as LegacySettingsProvider
     provider.publishForTest({ [ACP_SETTINGS_NAMESPACE]: { nudgeMaxContextLimitPct: 0.4 } })
     await flushRounds()
     assert.equal(engine.env.nudgeMaxContextLimitPct, 0.66)
@@ -304,7 +472,7 @@ test('M6: settingsEnabled false is a kill switch — composition values stay, pr
 
 test('M6: HMR-style remount of the same namespace does not hit duplicate registration (V1 gate)', async () => {
   const root = new Context()
-  await root.plugin(MemorySettingsProvider)
+  await root.plugin(LegacySettingsProvider)
   const first = await mountEngine(root)
   assert.equal(first.engine.env.nudgeMaxContextLimitPct, 0.7)
   await first.fiber.dispose()
@@ -322,7 +490,7 @@ test('M6: HMR-style remount of the same namespace does not hit duplicate registr
 
 test('M6: installSection registers the FILTERED composition subset as `base`', async () => {
   const root = new Context()
-  await root.plugin(MemorySettingsProvider)
+  await root.plugin(LegacySettingsProvider)
   const { fiber, engine } = await mountEngine(root, { nudgeMaxContextLimitPct: 0.66 })
   try {
     const descriptor = engine.env.settingsCommand?.describe()
@@ -341,11 +509,11 @@ test('M6: installSection registers the FILTERED composition subset as `base`', a
 
 test('M6: a settings edit reaches kernelConfigFor, not just the env getters', async () => {
   const root = new Context()
-  await root.plugin(MemorySettingsProvider)
+  await root.plugin(LegacySettingsProvider)
   const { fiber, engine } = await mountEngine(root)
   try {
     assert.equal(kernelConfigFor(engine.env).nudge.maxContextLimitPct, 0.7)
-    const provider = root.get('settings') as MemorySettingsProvider
+    const provider = root.get('settings') as LegacySettingsProvider
     provider.publishForTest({ [ACP_SETTINGS_NAMESPACE]: { nudgeMaxContextLimitPct: 0.6 } })
     await flushRounds()
     assert.equal(kernelConfigFor(engine.env).nudge.maxContextLimitPct, 0.6)
@@ -356,7 +524,7 @@ test('M6: a settings edit reaches kernelConfigFor, not just the env getters', as
 
 test('M6: a settings-layer autoModelContextLimit false gates the window projection', async () => {
   const root = new Context()
-  await root.plugin(MemorySettingsProvider)
+  await root.plugin(LegacySettingsProvider)
   // Composition keeps auto detection ON — only the settings layer turns it off.
   const { fiber, engine } = await mountEngine(root)
   try {
@@ -376,7 +544,7 @@ test('M6: a settings-layer autoModelContextLimit false gates the window projecti
     // Reading the COMPOSITION value at the gate would keep consulting the
     // projection even though the user disabled auto detection.
     assert.equal((await engine.windowFor(agent)).source, 'projection')
-    const provider = root.get('settings') as MemorySettingsProvider
+    const provider = root.get('settings') as LegacySettingsProvider
     provider.publishForTest({ [ACP_SETTINGS_NAMESPACE]: { autoModelContextLimit: false } })
     await flushRounds()
     assert.notEqual((await engine.windowFor(agent)).source, 'projection')
@@ -387,10 +555,10 @@ test('M6: a settings-layer autoModelContextLimit false gates the window projecti
 
 test('M6: a detached provider falls back to the composition values', async () => {
   const root = new Context()
-  const providerFiber = await root.plugin(MemorySettingsProvider)
+  const providerFiber = await root.plugin(LegacySettingsProvider)
   const { fiber, engine } = await mountEngine(root, { nudgeMaxContextLimitPct: 0.66 })
   try {
-    const provider = root.get('settings') as MemorySettingsProvider
+    const provider = root.get('settings') as LegacySettingsProvider
     provider.publishForTest({ [ACP_SETTINGS_NAMESPACE]: { nudgeMaxContextLimitPct: 0.4 } })
     await flushRounds()
     assert.equal(engine.env.nudgeMaxContextLimitPct, 0.4)
@@ -410,10 +578,10 @@ test('M6: a detached provider falls back to the composition values', async () =>
 
 test('M6: reset keeps keys the six-key schema does not know (no silent data loss)', async () => {
   const root = new Context()
-  await root.plugin(MemorySettingsProvider)
+  await root.plugin(LegacySettingsProvider)
   const { fiber, engine } = await mountEngine(root)
   try {
-    const provider = root.get('settings') as MemorySettingsProvider
+    const provider = root.get('settings') as LegacySettingsProvider
     provider.publishForTest({
       [ACP_SETTINGS_NAMESPACE]: { nudgeMaxContextLimitPct: 0.6, handWritten: 'keep-me' },
     })
@@ -434,13 +602,13 @@ test('M6: reset keeps keys the six-key schema does not know (no silent data loss
   }
 })
 
-// ── Issue #173: host settings service without installSection (dsh-settings >= 0.1.7) ───────────────────
+// ── Issue #173: settings service speaking neither API ───────────────────────
 
-test('M6: a settings service WITHOUT installSection degrades gracefully (issue #173)', async () => {
+test('M6: a settings service speaking NEITHER API degrades gracefully (issue #173)', async () => {
   const root = new Context()
-  await root.plugin(FormsLikeSettingsService)
-  const forms = root.get('settings') as FormsLikeSettingsService
-  assert.ok(!('installSection' in forms), 'fixture mirrors 0.1.7: no installSection method')
+  await root.plugin(BareSettingsService)
+  const bare = root.get('settings') as BareSettingsService
+  assert.ok(!('installSection' in bare) && typeof (bare as { describe?: unknown }).describe !== 'function', 'fixture speaks no known settings API')
   // Pre-fix, construction threw `TypeError: ...installSection is not a function`
   // here and the host logged it as a startup error (dist/index.js stack in #173).
   const logs: Message[] = []
@@ -452,14 +620,14 @@ test('M6: a settings service WITHOUT installSection degrades gracefully (issue #
     // the knobs keep their composition values (readSettingsSource untouched).
     assert.equal(engine.env.settingsCommand?.available, false)
     assert.equal(engine.env.nudgeMaxContextLimitPct, 0.66)
-    // One warn explains the degradation; nothing logs an ERROR for what is a
-    // supported out-of-range host line, not a broken integration.
-    const warns = logs.filter((m) => m.type === 'warn' && String(m.args[0]).includes('installSection'))
-    assert.equal(warns.length, 1, 'exactly one warn names the missing capability')
+    // One warn explains the degradation; nothing logs an ERROR for what is an
+    // unsupported service shape, not a broken integration.
+    const warns = logs.filter((m) => m.type === 'warn' && String(m.args[0]).includes('neither'))
+    assert.equal(warns.length, 1, 'exactly one warn names the unsupported service shape')
     assert.ok(!logs.some((m) => m.type === 'error'), 'no error-level log for a degraded optional section')
     // /acp-prune config stays usable: list shows the composition values with
     // no registered layers, and writes degrade to guidance instead of hitting
-    // the foreign service API (whose updates would throw entry-id errors).
+    // a foreign service API.
     const list = await runAcp(engine.env, 'config')
     assert.match(list, /nudgeMaxContextLimitPct\s+0\.66\s+default/)
     const setResult = await runAcp(engine.env, 'config set nudgeMaxContextLimitPct 0.5')
@@ -477,7 +645,7 @@ test('M6: a settings service WITHOUT installSection degrades gracefully (issue #
 
 test('M6: a composed preset seeds the base layer AND the live reads (issue #176)', async () => {
   const root = new Context()
-  await root.plugin(MemorySettingsProvider)
+  await root.plugin(LegacySettingsProvider)
   const { fiber, engine } = await mountEngine(root, { preset: 'aggressive' })
   try {
     // Exactly the three preset-filled threshold keys — not the full resolved
@@ -494,7 +662,7 @@ test('M6: a composed preset seeds the base layer AND the live reads (issue #176)
     assert.equal(engine.env.nudgeEmergencyThresholdPct, 0.7)
     assert.equal(kernelConfigFor(engine.env).nudge.maxContextLimitPct, 0.5)
     // A runtime override still wins over the composed preset...
-    const provider = root.get('settings') as MemorySettingsProvider
+    const provider = root.get('settings') as LegacySettingsProvider
     provider.publishForTest({ [ACP_SETTINGS_NAMESPACE]: { nudgeMaxContextLimitPct: 0.55 } })
     await flushRounds()
     assert.equal(engine.env.nudgeMaxContextLimitPct, 0.55)
@@ -505,10 +673,38 @@ test('M6: a composed preset seeds the base layer AND the live reads (issue #176)
     await fiber.dispose()
   }
 })
+// ── Issue #174: the 0.1.7 forms line (SettingsForms semantics) ───────────────
+
+test('M6: forms host — a SettingsForms write hot-applies through the volatile refs', async () => {
+  const root = new Context()
+  const maxRef = makeVolatileRef(0.7)
+  // Function-form factories must NOT return the instance — cordis runs a
+  // returned value as an effect; capture it through the closure instead.
+  let service: FormsSettingsService | undefined
+  await root.plugin((ctx) => {
+    service = new FormsSettingsService(ctx, { nudgeMaxContextLimitPct: maxRef.ref })
+  })
+  const forms = service as FormsSettingsService
+  const logs: Message[] = []
+  const { fiber, engine } = await mountEngine(root, { nudgeMaxContextLimitPct: maxRef.ref }, (ctx) => {
+    ctx.logger.exporter({ levels: { default: 3 }, export: (message) => logs.push(message) })
+  })
+  try {
+    assert.equal(engine.env.settingsCommand?.available, true, 'describe/update/replace present → captured')
+    assert.equal(engine.env.nudgeMaxContextLimitPct, 0.7)
+    const warns = logs.filter((m) => m.type === 'warn')
+    assert.deepEqual(warns, [], 'the engine owns its own entry row — no diagnostic warn expected')
+
+    await forms.update(ACP_SETTINGS_NAMESPACE, { nudgeMaxContextLimitPct: 0.6 })
+    assert.equal(engine.env.nudgeMaxContextLimitPct, 0.6, 'a forms write must hot-apply through the refs')
+  } finally {
+    await fiber.dispose()
+  }
+})
 
 test('M6: /acp-prune config attributes a preset-filled key to `base`, reset returns to the preset (issue #176)', async () => {
   const root = new Context()
-  await root.plugin(MemorySettingsProvider)
+  await root.plugin(LegacySettingsProvider)
   const { fiber, engine } = await mountEngine(root, { preset: 'aggressive' })
   try {
     const list = await runAcp(engine.env, 'config')
@@ -531,4 +727,98 @@ test('M6: /acp-prune config attributes a preset-filled key to `base`, reset retu
     await fiber.dispose()
   }
 })
+test('M6: forms host — /acp-prune config round-trips with revision tracking', async () => {
+  const root = new Context()
+  const maxRef = makeVolatileRef(0.7)
+  const nudgeRef = makeVolatileRef(true)
+  let service: FormsSettingsService | undefined
+  await root.plugin((ctx) => {
+    service = new FormsSettingsService(ctx, { nudgeMaxContextLimitPct: maxRef.ref, autoNudge: nudgeRef.ref })
+  })
+  const forms = service as FormsSettingsService
+  const { fiber, engine } = await mountEngine(root, { nudgeMaxContextLimitPct: maxRef.ref, autoNudge: nudgeRef.ref })
+  try {
+    assert.match(await runAcp(engine.env, 'config'), /nudgeMaxContextLimitPct\s+0\.7\s+user/)
+    assert.match(await runAcp(engine.env, 'config set nudgeMaxContextLimitPct 0.6'), /✓/)
+    assert.equal(engine.env.nudgeMaxContextLimitPct, 0.6)
+    // A second write in the same session must not false-conflict: the command
+    // surface refreshes its tracked revision between calls.
+    assert.match(await runAcp(engine.env, 'config set autoNudge false'), /✓/)
+    assert.match(await runAcp(engine.env, 'config reset nudgeMaxContextLimitPct'), /✓/)
+    // The ref was reset to the empty inherited layer → undefined → the schema
+    // default takes over again.
+    assert.equal(engine.env.nudgeMaxContextLimitPct, 0.7)
+    // autoNudge has no env getter; read it back through the descriptor.
+    assert.equal(forms.describe()[0]?.value?.autoNudge, false)
+  } finally {
+    await fiber.dispose()
+  }
+})
 
+test('M6: forms host — a stale revision raises SettingsConflictError', async () => {
+  const root = new Context()
+  let svc: FormsSettingsService | undefined
+  await root.plugin((ctx) => {
+    svc = new FormsSettingsService(ctx, { autoNudge: makeVolatileRef(true).ref })
+  })
+  const service = svc as FormsSettingsService
+  await service.update(ACP_SETTINGS_NAMESPACE, { autoNudge: false })
+  await assert.rejects(
+    service.update(ACP_SETTINGS_NAMESPACE, { autoNudge: true }, 0),
+    (error: unknown) => error instanceof SettingsConflictError,
+    'a write against a superseded revision must be rejected',
+  )
+  await service.update(ACP_SETTINGS_NAMESPACE, { autoNudge: true }, 1)
+  assert.equal(service.describe()[0]?.revision, 2)
+})
+
+test('M6: forms host — a committed write hot-applies on the NEXT pre-step (the resyncSettings driver)', async () => {
+  const root = new Context()
+  const minRef = makeVolatileRef(0.3)
+  const maxRef = makeVolatileRef(0.7)
+  let service: FormsSettingsService | undefined
+  await root.plugin((ctx) => {
+    service = new FormsSettingsService(ctx, {
+      nudgeMinContextLimitPct: minRef.ref,
+      nudgeMaxContextLimitPct: maxRef.ref,
+      autoNudge: false,
+    })
+  })
+  const forms = service as FormsSettingsService
+  const logs: Message[] = []
+  const { fiber, engine } = await mountEngine(
+    root,
+    { nudgeMinContextLimitPct: minRef.ref, nudgeMaxContextLimitPct: maxRef.ref, autoNudge: false },
+    (ctx) => {
+      ctx.logger.exporter({ levels: { default: 3 }, export: (message) => logs.push(message) })
+    },
+  )
+  try {
+    // Commit an out-of-order pair through the forms seam: each value passes the
+    // schema (both inside [0,1]) but describeSettingsChange flags the ordering.
+    await forms.update(ACP_SETTINGS_NAMESPACE, { nudgeMinContextLimitPct: 0.9, nudgeMaxContextLimitPct: 0.4 })
+
+    // A forms write commits into the volatile refs and emits NO event this
+    // engine receives, so nothing re-reads it until a step runs: no change
+    // effect before the pre-step driver fires.
+    assert.deepEqual(logs.filter((m) => m.type === 'warn'), [], 'no change effect before a step runs')
+
+    // The pre-step driver diffs the live refs against the last synced snapshot
+    // and applies the effects — on the forms line this is the ONLY trigger.
+    // autoNudge is off so the step stays cheap and returns right after resync.
+    await root.waterfall(
+      'agent/pre-step' as never,
+      { agent: fakeAgent(buildTextSession(2)) } as never,
+      async () => ({ kind: 'enter', messages: [] }) as never,
+    )
+
+    const warns = logs.filter((m) => m.type === 'warn')
+    assert.equal(warns.length, 1, 'the order-anomaly warning fired exactly once, via the pre-step driver')
+    assert.match(String(warns[0]!.args[0]), /nudgeMinContextLimitPct \(0\.9\) >= nudgeMaxContextLimitPct \(0\.4\)/)
+    // The committed values are visible on the live surface for the rest of the session.
+    assert.equal(engine.env.nudgeMinContextLimitPct, 0.9)
+    assert.equal(engine.env.nudgeMaxContextLimitPct, 0.4)
+  } finally {
+    await fiber.dispose()
+  }
+})

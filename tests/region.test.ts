@@ -67,8 +67,13 @@ test('M5: runCompactionTransaction lands the four events and shadows the range',
   // The summary node carries the checkpoint source.
   const replaceEvent = session.snapshotEvents()[seqs[2]!]!
   assert.equal(replaceEvent.type, 'user/message')
-  const source = (replaceEvent.data as { source?: { plugin?: string } }).source
-  assert.equal(source?.plugin, 'compact')
+  const source = (replaceEvent.data as { source?: { plugin?: string; kind?: string } }).source
+  // compactCheckpointSource() is version-aware per seam line: legacy plugin-wrapper
+  // source on 0.1.5/0.1.6, producer kind on 0.1.7 — accept either.
+  assert.ok(
+    source?.kind === 'compact-checkpoint' || source?.plugin === 'compact',
+    `summary node carries the checkpoint source (got ${JSON.stringify(source)})`,
+  )
 
   // Derived messages shrank: 6 messages → 2 surviving + 1 summary = 3.
   assert.equal(session.deriveMessages().length, 3)

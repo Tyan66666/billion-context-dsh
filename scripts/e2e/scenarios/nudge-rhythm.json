@@ -7,7 +7,7 @@
   { "filler": { "topic": "ledger", "count": 80 } },
   { "filler": { "topic": "region", "count": 80 } },
   { "filler": { "topic": "pairing", "count": 80 } },
-  { "filler": { "topic": "replay", "count": 80 } },
+  { "filler": { "topic": "replay", "count": 300 } },
   { "filler": { "topic": "big", "count": 260 } },
   { "filler": { "topic": "big", "count": 260 } }
 ],

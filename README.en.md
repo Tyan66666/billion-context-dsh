@@ -71,15 +71,19 @@ Restart `dsh` afterwards (bundle layers are composed at startup), open a new ses
 > **DSH version compatibility.** The package declares all five runtime seam
 > packages (`dsh-compaction` / `dsh-session` / `dsh-llm` / `dsh-tools` /
 > `dsh-settings`) as peer
-> dependencies, sharing the range `>=0.1.5-alpha.1 <0.1.6-0` — exactly the
-> `0.1.5` line (every prerelease plus the final `0.1.5`). From the `0.1.5` line
+> dependencies, sharing the range `>=0.1.5-alpha.1 <0.1.6-0 || >=0.1.6-alpha.1 <0.1.7-0 || >=0.1.7-alpha.1 <0.1.8-0` — the three
+> verified lines `0.1.5` / `0.1.6` / `0.1.7` (every prerelease plus each line's
+> final release; written as one clause per line because node-semver only lets a
+> prerelease satisfy a range when some comparator shares its [major, minor,
+> patch] tuple — a single interval would silently reject every 0.1.6 / 0.1.7
+> prerelease). From the `0.1.5` line
 > on, the session's replace operation was renamed from `{ op, start, end }` to
 > `{ op, startSeq, endSeq }` and is validated strictly (exactly those three
 > keys), so the engine emits the new shape only: on older DSH hosts (< 0.1.5)
 > every `compress` call is rejected at runtime (issue #136), which is why the
 > old lines are out of contract — upgrade DSH before installing this release.
 > The explicit bounds (instead of a caret) are deliberate: a caret would
-> silently admit the unverified 0.1.6+ line. Declaring all five seam packages
+> silently admit the unverified 0.1.8+ line. Declaring all five seam packages
 > as peers (not just `dsh-compaction`) ensures that, even under pnpm's
 > hoisted/linked layout, installations resolve them to the **host's own** copy
 > rather than a stale nested copy inconsistent with the host.
@@ -151,7 +155,7 @@ Two audiences: ① Path B (plain npm install) users, who must write a compositio
 
 See [docs/configurable-prompts-design.md](docs/configurable-prompts-design.md) for the full slot list, per-slot placeholders, and the empty-string/`null` semantics. Deployments that omit `prompts` use the kernel rendering directly (aligned with kernel/pi; see design doc v6).
 
-**(Optional) Runtime settings — edit `~/.dsh/settings.yaml` or use `/acp-prune config`; no restart.** Six scalar keys (`modelContextLimit`, `autoModelContextLimit`, `nudgeMinContextLimitPct`, `nudgeMaxContextLimitPct`, `nudgeEmergencyThresholdPct`, `autoNudge` — the rows marked “runtime-adjustable” in the Configuration table) have a hot-editable copy in the host settings layer: editing the settings file or `/acp-prune config` takes effect **immediately on running sessions** (the composition-row `config:` stays the starting point — the layering is schema default → composition row → user settings section):
+**(Optional) Runtime settings — use `/acp-prune config`, or (on ≤0.1.6 hosts only) edit `~/.dsh/settings.yaml`; no restart.** Six scalar keys (`modelContextLimit`, `autoModelContextLimit`, `nudgeMinContextLimitPct`, `nudgeMaxContextLimitPct`, `nudgeEmergencyThresholdPct`, `autoNudge` — the rows marked “runtime-adjustable” in the Configuration table) have a hot-editable copy in the host settings layer: editing the settings file or `/acp-prune config` takes effect **immediately on running sessions** (the composition-row `config:` stays the starting point — the layering is schema default → composition row → user settings section). Since DSH 0.1.7, `~/.dsh/settings.yaml` no longer exists (renamed `.imported` at startup and imported into profile entries); hot edits go through the SettingsForms integration — addressed by profile entry id `compaction-acp` (the bundle patch row), the six fields exposed in the form because the static Config schema annotates them `.volatile()`, writes committed into the fiber config's volatile refs which the engine re-reads each pre-step (no event to subscribe):
 
 ```yaml
 # ~/.dsh/settings.yaml
@@ -167,7 +171,7 @@ compaction-acp:
 /acp-prune config reset all
 ```
 
-Changing a window key (`modelContextLimit` / `autoModelContextLimit`) clears the window-probe cache — the next pre-step re-probes under the new values (probe failures are cached too, so this is also how a fixed gateway gets re-probed). In provider-less plain-npm compositions `/acp-prune config` degrades to advice text; on DSH lines ≥0.1.7, where the host settings service no longer provides `installSection` (outside this plugin's declared peer range), the engine degrades cleanly too — one startup warning, the six keys stay adjustable through the composition-row `config:`, engine and tools unaffected (issue #173); `settingsEnabled: false` disables the integration entirely (composition-row-only — the switch is deliberately NOT part of the settings layer: it cannot turn itself off). Design details: [docs/settings-integration-design.md](docs/settings-integration-design.md).
+Changing a window key (`modelContextLimit` / `autoModelContextLimit`) clears the window-probe cache — the next pre-step re-probes under the new values (probe failures are cached too, so this is also how a fixed gateway gets re-probed). In provider-less plain-npm compositions `/acp-prune config` degrades to advice text; the DSH 0.1.7 line is fully supported inside the peer range (the host settings service moved from `installSection` to `SettingsForms`: the six keys stay runtime-hot-adjustable via `/acp-prune config`, addressed by profile entry id `compaction-acp`, see design doc §4.9); hosts outside the band still degrade cleanly — one startup warning, the six keys stay adjustable through the composition-row `config:`, engine and tools unaffected (issue #173); `settingsEnabled: false` disables the integration entirely (composition-row-only — the switch is deliberately NOT part of the settings layer: it cannot turn itself off). Design details: [docs/settings-integration-design.md](docs/settings-integration-design.md).
 
 **Per-mode — an agent preset's `compaction` realm.** First *disable (or delete) the realm's existing `dsh-compaction-basic` row*, then mount this engine — two backends cannot coexist in the same realm:
 

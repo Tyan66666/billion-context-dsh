@@ -421,9 +421,9 @@ private onSettingsChanged(prev: AcpSettings, next: AcpSettings): void {
  `/acp-prune config list` 照旧渲染表格（值来自组合行/默认，source 列全为 default）；
  `set`/`reset` 返回既有的「no settings provider」指引文案（指向组合行编辑）。
 
- **本文档范围之外**：迁移到 SettingsForms API 是完整的接缝线移植任务
- （五个接缝逐一核验 + `meta.volatile` schema 标注 + 按 house rule 显式拓宽 peer 区间），
- 单独立项跟踪（自 #173 分析中新开的 issue，编号见该 issue 的评论），不在本修复内做。
+ **后续（§4.9）**：SettingsForms 迁移已由 issue #174 完成——五个接缝 × 三条线
+ （0.1.5 / 0.1.6 / 0.1.7）逐一核验 npm 产物、双轨集成落地、peer 区间显式拓宽到
+ `>=0.1.5-alpha.1 <0.1.6-0 || >=0.1.6-alpha.1 <0.1.7-0 || >=0.1.7-alpha.1 <0.1.8-0`。详见 §4.9；本节保留为 #173 当时的降级设计记录。
 
  **测试**（tests/settings.test.ts）：`FormsLikeSettingsService` fixture 镜像 0.1.7 表面
  （有 configure/describe/update/replace/mutate、无 installSection）→ 构造不抛、
@@ -431,6 +431,71 @@ private onSettingsChanged(prev: AcpSettings, next: AcpSettings): void {
  旋钮保持组合值、`config set` 落到指引文案；首个 E2E 用例补了反向断言
  （受支持的宿主上探测必须静默）。注：cordis 日志默认阈值丢弃 warn 级消息，
  断言前需注册带 `levels: { default: 3 }` 的 exporter 才能观测到。
+
+ ### 4.9 SettingsForms 迁移：双轨设置集成（issue #174，v0.2.x）
+
+ **背景**：§4.8 遗留的唯一待办——把 0.1.7 线正式纳入支持范围。按 house rule 对五个接缝
+ （dsh-settings / dsh-compaction / dsh-session / dsh-llm / dsh-tools）× 三条线
+ （0.1.5 / 0.1.6 / 0.1.7）逐一核验已发布 npm 产物（核验记录见 docs/dsh-porting-verification.md
+ 2026-09-24 条目）。结论：0.1.6 相对 0.1.5 无协议漂移、干净纳入；0.1.7 有两处破坏性变化——
+ dsh-settings 服务重构（§4.8 背景）与 deepseek 适配器协议切换（OpenAI chat-completions SSE →
+ DeepSeek Messages 类型化 SSE，旧帧在 dsh-llm-deepseek/lib/index.js:1531 抛
+ MALFORMED_RESPONSE；影响 e2e fake LLM，见 docs/e2e-harness-design.md 日志）。peer 区间显式
+ 拓宽为 `>=0.1.5-alpha.1 <0.1.6-0 || >=0.1.6-alpha.1 <0.1.7-0 || >=0.1.7-alpha.1 <0.1.8-0`（永不 caret；每线一个分量是 node-semver 同元组预发布规则的硬性要求——单一区间会悄悄拒绝 0.1.6 / 0.1.7 的全部预发布，#180 review 实测发现并修正；`0.1.8-0` 排序在任何 0.1.8-x 预发布之前，
+ 下一线在验证前保持拒绝），devDep 基线移到 `0.1.7-rc.1`（当前 43 个 dsh-* 包全部钉该线），
+ `tests/peer-range.test.ts` 重钉三条线的 accept/reject 断言。
+
+ **双轨能力探测**（src/index.ts 注入回调顶部）：先探 `typeof service.installSection === 'function'`
+ → ≤0.1.6 legacy 分支（调用签名与 §4.2–4.4 完全一致：`installSection(ctx, ACP_SETTINGS_NAMESPACE,
+ AcpSettingsSchema, liveSettingsFromRefs(compositionEntry), { setSource, onChange })`，组合 base
+ 仍走 filterSettingsEntry 过滤，volatile 引用绝不进入 provider 持久化）；再探
+ `describe/update/replace` 三方法齐备 → ≥0.1.7 forms 分支；两者皆无 → 保留 #173 的单条 warn
+ 干净降级（超区间宿主行为不变）。
+
+ **Forms 分支语义**：没有注册步骤——profile entry 本身就是承载物，寻址键是 profile ENTRY ID
+ `compaction-acp`（即 bundle patch 行的 id）。0.1.7 下 `~/.dsh/settings.yaml` 不再存在：启动时
+ 改名 `.imported`，经 `LEGACY_SECTION_ENTRIES` 映射导入 profile entries（映射表只含
+ ui-developer-tools / ui-onboarding / shell），未映射的 section 落回同名 entry id——所以六键在
+ 该线下由**组合行 + volatile 引用**承载，而不是 yaml。六键之所以恰好出现在表单里，是因为静态
+ 插件 Config schema（AcpPluginConfigSchema）上每个旋钮都带 `.volatile()` 标注——无标注则不进表单；
+ 校验保持非严格，未声明行（preset / prompts / coreOverrides / countTokens）原样通过；schema 刻意
+ 不设默认值（显式值 > preset > 引擎默认的分层由 preset 层负责填）。写路径经 `update()`，revision
+ 冲突沿用 `SettingsConflictError`（0.1.7 仍导出，lib/index.js:163）。服务句柄以
+ `{ describe: fn.bind(service), update: ..., replace: ... }` 形式保存——必须保住 receiver：宿主方法
+ 通过 `this` 读实例状态，cordis 注入的面可能是代理，裸引用会把 `this` 绑丢。一次性诊断：注册时调
+ `describe().call(service)`，若看不到 `ns === 'compaction-acp'` 的行记一条 warn（操作者改过自己
+ 的组合行 id，后续写入会以晦涩错误失败，不如提前点名）；describe() 抛错则有意吞掉（宿主缺陷，
+ 留到首次使用时大声暴露，不在启动期自修）。
+
+  **非表单键的边界（手写组合行，#180 review 期间核实）**：forms 层拥有的恰好是那六个
+  `.volatile()` 标量键；`coreOverrides` / `preset` / `prompts` / `countTokens` 不是 volatile——
+  它们根本不在设置 schema 里（SETTINGS_KEYS，src/settings.ts:39），非严格校验只是让未声明行
+  在 fiber 启动期原样通过。对钉住的 dsh-settings 0.1.7-rc.1 产物逐行核验（lib/index.js
+  `write()`，最终表达式在 :534）：`update` / `replace` / `mutate` 都以
+  `mergeLayers(strip(raw, form), next)` 收尾——`strip` 只从当前 raw config 摘掉 volatile 拥有
+  的路径，`next` 只含 volatile 路径内容（`projectForm`，:141），而 `mergeLayers`（:281）的
+  `over` 层永不携带 undefined 条目（稀疏 patch 擦不掉下层键）。因此本引擎的三种写形
+  （`set` 单键 patch、单键 `reset` 逐字透传其余键 src/commands.ts:348、`reset all` →
+  `replace({})`）都保住手写行上的非表单键；`reset all` 只清该行上的 volatile 值。唯一破坏性
+  操作是手工删整行——`coreOverrides` 随之消失且无人回写；该行为在三条线上完全一致（表单从未
+  写过它），不是 #180 引入的回归。release note 对「已有手写组合行的用户」以此为准。
+
+  **热应用驱动**：表单写入在步骤之间提交进我们 fiber config 的 volatile 引用，且**不发出任何事件**
+ ——引擎在每个 `agent/pre-step` 顶部调 `resyncSettings()`（src/index.ts:606，位于 autoNudge 闸门
+ 之前，保证刚提交的改动作用于本步而非下一步）主动重读。legacy/degrade 模式下这是廉价 no-op
+ （重解同一组值，diff 为空）。
+
+ **行为变更披露（旧 → 新）**：
+ - 0.1.7 宿主：「启动一条 warn + 六键只能改组合行 + 重启」（#173 降级）→ 完整支持、无 warn、
+   六键经 `/acp-prune config` 运行时热调。
+ - 0.1.5 / 0.1.6 宿主：零变化（installSection 分支代码路径逐字保留）。
+ - 区间外宿主：零变化（单条 warn 降级保留）。
+ - `~/.dsh/settings.yaml`：≤0.1.6 行为不变；0.1.7 该文件本就不存在（宿主侧行为，非本插件写路径）。
+
+ **回归测试**：tests/settings.test.ts `FormsSettingsService` fixture——用引擎自己的 VOLATILE_WRITE
+ 符号构造 volatile 引用（makeVolatileRef），构造函数经 isVolatileRef **复用**传入的引用而非再包一层
+ （生产现实：loader 交给插件的正是 SettingsForms 稍后提交写入的那批引用，再包一层会嵌套引用、
+ 写入落到错误的 cell）；standalone 21/21，全量 367/367，e2e 四场景全绿。
 
  ## 5. 明确不做的事（及优先级语义）
 
@@ -558,6 +623,7 @@ v2 状态：R1–R5 已由评审核验关闭，遗留两个实现期验证门（
 
 ## 修订记录
 
+- **v5（issue #174，SettingsForms 迁移）**：正式把 0.1.7 线纳入支持范围——双轨能力探测（≤0.1.6 走 `installSection`，≥0.1.7 走 `describe/update/replace`，区间外单条 warn 干净降级）；forms 分支按 profile entry id `compaction-acp` 寻址，六键经静态 Config schema 的 `.volatile()` 标注进入表单；热应用由每步 `resyncSettings()` 主动重读驱动（表单写入不发出事件）；0.1.7 下六键由组合行 + volatile 引用承载（`~/.dsh/settings.yaml` 消失，legacy import 只对 ui-developer-tools / ui-onboarding / shell 有映射，见 §4.9）。peer 区间 `>=0.1.5-alpha.1 <0.1.6-0 || >=0.1.6-alpha.1 <0.1.7-0 || >=0.1.7-alpha.1 <0.1.8-0`，devDep 基线 `0.1.7-rc.1`（43 个 dsh-* 包）。
 - **v4（issue #173，能力探测）**：dsh-settings 0.1.7 全线移除 `installSection`
  （服务改名 `SettingsForms`），超区间安装时在启动期抛 TypeError 污染日志。
  注入回调加 `typeof` 能力探测：缺失时记一条 warn 并干净降级（不注册、不捕获句柄、

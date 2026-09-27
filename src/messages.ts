@@ -13,6 +13,7 @@
 
 import type { CoreMessage } from 'acp-kernel'
 import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
+import type { CompactionCheckpointSource } from '@deepseek-ai/dsh-compaction'
 import { eventAtOf, sessionEventsOf } from './session-events.ts'
 
 // DSH ≥0.1.7's V4 session format admits producer-owned source kinds
@@ -25,6 +26,13 @@ declare module '@deepseek-ai/dsh-llm/message' {
   interface MessageSourceMap {
     acpNudge: { kind: 'plugin:acp-nudge' }
     acpPrune: { kind: 'plugin:billion-context-dsh' }
+    // The host's checkpoint source moved out of the base map's generic
+    // `plugin` wrapper (gone in 0.1.7) into dsh-compaction's OWN root-module
+    // augmentation — which does not merge through the re-exported interface
+    // under this toolchain, leaving compactCheckpointSource(...) unassignable
+    // to MessageSource. Register the host's exported alias at the real
+    // declaration site instead of duplicating its shape.
+    'compact-checkpoint': CompactionCheckpointSource
   }
 }
 
@@ -140,12 +148,18 @@ function stringifyArgs(args: unknown): string {
 export function toolCallIdOfResultEvent(event: SessionEvent): string | null {
   if (event.type !== 'tool/result') return null
   const message = (event.data as {
-    message?: { content?: Array<{ type?: unknown; toolCallId?: unknown }>; source?: { callId?: unknown } }
+    message?: {
+      toolCallId?: unknown
+      content?: ReadonlyArray<{ type?: unknown; toolCallId?: unknown }>
+      source?: { callId?: unknown }
+    }
   }).message
   const block = Array.isArray(message?.content)
     ? message.content.find((candidate) => candidate?.type === 'tool-result')
     : undefined
-  const id = block?.toolCallId ?? message?.source?.callId
+  // 0.1.7 carries the id at the MESSAGE level (role:'tool' messages); the
+  // nested block is the 0.1.5/0.1.6 shape; source.callId covers both lines.
+  const id = message?.toolCallId ?? block?.toolCallId ?? message?.source?.callId
   return typeof id === 'string' ? id : null
 }
 

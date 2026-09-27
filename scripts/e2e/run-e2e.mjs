@@ -13,10 +13,18 @@ const nudgeIndices = (requests) => {
   })
   return list
 }
+// Messages-format pairing: tool results ride INSIDE user messages as
+// tool_result blocks, so each such user message must immediately follow an
+// assistant message carrying the matching tool_use block(s).
 const wirePairing = (requests) => {
   const last = requests.filter((request) => request.kind === 'tool').slice(-1)[0]
-  const roles = last.body.messages.map((message) => message.role)
-  return roles.every((role, i) => role === 'tool' ? i > 0 && roles[i - 1] === 'assistant' : true)
+  if (!last) return true
+  const messages = last.body.messages ?? []
+  const blocksOf = (message) => Array.isArray(message?.content) ? message.content : []
+  return messages.every((message, i) => {
+    if (!blocksOf(message).some((block) => block?.type === 'tool_result')) return true
+    return blocksOf(messages[i - 1]).some((block) => block?.type === 'tool_use') && messages[i - 1]?.role === 'assistant'
+  })
 }
 const lastEndSeq = (events) => {
   const best = { seq: 0 }
@@ -182,12 +190,14 @@ const cachePrefixChecks = (result) => {
   const schemas = new Set(requests.map((request) => JSON.stringify(request.body.tools ?? null)))
   list.push(['wire: tools array byte-stable across requests', schemas.size === 1, `${schemas.size} distinct schema(s)`])
 
-  // The leading message is the largest cacheable prefix. Compare from the second request
-  // on: the engine injects its one-time ACP guidance section during the first turn's
-  // pre-step, so request 1 may legitimately precede that injection.
-  const leading = requests.slice(1).map((request) => JSON.stringify(outboundMessagesOf(request)[0] ?? null))
+  // The top-level `system` field is the largest cacheable prefix in Messages-format
+  // requests (the base system prompt moved out of messages[0], which now holds the
+  // first user message and legitimately changes after compaction). Compare from the
+  // second request on: the engine injects its one-time ACP guidance section during
+  // the first turn's pre-step, so request 1 may legitimately precede that injection.
+  const leading = requests.slice(1).map((request) => JSON.stringify(request.body.system ?? null))
   const leadingDistinct = new Set(leading).size
-  list.push(['wire: leading message byte-stable after request 1', leadingDistinct === 1, `${leadingDistinct} distinct`])
+  list.push(['wire: system field byte-stable after request 1', leadingDistinct === 1, `${leadingDistinct} distinct`])
 
   // A scenario with no compaction is append-only by construction, so the previous
   // request's message list must be a byte-identical prefix of the next one — any

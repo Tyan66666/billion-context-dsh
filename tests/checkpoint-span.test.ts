@@ -125,8 +125,14 @@ function kernelRefs(env: ToolEnvironment, session: Session): Record<string, stri
 function checkpointSeqs(session: Session): number[] {
   const seqs: number[] = []
   for (const event of session.snapshotEvents()) {
-    const record = event as { type?: string; seq?: number; data?: { source?: { plugin?: string } } }
-    if (record.type === 'user/message' && record.data?.source?.plugin === 'compact') seqs.push(Number(record.seq))
+    const record = event as { type?: string; seq?: number; data?: { source?: { plugin?: string; kind?: string } } }
+    // Dual-shape scan: compactCheckpointSource() is version-aware per seam line —
+    // 0.1.5/0.1.6 hosts store the legacy plugin-wrapper source, 0.1.7 stores the
+    // producer kind. The test must find the checkpoint on either shape.
+    const source = record.data?.source
+    if (record.type === 'user/message' && (source?.kind === 'compact-checkpoint' || source?.plugin === 'compact')) {
+      seqs.push(Number(record.seq))
+    }
   }
   return seqs
 }
