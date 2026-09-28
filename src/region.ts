@@ -443,6 +443,39 @@ export function prefixSummaryBlocks(blocks: readonly ContentBlock[]): ContentBlo
 }
 
 /**
+ * Checkpoint source for the durable summary node, normalized for V4 writers.
+ *
+ * The copy of @deepseek-ai/dsh-compaction this engine resolves to may predate
+ * the host persisting the session: the plugin's peer range floors at the
+ * 0.1.5 line, whose compactCheckpointSource() still emits the retired V3
+ * wrapper shape { kind: 'plugin', plugin: 'compact' }. A DSH ≥0.1.7 v4
+ * persistence writer rejects that shape in producer-kind admission ("format
+ * v4 message requires a producer-owned source kind") and the WHOLE write batch
+ * wedges in memory — every later event piles behind the poison row until
+ * restart (issue #181; #165 fixed our own writers but not this host-supplied
+ * one). Normalize exactly that legacy shape when the session is persisted at
+ * format v4 — header.version decides which writer encodes the row, not which
+ * package resolved — and pass everything else through verbatim: older hosts
+ * still speak the wrapper, and newer dsh-compaction copies already emit the
+ * producer kind.
+ *
+ * Removal gate: delete once the peer floor moves past the last
+ * wrapper-emitting dsh-compaction line (or upstream retires the shape there).
+ */
+export function checkpointSourceFor(
+  session: Pick<Session, 'header'>,
+  compactionId: CompactionId,
+) {
+  const source = compactCheckpointSource(compactionId)
+  if (!(source.kind === 'plugin' && source.plugin === 'compact')) return source
+  // header.version is typed as a per-line literal (3 on the devDep line); widen
+  // through Number so this comparison compiles against both type lines.
+  if (Number(session.header.version) < 4) return source
+  const { kind: _kind, plugin: _plugin, ...rest } = source
+  return Object.freeze({ ...rest, kind: 'compact-checkpoint' })
+}
+
+/**
  * Run one durable compression transaction. Throws on invalid state; on success
  * the four events are in the log and the surface has one summary node.
  */
@@ -519,7 +552,9 @@ export function runCompactionTransaction(
     // idempotent safety net for legacy blocks written before this feature.
     const message = createUserMessage({
       content: framedSummary,
-      source: compactCheckpointSource(compactionId),
+      // Normalized for v4 writers when the resolved dsh-compaction copy still
+      // emits the retired wrapper shape (issue #181); verbatim otherwise.
+      source: checkpointSourceFor(session, compactionId),
     })
     // The replace op MUST use the 0.1.5 field names: dsh-session's validator
     // accepts exactly { op, startSeq, endSeq } (exactly three keys) and rejects

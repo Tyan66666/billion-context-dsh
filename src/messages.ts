@@ -18,13 +18,17 @@ import { eventAtOf, sessionEventsOf } from './session-events.ts'
 // DSH ≥0.1.7's V4 session format admits producer-owned source kinds
 // ('plugin:<name>') and rejects the legacy wrapper shape
 // `{ kind: 'plugin', plugin: '<name>' }` (issue #163). dsh-llm's
-// MessageSourceMap predates V4 admission, so register this plugin's two
-// producer kinds on its documented merge-extensibility seam ("plugins add
-// their own kinds"). Type-level only — no runtime effect.
+// MessageSourceMap predates V4 admission, so register this plugin's producer
+// kinds on its documented merge-extensibility seam ("plugins add their own
+// kinds"). Type-level only — no runtime effect.
 declare module '@deepseek-ai/dsh-llm/message' {
   interface MessageSourceMap {
     acpNudge: { kind: 'plugin:acp-nudge' }
     acpPrune: { kind: 'plugin:billion-context-dsh' }
+    // V4 checkpoint producer kind (issue #181): emitted by checkpointSourceFor
+    // when the resolved dsh-compaction copy predates the host's v4 writer and
+    // its wrapper-shaped compactCheckpointSource() output is normalized.
+    compactCheckpoint: { kind: 'compact-checkpoint'; compactionId: string; sourceCommandId?: string }
   }
 }
 

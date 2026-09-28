@@ -11,9 +11,14 @@
  * pre-0.1.7 sessions to the new shape, so BOTH shapes coexist on one surface
  * and the read side must recognize both.
  *
- * The engine writes whatever the host's `compactCheckpointSource()` returns
- * verbatim (src/region.ts runCompactionTransaction), so the write side is
- * version-adaptive by construction. The read side was not: four sites still
+ * The engine writes the host's `compactCheckpointSource()` output as-is,
+ * EXCEPT one normalization (src/region.ts `checkpointSourceFor`, issue #181):
+ * when the resolved dsh-compaction copy still emits the retired V3 wrapper
+ * shape and the session is persisted at format v4 (header.version >= 4), the
+ * wrapper is rewritten to the v4 producer kind — otherwise the persistence
+ * writer rejects the row and wedges the whole write batch in memory. On ≤v3
+ * sessions the output stays byte-identical to the loaded copy's.
+ * The read side was not dual-shape aware: four sites still
  * keyed on `source.plugin === 'compact'` alone, which made a 0.1.7-written
  * checkpoint classify as `real`:
  *   1. acp_status double-counted its summary text (visible text AND block
@@ -44,7 +49,8 @@ import { Context } from '@deepseek-ai/cordis'
 import { createCore, type CompressionCore } from 'acp-kernel'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import { Session } from '@deepseek-ai/dsh-session'
+import { Session, type SessionHeader } from '@deepseek-ai/dsh-session'
+import { CompactionId, compactCheckpointSource } from '@deepseek-ai/dsh-compaction'
 import { AcpStateStore } from '../src/state.ts'
 import {
   classifySurfaceEvent,
@@ -52,10 +58,12 @@ import {
   isCheckpointNode,
   isRealUserTurn,
 } from '../src/messages.ts'
-import { blockRefForSummarySeq, expandShadowedSeqs, rebuildBlockLedger } from '../src/region.ts'
+import { blockRefForSummarySeq, checkpointSourceFor, expandShadowedSeqs, rebuildBlockLedger, runCompactionTransaction } from '../src/region.ts'
 import { encodeAcpBlockLedger } from '../src/block-ledger.ts'
 import { makeTools, type ToolEnvironment } from '../src/tools.ts'
-import { appendAssistant, appendTurn, appendUser, longText } from './helpers.ts'
+import { eventAtOf } from '../src/session-events.ts'
+import { appendAssistant, appendTurn, appendUser, buildTextSession, longText } from './helpers.ts'
+import { randomUUID } from 'node:crypto'
 
 const NEW_SHAPE_ID = 'id-new-shape-0001'
 const OLD_SHAPE_ID = 'id-old-shape-0002'
@@ -321,4 +329,60 @@ test('#168: decompressing a tier-2 block recurses through a new-shape parent che
 
   assert.deepEqual(expandShadowedSeqs(session, 'id-tier2-new'), [1, 2, 3, 4], 'recursion crosses the new-shape parent into the originals')
   assert.deepEqual(expandShadowedSeqs(session, 'id-tier1-new'), [1, 2, 3, 4], 'tier-1 recovery unchanged')
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// issue #181: wrapper-shaped checkpoint source on a v4-persisted session
+//
+// The dsh-compaction copy the peer floor resolves to (0.1.5 line) still emits
+// the retired V3 wrapper shape from compactCheckpointSource(); DSH ≥0.1.7's
+// v4 persistence writer rejects that shape in producer-kind admission and the
+// whole write batch wedges in memory (every later event piles behind it until
+// restart). checkpointSourceFor (src/region.ts) normalizes exactly that shape
+// when the session is persisted at format v4 — the writer is chosen by the
+// session's header version, not by which package resolved. The expected
+// producer kind below was verified verbatim against the published
+// dsh-compaction@0.1.7-rc.2 artifact during issue triage.
+// ─────────────────────────────────────────────────────────────────────────────
+
+test('#181: checkpointSourceFor keeps the wrapper verbatim on a v3 session', () => {
+  const session = Session.create('ckpt-v4-normalize-v3')
+  const compactionId = CompactionId(randomUUID())
+  assert.deepEqual(
+    checkpointSourceFor(session, compactionId),
+    compactCheckpointSource(compactionId),
+    '≤v3 hosts still speak the wrapper — zero behavior change on old hosts',
+  )
+})
+
+test('#181: checkpointSourceFor rewrites the wrapper to the v4 producer kind', () => {
+  // A real 0.1.5-line Session cannot carry a v4 header (its constructor pins
+  // version to 3), so stub the one field the helper reads.
+  const v4Header = { version: 4, id: 'ckpt-v4-normalize', createdAt: 0, isSeeded: false } as unknown as SessionHeader
+  const compactionId = CompactionId(randomUUID())
+  assert.deepEqual(
+    checkpointSourceFor({ header: v4Header }, compactionId),
+    { kind: 'compact-checkpoint', compactionId },
+    'the retired wrapper must never reach a v4 writer',
+  )
+})
+
+test('#181: runCompactionTransaction writes the resolved copy\'s own shape on the v3 baseline', () => {
+  const session = buildTextSession(6)
+  const { compactionId, seqs } = runCompactionTransaction(session, {
+    start: 1,
+    end: 4,
+    shadowedSeqs: [1, 2, 3, 4],
+    summary: [{ type: 'text', text: 'Summary with enough detail.' }],
+    shadowedTokenCount: 100,
+    provider: 'p',
+    model: 'm',
+  })
+  const checkpointEvent = eventAtOf(session, seqs[2]!)!
+  assert.equal(checkpointEvent.type, 'user/message', 'seqs[2] is the durable checkpoint node')
+  assert.deepEqual(
+    (checkpointEvent.data as Record<string, unknown>).source,
+    compactCheckpointSource(compactionId),
+    'on the v3 devDep baseline the transaction stays byte-identical to the loaded copy',
+  )
 })
