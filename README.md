@@ -287,6 +287,8 @@ npm run test:e2e   # 端到端宿主回归：真实 agent 循环 + 脚本化假 
 
 端到端回归（`scripts/e2e/`）在进程内组装真实 DSH 宿主（cordis + agent-loop + DeepSeek 适配器），指向脚本化假 LLM 服务，挂载本引擎作为压缩后端，然后断言持久化事件日志：compaction 起止配对、durable replace 节点、严格 tool-call/result 配对、nudge 注入节奏；以及假 LLM **实际收到的请求体**（wire 级 prompt-cache 字节稳定性：envelope、`tools` 数组、leading message，无 compaction 场景全程 append-only）。背景与取舍见 [docs/e2e-harness-design.md](docs/e2e-harness-design.md)（issue #120）。
 
+另有一层单元级 durable 行准入网（`tests/durable-admission.test.ts`，issue #183）：把引擎写出的每种持久化行形状过一遍真实发布版 JSONL 存储的完整往返（append→读回→逐行比对 + 负向对照），钉住「我们写的每一行都能被声明 peer 区间内的 writer 编码并读回」。
+
 `dist/index.js` 自包含，仅外链 `@deepseek-ai/*` 接缝包（由宿主部署提供）。
 
 ## 架构

@@ -36,6 +36,22 @@
 | acp-status | window 2000; 3 轮 warm filler + compress 轮 + `acp_status {}` 轮 | 报告存在; 含 `CONTEXT BREAKDOWN` / `COMPRESSED BLOCKS`（kernel `buildStatusReport`，rule 9 非手搓）; 块 `b1` 行 + `Checkpoint seqs` 行（蒸馏入口，issue #60 P2）; `Surface:` seq 锚; `Nudge:` 决策行; **不含 `estimated context`/`context window`**（窗口语义属人侧 `/acp-prune`，rule 9） |
 | overflow-recovery | window 2000; 3 轮 warm filler（`count: 250`）+ `Please reply briefly.`；第 4 个脚本回复是 `{"kind":"error"}`（HTTP 400 + DeepSeek 的 "maximum context length" 文案，`dsh-llm-deepseek` 归一化为 `CONTEXT_WINDOW_EXCEEDED`），第 5 个是成功 text | 脚本超窗以失败请求抵达 loop（`errorIdx ≥ 0`）; **loop 重试且重试请求成功**（`requests[errorIdx+1].kind === 'text'`）; 紧急压缩 start/end 配对; `compaction/summary` 文本含 `context-overflow emergency compaction`（引擎 marker，非模型摘要）; block topic 含 `context-overflow recovery`; durable replace 节点落地; 恢复后对话继续 |
 
+## Durable 行准入网（issue #183：第一段已落地，第二段待立项）
+
+上面的 e2e harness 跑在**内存态 store** 上——persistence writer（`dsh-session-persistence-jsonl`）从不在回路里，于是只在 durable 编码/admission 阶段才暴露的 bug 能全绿穿过整个套件（#163：退役 wrapper 形状被 0.1.7 V4 writer 整批拒收；#181：混合解析下 dsh-compaction 独立落到产出被拒 checkpoint wrapper 的版本）。准入网分两段：
+
+**第一段（已落地，`tests/durable-admission.test.ts`）**：在当前 0.1.5 线上，用 detached `Session` 驱动引擎的**真实** durable writer（`runCompactionTransaction` / `hideCompressToolPair` + 镜像 src/nudge.ts 的 nudge echo），再把全部行过一遍**真实发布的 JSONL 插件完整 round-trip**生产压缩模式即 zstd 帧，由 node:zlib 的原生 zstd API 完成，无需额外 native addon）：create→append→flush→读回→逐行 deep-equal。三个牙齿来源：
+
+**Node 底线**：上述 zstd API 自 Node 22.15 才存在，而发布的 codec 以静态 import 引用它——在更老的 Node 上模块加载即在 link 阶段失败（CI 曾因此在 Node 20 上整文件红掉）。因此本文件用动态 import 引入 codec：无 zstd 的 Node 上两条 round-trip 测试带原因跳过，不依赖 codec 的形状不变量测试照常运行；`ci.yml` 的测试运行时随之从 Node 20 升到 22（与早已跑 22 的 `e2e.yml` 对齐；包自身支持底线 `engines >= 20` 不变，变的只是测试运行时）。
+
+- **admission 全在读路径**——0.1.5 写路径是纯序列化（`encodeEventBatch` = 纯 JSONL 行，不做逐行校验）；读回走 dsh-session stored-event validation + `assertV3RowAdmission`，fail-closed。负向对照钉住：assistant 缺 model source → `message has invalid source`；tool result callId 与 source 不符 → `mismatched tool call ids`；seq 缺口 → append 直接拒。
+- **0.1.5 codec 对多余顶层成员是宽松的**（probe 实测：extra data member / wrapper source / 新形状 checkpoint 均被接受）——成员 allow-list 严格性属于冻结 v0 reader（已由 `tests/block-ledger.test.ts` 钉住），所以负向对照打 stored-event validation 而非成员 allow-list。
+- **#163 形状不变量**：引擎自产元数据行（nudge echo / prune tombstone）永不回退到退役 `{ kind:'plugin', plugin }` wrapper 形状——那是 0.1.7 V4 writer（`@deepseek-ai/dsh-session-format-v3-to-v4`，拒 `kind === 'plugin'`）的唯一拒收点；checkpoint 行豁免（其形状由宿主 `compactCheckpointSource()` 生成、版本自适应，各线各自正确）。
+
+依赖侧：按 §4 流程（registry BFS + lockfile purity 校验）新增 11 个显式 devDep 钉 0.1.5 线（persistence 栈 + format closure + utility siblings）；clean reinstall 后零 ERESOLVE 警告，且此前已解析的全部 `@deepseek-ai/*` 包版本逐一不变（baseline stability 验证过）。
+
+**第二段（待立项）**：0.1.7 seam 线上的 JSONL-persistence-backed e2e 场景——需按 §4 对 rc.2 线重推完整 transitive peer closure 钉（混进当前 0.1.5 基线会违反 §4「Do not mix lines」），再加一个 fake-LLM 强制首轮 compress 的场景，断言持久化文件包含完整事务且 checkpoint 行形状正确。该段会真正走 V4 写路径（含 wrapper 形状拒收），是第一段单元级网的端到端补全。
+
 ## 二期（未实现，记录取舍）
 
 - **宿主官方 `@deepseek-ai/dsh-llm-mock-server` 替换 fake-llm.mjs**: 未取——官方服务全局 `toolName/toolArguments`（每实例单工具形状）无法按轮出 compress→decompress 双形状; 行为词汇含故障注入（断流/429/畸形 JSON）价值二期加（需上游 per-turn 参数化或本地 fork）。
@@ -49,3 +65,4 @@
 - **2026-09-11（wire 级前缀检查，#111/#126）**: `npm run test:e2e` → **54/54 PASS**。新增检查断言的是**假 LLM 收到的请求体原文**——provider 唯一能用来做缓存键的东西——而不是内部投影：原始 envelope（`"messages"` 之前的字节，含 key 顺序与空白）逐字稳定、`tools` 数组逐字稳定、leading message 在请求 2 之后逐字稳定（请求 1 可能早于一次性 ACP 指引注入）、无 compaction 的场景全程 append-only（前一次请求的消息列表必须是后一次请求的逐字前缀）。变异验证：改第 2 个请求 body 的尾部 + `messages[1]` → append-only 检查 FAIL（`request #2 message 1`）；改原始 body 开头 + leading 消息 → envelope 与 leading 检查在 4 个场景全部 FAIL。
 - **2026-09-12（acp-kernel 0.0.63 升级，issue #122）**: `npm run test:e2e` → **4 场景全绿（`e2e PASS`）**。basic-compress / compress-then-decompress 的 warm filler 由 `count: 110` 放大到 `250`（`scripts/e2e/scenarios/*.json`）以越过内核 nudge 收益下限（约束 9）；nudge-rhythm / acp-status 不受影响。
 - **2026-09-24（第 5 个场景：上下文超窗自动恢复，PR #153 采用）**: `npm run test:e2e` → **5 场景 65/65 PASS（`e2e PASS`）**。新增 `overflow-recovery`：window 2000 + 3 轮 warm filler（`count: 250`），第 4 个脚本回复返回 HTTP 400 的 "maximum context length"（`dsh-llm-deepseek` 归一化为 `CONTEXT_WINDOW_EXCEEDED`）→ 引擎紧急压缩一次（marker 摘要 + durable replace，`starts=1 ends=1`）→ **宿主重试该请求并成功**（`requests: text,text,text,error,text`；重试请求的线级 body 里原文已消失、marker 已出现）；断集见上表。原 4 场景断集不变。
+- **2026-09-28（durable 行准入网，issue #183 第一段）**: `npm test` → **384/384 PASS**（新增 3 条 admission 测试：round-trip 字节一致 / 三条负向对照 / #163 形状不变量），typecheck 绿。纯测试基建，无引擎行为变更。**测试运行时变更**：`ci.yml` Node 20 → 22（发布的 JSONL codec 静态 import node:zlib zstd API，Node < 22.15 加载即失败；与 `e2e.yml` 对齐；`engines >= 20` 支持底线不变）。
