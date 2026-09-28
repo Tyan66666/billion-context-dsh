@@ -38,7 +38,7 @@ import {
   DEFAULT_DECOMPRESS_PAGE_CHARS,
   type ResolvedSurfaceRange,
 } from './region.ts'
-import { allLogMessages, attachmentsOfEvent, buildToolCallIndex, eventsToCoreMessages, extractEventText, isCheckpointNode, surfaceEventsOf, toolCallsOf } from './messages.ts'
+import { allLogMessages, attachmentsOfEvent, buildToolCallIndex, eventsToCoreMessages, extractEventText, isAgentInstructionsRow, isCheckpointNode, isSkillCatalogRow, surfaceEventsOf, toolCallsOf } from './messages.ts'
 import { shadowedTokensViaMeter } from './host-tokens.ts'
 import { eventAtOf, sessionEventsOf } from './session-events.ts'
 import { DEFAULT_RESOLVED, type ResolvedPrompts } from './prompts.ts'
@@ -330,8 +330,12 @@ function validateContentItems(content: NonNullable<CompressArgs['content']>): vo
  * manual path consistent with the system-side GC's iron rule (PR2: never
  * clear a group's newest row). STALE copies stay compressible: removing them
  * while the newest stays visible is the actual cleanup and triggers no
- * re-injection. The range table (buildCompressibleSeqRanges) never offers
- * these rows, so the gate only fires on hand-built ranges.
+ * re-injection. Skill-catalog rows joined the guard set for a DIFFERENT
+ * reason (issue #185): they are not self-healing at all — the host resends
+ * the catalog only when its digest changes, so a folded catalog stays gone
+ * until the catalog actually changes. The range table
+ * (buildCompressibleSeqRanges) never offers these rows, so the gate only fires
+ * on hand-built ranges.
  *
  * `guardedRowsInSpan` is the overlap probe. It takes the POSITIONAL span the
  * transaction will actually shadow (`shadowedSeqsOf`), never a numeric
@@ -353,7 +357,13 @@ export function guardedRowsInSpan(guarded: ReadonlySet<number>, shadowed: readon
   return [...guarded].filter((seq) => inSpan.has(seq)).sort((a, b) => a - b)
 }
 
-export function protectedRowRejectionNote(start: number, end: number, hits: readonly number[], shadowed: readonly number[]): string {
+export function protectedRowRejectionNote(
+  session: Session,
+  start: number,
+  end: number,
+  hits: readonly number[],
+  shadowed: readonly number[],
+): string {
   const preview = hits.slice(0, 4).join(', ')
   const more = hits.length > 4 ? ` +${hits.length - 4} more` : ''
   const first = shadowed.indexOf(hits[0]!)
@@ -366,7 +376,23 @@ export function protectedRowRejectionNote(start: number, end: number, hits: read
   const recovery = slices.length === 0
     ? 'no part of this span is compressible while those rows are current — pick an OLDER span instead (acp_status lists the live ranges)'
     : `the compressible part of this span is seq ${slices.join(' and ')} — submit them as separate content entries (or two compress calls), each with its own summary`
-  return `  seqs ${start}..${end} rejected — the span covers ${hits.length} CURRENT injected instruction row(s) (seq ${preview}${more}); the host re-injects the newest AGENTS.md copy the moment it leaves the surface, so compressing it reclaims nothing — ${recovery} (older/stale copies of the same file are fine to compress)`
+  // Per-channel WHY (issue #185): the guarded channels fail differently when
+  // folded — AGENTS.md comes straight back (host presence gate); a skill
+  // catalog never does (resend keyed on the catalog digest, not visibility).
+  let hasInstructions = false
+  let hasCatalog = false
+  for (const seq of hits) {
+    const event = eventAtOf(session, seq)
+    if (event === undefined) continue
+    if (!hasInstructions && isAgentInstructionsRow(event)) hasInstructions = true
+    if (!hasCatalog && isSkillCatalogRow(event)) hasCatalog = true
+    if (hasInstructions && hasCatalog) break
+  }
+  const reasons: string[] = []
+  if (hasInstructions) reasons.push('the host re-injects the newest AGENTS.md copy the moment it leaves the surface')
+  if (hasCatalog) reasons.push('a folded skill catalog is never re-sent — its resend gate is the catalog digest, which folding cannot change')
+  const why = reasons.length > 0 ? reasons.join('; ') : 'these rows must stay visible on the surface'
+  return `  seqs ${start}..${end} rejected — the span covers ${hits.length} CURRENT injected row(s) (seq ${preview}${more}) that must stay visible: ${why} — ${recovery} (older/stale copies of the same channel are fine to compress)`
 }
 
 /**
@@ -542,11 +568,12 @@ async function handleCompress(env: ToolEnvironment, args: CompressArgs, exec: To
       }
       throw error
     }
-    // Hard reject BEFORE the kernel: a span covering a CURRENT injected
-    // instruction row has no legitimate outcome — the host re-injects the
-    // newest copy the moment it leaves the surface (compress → re-inject loop
-    // fuel, issue #71). Stale copies pass: removing them while the newest
-    // stays visible is the real cleanup and triggers no re-injection.
+    // Hard reject BEFORE the kernel: a span covering a CURRENT injected policy
+    // row has no legitimate outcome — the host re-injects the newest AGENTS.md
+    // copy the moment it leaves the surface (compress → re-inject loop fuel,
+    // issue #71), and a folded skill catalog never comes back at all (resend
+    // keyed on the digest, issue #185). Stale copies pass: removing them while
+    // the newest stays visible is the real cleanup and triggers no re-injection.
     // Probe the set that will ACTUALLY be shadowed (`shadowedSeqsOf`, the
     // positional slice the transaction prices) rather than a numeric interval —
     // see guardedRowsInSpan for why the interval false-positives on a locally
@@ -554,7 +581,7 @@ async function handleCompress(env: ToolEnvironment, args: CompressArgs, exec: To
     const shadowedSpan = shadowedSeqsOf(session, resolved.start, resolved.end)
     const instructionHits = guardedRowsInSpan(guardedSeqs, shadowedSpan)
     if (instructionHits.length > 0) {
-      rejectedNotes.push(protectedRowRejectionNote(resolved.start, resolved.end, instructionHits, shadowedSpan))
+      rejectedNotes.push(protectedRowRejectionNote(session, resolved.start, resolved.end, instructionHits, shadowedSpan))
       continue
     }
     // An edge on an ACTIVE block's checkpoint summary node resolves to the

@@ -19,6 +19,11 @@
  *   review: compressing a current row has no legitimate outcome, the host
  *   re-injects unconditionally). Stale copies stay compressible — that is
  *   the actual cleanup, and it triggers no re-injection.
+ * - Skill-catalog rows join the guard as the ONE visible copy (issue #185):
+ *   the host never re-sends a folded catalog (resend keyed on the digest), so
+ *   the newest visible catalog row is hard-rejected exactly like the current
+ *   AGENTS.md copy; superseded catalogs stay compressible. The rejection note
+ *   names the per-channel reason for both.
  *
  * Fixtures use the REAL host injection shape audited from live session logs:
  * source { kind: 'agent-instructions', form: 'instructions', baseline,
@@ -240,18 +245,20 @@ test('PR1: newestInstructionSeqsOf groups per scope — one newest per file, wor
   assert.ok(!newest.has(legacy), 'a row without changes[] has no file identity — the host cannot re-inject it, so guarding it would only block compression (issue #71 review S3)')
 })
 
-test('PR1: guardedSurfaceSeqsOf keeps only CURRENT agent-instructions rows', () => {
+test('PR1+#185: guardedSurfaceSeqsOf keeps CURRENT agent-instructions rows AND the newest visible skill catalog', () => {
   const session = Session.create('guarded')
   appendTurn(session, 1)
   appendUser(session, longText('q0', 0))
   const stale = appendInstruction(session, '.\u0000AGENTS.md', 'v1')
   const current = appendInstruction(session, '.\u0000AGENTS.md', 'v2')
-  const catalog = appendPluginRow(session, { kind: 'skill-catalog' })
+  const staleCatalog = appendPluginRow(session, { kind: 'skill-catalog' })
+  const catalog = appendPluginRow(session, { kind: 'plugin', plugin: 'dsh-tool-skill' })
 
   const guarded = guardedSurfaceSeqsOf(session)
-  assert.ok(guarded.has(current), 'the current copy is guarded')
+  assert.ok(guarded.has(current), 'the current AGENTS.md copy is guarded')
   assert.ok(!guarded.has(stale), 'a stale copy of the same file is NOT guarded (compression-safe)')
-  assert.ok(!guarded.has(catalog), 'non-agent-instructions policy rows stay outside the advisory set (F4 narrowing)')
+  assert.ok(!guarded.has(staleCatalog), 'a SUPERSEDED catalog is NOT guarded — compressing it while the newest stays visible is the cleanup')
+  assert.ok(guarded.has(catalog), 'the newest visible skill catalog IS guarded (issue #185: the host never re-sends a folded catalog)')
 })
 
 test('PR1: current-instruction-row gate — pure helpers pin the rejection', () => {
@@ -264,14 +271,31 @@ test('PR1: current-instruction-row gate — pure helpers pin the rejection', () 
   // no hit even when it sits numerically between the span's edges.
   assert.deepEqual(guardedRowsInSpan(new Set([5]), [1, 9]), [], 'seq 5 sits between 1 and 9 but the span does not carry it')
 
-  const one = protectedRowRejectionNote(1, 6, [5], [1, 2, 3, 4, 5, 6])
+  // The note reads each hit off the log to name the per-channel WHY (issue
+  // #185): seq 5 = current AGENTS.md row, seq 6 = the newest skill catalog.
+  const noteSession = Session.create('note-fixture')
+  appendTurn(noteSession, 1)                             // seq 0
+  appendUser(noteSession, longText('q0', 0))             // seq 1
+  appendAssistant(noteSession, longText('a0', 1), 1, 1)  // seq 2
+  appendUser(noteSession, longText('q1', 2))             // seq 3
+  appendAssistant(noteSession, longText('a1', 3), 1, 3)  // seq 4
+  appendInstruction(noteSession, '.\u0000AGENTS.md', 'v1') // seq 5
+  appendPluginRow(noteSession, { kind: 'skill-catalog' }) // seq 6
+  appendUser(noteSession, longText('q2', 5))             // seq 7
+  appendAssistant(noteSession, longText('a2', 7), 1, 7)  // seq 8
+  appendUser(noteSession, longText('q3', 9))             // seq 9
+
+  const one = protectedRowRejectionNote(noteSession, 1, 6, [5], [1, 2, 3, 4, 5, 6])
   assert.match(one, /seqs 1\.\.6 rejected/)
-  assert.match(one, /1 CURRENT injected instruction row\(s\) \(seq 5\)/)
-  assert.match(one, /re-injects the newest AGENTS\.md copy/)
+  assert.match(one, /1 CURRENT injected row\(s\) \(seq 5\)/)
+  assert.match(one, /re-injects the newest AGENTS\.md copy/, 'the instructions reason is named')
+  assert.doesNotMatch(one, /catalog digest/, 'an AGENTS.md-only hit names only that reason')
   assert.match(one, /stale copies/, 'the model is pointed at the stale-copy escape')
 
-  const many = protectedRowRejectionNote(1, 9, [5, 6, 7, 8, 9], [1, 2, 3, 4, 5, 6, 7, 8, 9])
-  assert.match(many, /5 CURRENT injected instruction row\(s\) \(seq 5, 6, 7, 8 \+1 more\)/)
+  const many = protectedRowRejectionNote(noteSession, 1, 9, [5, 6, 7, 8, 9], [1, 2, 3, 4, 5, 6, 7, 8, 9])
+  assert.match(many, /5 CURRENT injected row\(s\) \(seq 5, 6, 7, 8 \+1 more\)/)
+  assert.match(many, /re-injects the newest AGENTS\.md copy/, 'the instructions reason is named')
+  assert.match(many, /never re-sent|catalog digest/, 'the catalog reason is named too — the two channels fail differently')
 })
 
 test('PR1: handleCompress REJECTS a manual range covering a current instruction row; stale copies still compress', async () => {
@@ -486,10 +510,16 @@ test('PR1: an identity-less instruction row is never guarded (issue #71 review S
 })
 
 test('PR1: the rejection names the compressible slices so the model can re-cut instead of retrying', () => {
-  const note = protectedRowRejectionNote(10, 40, [20], [10, 11, 12, 20, 30, 31])
+  // Hits beyond this small fixture's log exercise the generic-reason fallback:
+  // eventAtOf returns undefined for unknown seqs, so neither channel is named.
+  const session = Session.create('note-slices')
+  appendTurn(session, 1)
+  appendUser(session, longText('q0', 0))
+  const note = protectedRowRejectionNote(session, 10, 40, [20], [10, 11, 12, 20, 30, 31])
   assert.match(note, /seq 20/, 'the offending row is named')
+  assert.match(note, /must stay visible on the surface/, 'unknown channels get the generic reason')
   assert.match(note, /seq 10\.\.12 and 30\.\.31/, 'the legal slices on both sides are named')
   assert.match(note, /separate content entries/, 'the model gets an actionable re-cut, not just "shrink the range"')
-  const fullyCovered = protectedRowRejectionNote(10, 12, [10, 12], [10, 11, 12])
+  const fullyCovered = protectedRowRejectionNote(session, 10, 12, [10, 12], [10, 11, 12])
   assert.match(fullyCovered, /no part of this span is compressible/, 'a fully covered span says so instead of implying a cut exists')
 })
