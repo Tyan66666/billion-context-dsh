@@ -127,14 +127,15 @@ function compressText(env: ToolEnvironment, agent: Agent, args: string[]): strin
     return '/acp-prune compress: the range touches a compressed block summary node — distill it with the compress tool (seq-based batch), not /acp-prune compress'
   }
   // The same hard reject as the compress tool (src/tools.ts): a guarded row —
-  // the CURRENT injected instruction row of any scope OR the newest real user
-  // turn (issue #196) — cannot be legitimately compressed by ANY caller,
-  // human or model. For instruction rows the host re-injects the newest
-  // AGENTS.md copy unconditionally, so the tokens come straight back and
-  // nothing is reclaimed; for the active user turn the question itself would
-  // vanish from the surface. Explicit intent does not override that
-  // arithmetic; older copies of the same file and superseded user turns stay
-  // compressible.
+  // the CURRENT injected instruction row of any scope, the newest visible skill
+  // catalog (issue #185), OR the newest real user turn (issue #196) — cannot be
+  // legitimately compressed by ANY caller, human or model. For instruction rows
+  // the host re-injects the newest AGENTS.md copy unconditionally, so the tokens
+  // come straight back and nothing is reclaimed; a folded skill catalog never
+  // comes back at all (resend keyed on the catalog digest, issue #185); for the
+  // active user turn the question itself would vanish from the surface.
+  // Explicit intent does not override that arithmetic; older copies of the same
+  // channel and superseded user turns stay compressible.
   // Probe the span that will ACTUALLY be shadowed — the positional slice the
   // transaction prices and `assertProvenance` verifies — never a numeric
   // `start <= seq <= end` interval: the surface is locally non-monotonic after

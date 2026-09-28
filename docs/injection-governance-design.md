@@ -1,6 +1,6 @@
 # 注入治理设计（injection governance design）
 
-> **状态**：已实现（PR #132，经维护者评审后收敛为 B1 + B3 + B6；B2 已移除）。
+> **状态**：已实现（PR #132，经维护者评审后收敛为 B1 + B3 + B6；B2 已移除；issue #185 追加 skill 目录保护，见 §5）。
 > **来源**：PR #132（TheTouYu）最初提交 B1–B6 六项注入治理改动；维护者评审（见 issue #132 楼层）确认三个阻断项与四个宿主行为问题后，本 PR 收敛为三项落地、一项移除。
 
 ## 0. 结论先行（TL;DR）
@@ -64,7 +64,32 @@ PR 原设计：`agent/pre-step` 时，若注入帧（agent-instructions / skill-
 - 实测（probe，12 节点会话）：正文（`Surface:` 之前）≈ 224 字节 ≤ 300 预算；触发框架句与 `Context breakdown:` 保留。
 - 测试纪律：断言 pin **真实渲染输出**的子串（框架句、breakdown 存在；哲学/规则缺席），不用"用常量拼输入再断言常量被摘掉"的同义反复形式。
 
-## 5. 验证
+## 5. Skill 目录保护（issue #185）
+
+### 问题
+会话开头由 harness（`dsh-tool-skill` 的 `agent/pre-step`）注入的 `<available_skills>` skill 目录消息，一旦被压缩折叠进摘要块：
+- 模型上下文中不再有任何 skill 清单；
+- harness 侧重发机制按 catalog **digest** 去重（仅当 `~/.dsh/skills/` 内容变化才重发），感知不到"可见副本被压掉"→ 永不重发；
+- 结果：模型此后整个会话丢失 skill 发现能力（实测案例：本机装有 `pdf-to-md`，模型却走 `pip install pypdf` 弯路）。
+
+对照 AGENTS.md 注入：它有 presence gate（当前副本离开 surface 即重注），折叠是自愈的；skill 目录没有这个 gate——**折叠 = 永久丢失**。这是两个通道同为"注入指令行"但保护策略不同的原因。
+
+### 方案（三层，全部在本仓库内）
+1. **识别**（`isSkillCatalogRow`，src/messages.ts）：user/message 行满足任一即认定——直接 kind `skill-catalog`；`dsh-tool-skill` 插件两种拼写（legacy wrapper `{kind:'plugin',plugin:'dsh-tool-skill'}` + V4 producer kind `plugin:dsh-tool-skill`）；或 source 字段缺失/不可用时文本中的 `<available_skills>` 标记（野形态兜底）。接进 `classifySurfaceEvent` 的全部三条 real 返回路径（无 source / `kind:'user'` / kind 非字符串）——此类行分类为 `instruction`：range 表把它 barrier（永不 offer），`isRealUserTurn` 也不让它占据 protected tail。
+2. **钉住**（`newestSkillCatalogSeqOf`，src/region.ts）：一个组（新目录整体取代旧目录，不同于按文件分的 scope）。`guardedSurfaceSeqsOf` 把最新**可见**目录行加入硬拒集合——compress 工具与 `/acp-prune compress` 对覆盖它的 range 一律硬拒（与 AGENTS.md 同一对 helper：`guardedRowsInSpan` + `protectedRowRejectionNote`；拒绝说明现在按通道给出原因：AGENTS.md "the host re-injects…"、catalog "a folded skill catalog is never re-sent — its resend gate is the catalog digest"）。旧副本（被取代的目录）仍可压缩——删掉它们不触发任何重发，是安全清理。
+3. **双保险**：`protectedSurfaceSeqs` 同时加入最新目录行的 seq（分类若回归，也不会落入 recent-tail 保护集被误伤）。
+
+### 行为变更（披露）
+- compress 工具与 `/acp-prune compress` 现在**硬拒**覆盖最新可见 skill 目录行的 range（此前会静默折叠——这正是本 bug）。
+- 无 source / `kind:'user'` / kind 非字符串的 skill 目录行不再出现在 range 表里（此前按真实内容 offer、可压缩）。
+- 拒绝说明措辞："CURRENT injected instruction row(s)" → "CURRENT injected row(s)"，并按命中通道附原因。
+
+### 残留（harness 侧，待 owner 决定）
+根因的另一半在 `dsh-tool-skill`：重发判定假设传输无损，按 digest 而非可见性去重。更稳的修复是让它在检测到"surface 上不再有可见目录行"时全量重发（DSH 原生 compaction 的自愈闭环模式）。属外部仓库，未擅自提交——见 issue #185 评论。
+
+回归测试：tests/skill-catalog.test.ts（全部形状识别、pinning、range 表 barrier、工具/人路径拒绝、stale 可压缩）；tests/instruction-barrier.test.ts 同步更新（guarded 集合含目录行；拒绝说明双通道措辞）。
+
+## 6. 验证
 
 - `npm run typecheck` ✓；`npm test` 273/273 ✓（含 tests/injection-governance.test.ts B1-1..4、tests/g5-governance.test.ts B3-1..4/B6-1..4 重写版、tools.test.ts M3 头行断言更新）；`npm run build` ✓；`npm run test:e2e` ✓（4 场景全 PASS）。
 - dist/ 不进 PR（dist-bot 合并后刷新；AGENTS.md §5）。
