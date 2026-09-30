@@ -274,7 +274,24 @@ If you do not want to tune three percentages by hand, pick the nudge aggressiven
 - **Two knobs deliberately left out**: the original request also named `growthRatio` (exists in acp-kernel as `nudge.growthRatio`, reachable via `coreOverrides`) and `protectedLastMessages` (≈ kernel `preserveRecentMessages`). Neither is a first-class engine knob here; adopting them as named keys / UI items is an owner decision, so they are not baked into the presets.
 - **An inverted window is rejected**: if merging with explicit thresholds produces `min > max`, `max > emergency` or `min > emergency` (e.g. `preset: 'preserve'` with `nudgeMaxContextLimitPct: 0.5`), the engine throws at construction and lists the three values. The kernel only warns about such a config, so this check is added by the engine in `resolveAcpConfig`.
 - **`max` is the value that races the host's 80% line**: each tier's onset is decided by `max`; the `preserve` / `relaxed` emergency values (0.93 / 0.90) sit above the host compaction-basic 80% line and act only as a label upgrade past it, so they are never reached when the host compacts first.
-- **`min` has no runtime effect yet**: the pinned kernel reads it only in `validateConfig` (as the `nudgeMinContextLimitPct` option says), so tiers differ in practice by `max` and `emergency`.
+ - **`min` has no runtime effect yet**: the pinned kernel reads it only in `validateConfig` (as the `nudgeMinContextLimitPct` option says), so tiers differ in practice by `max` and `emergency`.
+
+## Known issues
+
+### Long sessions hitting the kernel's ref cap: `ref capacity exhausted: cannot allocate beyond m99999`
+
+After an extremely long session (tens of thousands of message-level events), a whole turn can fail outright:
+
+```text
+ref capacity exhausted: cannot allocate beyond m99999
+```
+
+This is the upstream [acp-kernel](https://github.com/ranxianglei/acp-kernel) 5-digit ref space (`m00001`–`m99999`) being exhausted by the CUMULATIVE number of messages ever seen in the process — ref numbers are never reused within a session (an invariant established by kernel PR #191), so it is unrelated to current context size: neither model-driven compression nor the host can recover from it (the throw happens before any compression decision). Verified on kernel 0.0.29, on the version pinned here (0.0.63), and on the latest npm release (0.0.98) — **upgrading the kernel does not fix it**. The proper fix is widening `REF_WIDTH` from 5 to 7 digits, requested in [acp-kernel#483](https://github.com/ranxianglei/acp-kernel/issues/483); tracked in [docs/upstream-tracker.md](docs/upstream-tracker.md) (issue [#187](https://github.com/Tyan66666/billion-context-dsh/issues/187)).
+
+**Workarounds**:
+
+1. **Restart dsh** — kernel state is pure in-memory and never persisted; after a restart refs are renumbered from `m00001` over the current visible surface (usually far below the cap) and the session continues immediately. It WILL recur once ~50k more new messages arrive in the same process.
+2. **Fall back to rule-based compaction** — disable `compaction-acp` and enable the host's built-in `compaction-basic` in your profile, which bypasses this code path entirely.
 
 ## Development
 

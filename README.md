@@ -272,7 +272,25 @@ DSH 的每个模型请求都派生自其 append-only 会话日志（*surface*）
 - **反向窗口直接报错**：与显式阈值合并后若出现 `min > max`、`max > emergency` 或 `min > emergency`（例如 `preset: 'preserve'` 配 `nudgeMaxContextLimitPct: 0.5`），引擎在构造期抛错并列出三个值。内核对这种配置只打警告、不会拒绝，所以这道校验由引擎在 `resolveAcpConfig` 里补上。
 - **与宿主 80% 线赛跑的是 `max`**：反复触发的过限提醒（`OVER-LIMIT`）由 `max` 决定；`preserve` / `relaxed` 的 emergency（0.93 / 0.90）高于宿主 compaction-basic 的 80% 线，只是超过它之后的标签升级，宿主先压缩时不会到达。
 - **`min` 是首见提醒与 T2/T3 块数触发的地板**：内核 0.0.63 在运行时读它两处——① `firstSightMassReady`（从未提醒过、还没有基线、用量 ≥ `min` 且待压内容达到增长下限时立刻提醒一次，理由串带 `[first-sight mass]`）；② `tierCountUsageFloor`（T2/T3 的「块数达标」触发同样要求用量 ≥ `min`）。常规 T1 增长提醒不看 `min`（由 `max` 与 `growthRatio` 决定），所以五档之间的主要差异仍来自 `max` 与 `emergency`，但更低的 `min` 会让首见提醒来得更早。
-- **两个暂未纳入的旋钮**：原始需求里的 `growthRatio`（内核已有 `nudge.growthRatio`，可经 `coreOverrides` 调）和 `protectedLastMessages`（≈ 内核 `preserveRecentMessages`）目前不是本项目的一等旋钮；是否采纳为命名键 / UI 项由维护者决定，未擅自并入预设。
+ - **两个暂未纳入的旋钮**：原始需求里的 `growthRatio`（内核已有 `nudge.growthRatio`，可经 `coreOverrides` 调）和 `protectedLastMessages`（≈ 内核 `preserveRecentMessages`）目前不是本项目的一等旋钮；是否采纳为命名键 / UI 项由维护者决定，未擅自并入预设。
+
+## 已知问题
+
+### 长会话撞上内核引用上限：`ref capacity exhausted: cannot allocate beyond m99999`
+
+超长会话（约数万条消息级事件）跑完后，整轮可能直接失败，界面显示：
+
+```text
+本轮运行失败
+ref capacity exhausted: cannot allocate beyond m99999
+```
+
+这是上游 [acp-kernel](https://github.com/ranxianglei/acp-kernel) 的 5 位引用编号空间（`m00001`–`m99999`）被**累计**见过的消息数耗尽——引用编号在会话内只增不复用（内核 PR #191 确立的不变量），与当前上下文大小无关，所以模型压缩救不回来、宿主也救不回来（报错发生在任何压缩决策之前）。已确认内核 0.0.29、本仓库当前 pin 的 0.0.63、npm 最新 0.0.98 全部同样命中——**升级内核不会解决**。正解是内核把 `REF_WIDTH` 从 5 位放宽到 7 位，已在 [acp-kernel#483](https://github.com/ranxianglei/acp-kernel/issues/483) 提请，追踪见 [docs/upstream-tracker.md](docs/upstream-tracker.md)（issue [#187](https://github.com/Tyan66666/billion-context-dsh/issues/187)）。
+
+**临时办法**：
+
+1. **重启 dsh**——内核状态是纯内存态、不落盘，重启后按当前可见面重新从 `m00001` 编号（通常远低于上限），会话立刻可继续。代价是会复发：同一进程里再新见约 5 万条消息又会撞上。
+2. **换回规则式压缩**——profile 里禁用 `compaction-acp`、启用宿主自带的 `compaction-basic`，彻底绕开这条代码路径。
 
 ## 开发
 
