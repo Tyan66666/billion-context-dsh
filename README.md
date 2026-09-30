@@ -285,12 +285,19 @@ DSH 的每个模型请求都派生自其 append-only 会话日志（*surface*）
 ref capacity exhausted: cannot allocate beyond m99999
 ```
 
-这是上游 [acp-kernel](https://github.com/ranxianglei/acp-kernel) 的 5 位引用编号空间（`m00001`–`m99999`）被**累计**见过的消息数耗尽——引用编号在会话内只增不复用（内核 PR #191 确立的不变量），与当前上下文大小无关，所以模型压缩救不回来、宿主也救不回来（报错发生在任何压缩决策之前）。已确认内核 0.0.29、本仓库当前 pin 的 0.0.63、npm 最新 0.0.98 全部同样命中——**升级内核不会解决**。正解是内核把 `REF_WIDTH` 从 5 位放宽到 7 位，已在 [acp-kernel#483](https://github.com/ranxianglei/acp-kernel/issues/483) 提请，追踪见 [docs/upstream-tracker.md](docs/upstream-tracker.md)（issue [#187](https://github.com/Tyan66666/billion-context-dsh/issues/187)）。
+这是上游 [acp-kernel](https://github.com/ranxianglei/acp-kernel) 的 5 位引用编号空间（`m00001`–`m99999`）被**累计**见过的消息数耗尽——引用编号在会话内只增不复用（#176 的槽复用因会让摘要里的旧 tag 静默指向另一条消息而被 #191 回退，#191 确立该不变量），与当前上下文大小无关。已确认内核 0.0.29、本仓库当前 pin 的 0.0.63、npm 最新 0.0.98 全部同样命中——**升级内核不会解决**。
 
-**临时办法**：
+**压缩救不回，重启也救不回**：本插件每轮把**整条日志**（含已被摘要遮蔽的部分）交给内核（T2/T3 蒸馏需要完整日志而不只是可见面——见 src/messages.ts:315 `allLogMessages` 的注释），而内核流水线的第一个节点就是 `assign-refs`，先给日志里的所有消息编号、然后才谈任何压缩决策。所以：
 
-1. **重启 dsh**——内核状态是纯内存态、不落盘，重启后按当前可见面重新从 `m00001` 编号（通常远低于上限），会话立刻可继续。代价是会复发：同一进程里再新见约 5 万条消息又会撞上。
-2. **换回规则式压缩**——profile 里禁用 `compaction-acp`、启用宿主自带的 `compaction-basic`，彻底绕开这条代码路径。
+- **压缩救不回**：报错在任何压缩决策之前抛出，`compress` 工具自己也走同一条路径；
+- **重启 dsh 也救不回**：内核状态是纯内存态、不落盘，重启后第一轮就要为整条日志从头重新编号——日志已超过约 10 万条消息级事件时当场再次撞限。
+
+也就是说，对本插件而言，**「日志超过约 10 万条消息级事件 = 该会话在 ACP 下永久不可用」是硬墙**。正解是内核把 `REF_WIDTH` 从 5 位放宽到 7 位，已在 [acp-kernel#483](https://github.com/ranxianglei/acp-kernel/issues/483) 提请，追踪见 [docs/upstream-tracker.md](docs/upstream-tracker.md)（issue [#187](https://github.com/Tyan66666/billion-context-dsh/issues/187)）。
+
+**可用办法**：
+
+1. **换回规则式压缩**——profile 里禁用 `compaction-acp`、启用宿主自带的 `compaction-basic`，彻底绕开这条代码路径（会话本身仍可继续）。
+2. **换新会话**——把需要的上下文手动带过去；新会话的引用从零开始计数，等它自己的日志接近约 10 万条时才会再撞这堵墙。
 
 ## 开发
 

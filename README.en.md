@@ -286,12 +286,19 @@ After an extremely long session (tens of thousands of message-level events), a w
 ref capacity exhausted: cannot allocate beyond m99999
 ```
 
-This is the upstream [acp-kernel](https://github.com/ranxianglei/acp-kernel) 5-digit ref space (`m00001`–`m99999`) being exhausted by the CUMULATIVE number of messages ever seen in the process — ref numbers are never reused within a session (an invariant established by kernel PR #191), so it is unrelated to current context size: neither model-driven compression nor the host can recover from it (the throw happens before any compression decision). Verified on kernel 0.0.29, on the version pinned here (0.0.63), and on the latest npm release (0.0.98) — **upgrading the kernel does not fix it**. The proper fix is widening `REF_WIDTH` from 5 to 7 digits, requested in [acp-kernel#483](https://github.com/ranxianglei/acp-kernel/issues/483); tracked in [docs/upstream-tracker.md](docs/upstream-tracker.md) (issue [#187](https://github.com/Tyan66666/billion-context-dsh/issues/187)).
+This is the upstream [acp-kernel](https://github.com/ranxianglei/acp-kernel) 5-digit ref space (`m00001`–`m99999`) being exhausted by the CUMULATIVE number of messages ever seen — ref numbers are never reused within a session (#176's slot recycling was reverted by #191 because reused refs let stale tags in summary text silently point at another message; #191 established the invariant), so it is unrelated to current context size. Verified on kernel 0.0.29, on the version pinned here (0.0.63), and on the latest npm release (0.0.98) — **upgrading the kernel does not fix it**.
+
+**Neither compression nor a restart recovers it**: this plugin feeds the FULL LOG (including everything shadowed by summaries) to the kernel on every turn (T2/T3 distillation requires the complete log, not just the visible surface — see the comment on `allLogMessages` at src/messages.ts:315), and the FIRST node of the kernel pipeline is `assign-refs`, which numbers every message in that log before any compression decision. So:
+
+- **compression cannot help**: the throw happens before any compression decision, and the `compress` tool itself goes through the same path;
+- **restarting dsh cannot help either**: kernel state is pure in-memory and never persisted, so after a restart the very first turn must renumber the ENTIRE log from scratch — if the log already holds more than ~100k message-level events, it hits the cap again immediately.
+
+For this plugin, **"a log above ~100k message-level events = the session is permanently unusable under ACP" is a hard wall**. The proper fix is widening `REF_WIDTH` from 5 to 7 digits, requested in [acp-kernel#483](https://github.com/ranxianglei/acp-kernel/issues/483); tracked in [docs/upstream-tracker.md](docs/upstream-tracker.md) (issue [#187](https://github.com/Tyan66666/billion-context-dsh/issues/187)).
 
 **Workarounds**:
 
-1. **Restart dsh** — kernel state is pure in-memory and never persisted; after a restart refs are renumbered from `m00001` over the current visible surface (usually far below the cap) and the session continues immediately. It WILL recur once ~50k more new messages arrive in the same process.
-2. **Fall back to rule-based compaction** — disable `compaction-acp` and enable the host's built-in `compaction-basic` in your profile, which bypasses this code path entirely.
+1. **Fall back to rule-based compaction** — disable `compaction-acp` and enable the host's built-in `compaction-basic` in your profile; this bypasses the code path entirely and the session itself stays usable.
+2. **Start a fresh session** — carry over what you need manually; the new session's ref count starts from zero, and the wall only returns when its own log approaches ~100k events.
 
 ## Development
 
