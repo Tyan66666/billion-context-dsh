@@ -19,7 +19,7 @@
  */
 
 import z from '@deepseek-ai/schemastery'
-import type { SettingsDescriptor, SettingsProvider } from '@deepseek-ai/dsh-settings'
+import type { SettingsDescriptor } from '@deepseek-ai/dsh-settings'
 
 /**
  * The host settings namespace — same id as the bundle/composition row, so "the
@@ -213,7 +213,38 @@ export interface SettingsCommandSurface {
   replaceSection(section: Record<string, unknown>): Promise<void>
 }
 
-function requireService(getService: () => SettingsProvider | undefined): SettingsProvider {
+/**
+ * Structural view of the host settings service surface this engine uses.
+ * The 0.1.5 line's named type was `SettingsProvider`; dsh-settings ≥0.1.7
+ * renamed the service to `SettingsForms` and removed `installSection`
+ * entirely (its forms project `.volatile()` Config fields instead), so the
+ * named import no longer compiles against the newer lines. One local
+ * interface keeps both lines compiling; which half actually runs is decided
+ * at runtime by the capability probe in `AcpCompactionEngine` (issue #173),
+ * not by types. `T` follows the entry passed to `installSection`, mirroring
+ * the seam's own generic.
+ */
+export interface AcpSettingsServiceView<T = unknown> {
+  /** Present on the ≤0.1.6 lines only; absent on SettingsForms hosts. */
+  installSection?(
+    owner: unknown,
+    ns: string,
+    schema: unknown,
+    entry: T,
+    hooks: {
+      setSource(current: () => T): void
+      onChange(): void
+      validate?(value: T): void
+    },
+  ): void
+  describe(options?: unknown): SettingsDescriptor[]
+  update(ns: string, patch: object, expectedRevision?: number): Promise<void>
+  replace(ns: string, section: object, expectedRevision?: number): Promise<void>
+}
+
+function requireService(
+  getService: () => AcpSettingsServiceView<AcpSettingsInput> | undefined,
+): AcpSettingsServiceView<AcpSettingsInput> {
   const service = getService()
   if (service === undefined) {
     throw new Error('runtime settings are not available in this process')
@@ -228,7 +259,7 @@ function requireService(getService: () => SettingsProvider | undefined): Setting
  * (headless/plain compositions have no settings provider).
  */
 export function makeSettingsCommandSurface(
-  getService: () => SettingsProvider | undefined,
+  getService: () => AcpSettingsServiceView<AcpSettingsInput> | undefined,
   getSnapshot: () => AcpSettings,
 ): SettingsCommandSurface {
   return {

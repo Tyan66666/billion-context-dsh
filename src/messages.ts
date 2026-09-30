@@ -20,8 +20,11 @@ import { eventAtOf, sessionEventsOf } from './session-events.ts'
 // `{ kind: 'plugin', plugin: '<name>' }` (issue #163). dsh-llm's
 // MessageSourceMap predates V4 admission, so register this plugin's two
 // producer kinds on its documented merge-extensibility seam ("plugins add
-// their own kinds"). Type-level only — no runtime effect.
-declare module '@deepseek-ai/dsh-llm/message' {
+// their own kinds"). Type-level only — no runtime effect. The map lives on
+// the ROOT module as of the 0.2.0 line (the `/message` subpath export is
+// gone; dsh-compaction itself augments the root) — augmenting the old
+// subpath silently registered nothing there.
+declare module '@deepseek-ai/dsh-llm' {
   interface MessageSourceMap {
     acpNudge: { kind: 'plugin:acp-nudge' }
     acpPrune: { kind: 'plugin:billion-context-dsh' }
@@ -139,7 +142,10 @@ function stringifyArgs(args: unknown): string {
  */
 export function toolCallIdOfResultEvent(event: SessionEvent): string | null {
   if (event.type !== 'tool/result') return null
-  const message = (event.data as {
+  // Structural read through `unknown`: the typed event data names dsh-llm's
+  // ContentBlock union (readonly, toolCallId only on some members), which no
+  // single straight assertion overlaps with across seam lines.
+  const message = (event.data as unknown as {
     message?: { content?: Array<{ type?: unknown; toolCallId?: unknown }>; source?: { callId?: unknown } }
   }).message
   const block = Array.isArray(message?.content)

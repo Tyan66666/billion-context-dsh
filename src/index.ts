@@ -39,7 +39,6 @@ import { createCore, setDocCacheCap, type CompressionCore } from 'acp-kernel'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { Session } from '@deepseek-ai/dsh-session'
 import { CONTEXT_WINDOW_EXCEEDED_CODE } from '@deepseek-ai/dsh-llm'
-import type { SettingsProvider } from '@deepseek-ai/dsh-settings'
 import { DEFAULT_SESSION_CACHE_LIMIT, LruMap } from './lru.ts'
 import { AcpStateStore } from './state.ts'
 import { makeTools, type ToolEnvironment } from './tools.ts'
@@ -68,6 +67,7 @@ import {
   resolveAcpSettings,
   type AcpSettings,
   type AcpSettingsInput,
+  type AcpSettingsServiceView,
   type SettingsCommandSurface,
 } from './settings.ts'
 import { PRESETS, PRESET_NAMES, isPresetName, resolvePreset, type NudgePreset, type PresetName } from './presets.ts'
@@ -139,6 +139,7 @@ export {
   SETTING_DEFAULTS,
   type AcpSettings,
   type AcpSettingsInput,
+  type AcpSettingsServiceView,
   type SettingsChangeEffect,
   type SettingsCommandSurface,
   type SettingsKey,
@@ -386,10 +387,10 @@ export class AcpCompactionEngine extends CompactionEngine {
   private readonly compressCallIdsToHide = new Set<string>()
   /** Per provider/model route the resolved window (probe failures cached too). */
   private readonly windowCache = new Map<string, AcpWindow>()
-  /** Live settings snapshot thunk (composition → user settings layer); swapped when the settings provider attaches (SettingsProvider.installSection). */
+  /** Live settings snapshot thunk (composition → user settings layer); swapped when the settings provider attaches (installSection). */
   private readSettingsSource: () => AcpSettings = () => resolveAcpSettings({})
   /** The settings service, captured lazily for /acp-prune config (undefined in provider-less processes). */
-  private settingsService: SettingsProvider | undefined
+  private settingsService: AcpSettingsServiceView<AcpSettingsInput> | undefined
   /** /acp-prune config read/write surface. */
   readonly settingsCommand: SettingsCommandSurface
   /** Per route the adapter's per-request output cap (the output reservation); null = undisclosed. */
@@ -487,7 +488,12 @@ export class AcpCompactionEngine extends CompactionEngine {
         // handle would make /acp-prune config report available and fail every
         // write with opaque entry-id errors. Values keep flowing from the
         // composition row through the untouched readSettingsSource thunk.
-        if (typeof settingsCtx.settings?.installSection !== 'function') {
+        // The context augmentation types `settings` per seam line (the
+        // 0.2.0 line names SettingsForms, which has no installSection), so
+        // read it through the structural view; the probe below still decides
+        // at RUNTIME whether the section is registered.
+        const legacy = settingsCtx.settings as unknown as AcpSettingsServiceView<AcpSettingsInput> | undefined
+        if (typeof legacy?.installSection !== 'function') {
           this.ctx.logger.warn(
             'billion-context-dsh: host settings service has no installSection (removed in dsh-settings >= 0.1.7) — '
             + 'the compaction-acp settings section is not registered; the six knobs keep their composition values '
@@ -495,7 +501,7 @@ export class AcpCompactionEngine extends CompactionEngine {
           )
           return undefined
         }
-        settingsCtx.settings.installSection(ctx, ACP_SETTINGS_NAMESPACE, AcpSettingsSchema, compositionEntry, {
+        legacy.installSection(ctx, ACP_SETTINGS_NAMESPACE, AcpSettingsSchema, compositionEntry, {
           // The seam's source type follows the entry it registered, so `source`
           // is a partial view of the settings; re-resolve it into a
           // fully-defaulted snapshot so every reader sees the same shape the
@@ -508,7 +514,7 @@ export class AcpCompactionEngine extends CompactionEngine {
         // installSection hands out no service handle, and /acp-prune config needs
         // describe/update/replace — capture the service from the same optional
         // inject (fires only while a provider exists; a no-op otherwise).
-        this.settingsService = settingsCtx.settings
+        this.settingsService = legacy
         // Detach cleanup: cordis disposes the value an inject callback returns
         // when the provider fiber unloads. Without it the engine would keep a
         // dead provider handle (/acp-prune config would still report available and
@@ -606,7 +612,9 @@ export class AcpCompactionEngine extends CompactionEngine {
       if (event.type !== 'tool/result') return
       const message = event.data.message
       const block = message.content[0]
-      const callId = block?.toolCallId ?? message.source.callId
+      // Only some ContentBlock members carry toolCallId (image/file blocks do
+      // not) — narrow with an `in` check instead of a direct property read.
+      const callId = (block !== undefined && 'toolCallId' in block ? block.toolCallId : undefined) ?? message.source.callId
       if (typeof callId !== 'string' || !this.compressCallIdsToHide.has(callId)) return
       this.compressCallIdsToHide.delete(callId)
       // session.append is NOT reentrant: calling it synchronously inside this

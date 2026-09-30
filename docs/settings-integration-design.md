@@ -385,8 +385,8 @@ private onSettingsChanged(prev: AcpSettings, next: AcpSettings): void {
     （dsh-compaction / dsh-session / dsh-llm / dsh-tools）**同一形式、同一 0.1.5 下限**。
     为什么不能再写 0.1.0 线的双元组 clause：现在调用的是 provider 方法
     `SettingsProvider.installSection`，它只存在于 0.1.5 线；0.1.0/0.1.1 线只有自由函数
-    `installSettingsSection`，装上也无法工作。显式区间钉死整条 0.1.5 线（全部 0.1.5 预发布
-    加最终 0.1.5），`0.1.6-0` 上界挡住未验证的下一线（house rule：不默许未验证的版本线）。
+    `installSettingsSection`，装上也无法工作。显式区间当时钉死整条 0.1.5 线（全部 0.1.5 预发布
+    加最终 0.1.5），`0.1.6-0` 上界挡住未验证的下一线（house rule：不默许未验证的版本线；后续 #190 验证 0.1.6/0.1.7/0.2.0 线后将上界放宽至 `<0.2.1-0`）。
   - `"@deepseek-ai/schemastery": "^3.18.1"` —— 普通语义化版本，与宿主包一致，无 tuple 问题。
 - devDependencies 新增两者：`dsh-settings` 与宿主接缝 devDep 统一钉在 `0.1.5-rc.2`，
   `schemastery` 钉在 `3.18.1`（稳定测试基线规则）。
@@ -403,7 +403,7 @@ private onSettingsChanged(prev: AcpSettings, next: AcpSettings): void {
  服务类改名 `SettingsProvider` → `SettingsForms`，`installSection` 被移除，新 API
  （`configure/describe/update/replace/mutate`）面向 profile entry id + schema 上的 `meta.volatile`
  字段，与「插件注册自建 namespace」的旧语义不是一一对应。我们的 peer 区间
- （`>=0.1.5-alpha.1 <0.1.6-0`）本就把 0.1.7 挡在外面，但真实环境里用户确实会在 0.1.7 宿主上装我们：
+ （当时 `>=0.1.5-alpha.1 <0.1.6-0`，#190 验证后放宽至 `>=0.1.5-alpha.1 <0.2.1-0`）本就把 0.1.7 挡在外面，但真实环境里用户确实会在 0.1.7 宿主上装我们：
  此前引擎在注入回调里无条件调用 `settingsCtx.settings.installSection(...)`，抛出
  `TypeError: ...installSection is not a function`（#173 实机 stack，dist/index.js:6206），
  cordis 把它记成**启动 error**——而引擎本体与四个工具在同一次运行中全部正常，

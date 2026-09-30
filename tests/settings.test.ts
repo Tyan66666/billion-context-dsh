@@ -19,7 +19,8 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { Context, Service, type Message } from '@deepseek-ai/cordis'
-import { SettingsProvider, type SettingsNamespace } from '@deepseek-ai/dsh-settings'
+import * as dshSettings from '@deepseek-ai/dsh-settings'
+import type { SettingsNamespace } from '@deepseek-ai/dsh-settings'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { Session } from '@deepseek-ai/dsh-session'
 import {
@@ -38,24 +39,57 @@ import { acpCommand } from '../src/commands.ts'
 import type { ToolEnvironment } from '../src/tools.ts'
 import { DEFAULT_CONTEXT_WINDOW } from '../src/window.ts'
 
-/** In-memory settings provider: load/persist over a plain map; tests push external edits through publishForTest. */
-class MemorySettingsProvider extends SettingsProvider {
-  static provide = 'settings'
-  readonly writable = true
-  private stored: Record<string, unknown> = {}
+// ── Legacy installSection seam (dsh-settings ≤0.1.6) ─────────────────────────
+// ≥0.1.7 renamed the service to SettingsForms and removed installSection /
+// load / persist / publish entirely (its writes go through configEditor to
+// profile files), so the in-memory provider below can only be constructed
+// where the legacy base class exists at runtime. Tests that drive the
+// registered seam pass `{ skip: SEAM_SKIP }`: they run in full on the ≤0.1.6
+// baseline and skip with a reason on ≥0.1.7. The class body is typed against
+// the documented legacy contract instead of the installed package types so
+// this file compiles on both baselines; it subclasses the REAL base whenever
+// that base exists (rule 5: no re-implemented seam semantics in a fake).
+interface LegacySettingsBackend {
+  doc: Record<string, unknown>
+  load(): Promise<Record<string, unknown>>
+  persist(ns: SettingsNamespace, section: Record<string, unknown>): Promise<void>
+  publish(doc: Record<string, unknown>, source?: string): void
+}
+interface MemorySettingsProvider extends LegacySettingsBackend {
+  publishForTest(doc: Record<string, unknown>): void
+}
+const legacySettingsBase: unknown = Reflect.get(dshSettings, 'SettingsProvider')
+const installSectionSeamAvailable = typeof legacySettingsBase === 'function'
+/** Skip reason shared by every seam-driven test (false = run). */
+const SEAM_SKIP = installSectionSeamAvailable ? false : 'dsh-settings >=0.1.7 renamed the service to SettingsForms and removed installSection — these tests exercise the legacy seam only'
+let memorySettingsCtor: (new () => MemorySettingsProvider) | undefined
+if (installSectionSeamAvailable) {
+  const Base = legacySettingsBase as new () => LegacySettingsBackend
+  /** In-memory settings provider: load/persist over a plain map; tests push external edits through publishForTest. */
+  class Mem extends Base {
+    static provide = 'settings'
+    readonly writable = true
+    private stored: Record<string, unknown> = {}
 
-  protected override async load(): Promise<Record<string, unknown>> {
-    return this.stored
-  }
+    override async load(): Promise<Record<string, unknown>> {
+      return this.stored
+    }
 
-  protected override async persist(ns: SettingsNamespace, section: Record<string, unknown>): Promise<void> {
-    this.stored[String(ns)] = section
-  }
+    override async persist(ns: SettingsNamespace, section: Record<string, unknown>): Promise<void> {
+      this.stored[String(ns)] = section
+    }
 
-  /** Simulate an external edit (someone editing settings.yaml on disk). */
-  publishForTest(doc: Record<string, unknown>): void {
-    this.publish(doc)
+    /** Simulate an external edit (someone editing settings.yaml on disk). */
+    publishForTest(doc: Record<string, unknown>): void {
+      this.publish(doc)
+    }
   }
+  memorySettingsCtor = Mem
+}
+/** Guarded accessor — every caller sits behind the same skip flag. */
+function requireMemorySettings(): new () => MemorySettingsProvider {
+  assert.ok(memorySettingsCtor, 'installSection seam is absent on this dsh-settings line')
+  return memorySettingsCtor
 }
 
 /** Let the async watcher chain (commit → watch → onChange) settle. */
@@ -224,9 +258,9 @@ test('M6: command surface degrades without a service', async () => {
 
 // ── E2E with a real engine + in-memory provider ───────────────────────────
 
-test('M6: engine env reads LIVE settings — an external edit hot-applies', async () => {
+test('M6: engine env reads LIVE settings — an external edit hot-applies', { skip: SEAM_SKIP }, async () => {
   const root = new Context()
-  await root.plugin(MemorySettingsProvider)
+  await root.plugin(requireMemorySettings())
   // Cordis drops warn-level messages at its default threshold, so capture them
   // through an explicit-level exporter registered before construction.
   const logs: Message[] = []
@@ -250,9 +284,9 @@ test('M6: engine env reads LIVE settings — an external edit hot-applies', asyn
   }
 })
 
-test('M6: /acp-prune config list/set/reset round-trips through a real provider', async () => {
+test('M6: /acp-prune config list/set/reset round-trips through a real provider', { skip: SEAM_SKIP }, async () => {
   const root = new Context()
-  await root.plugin(MemorySettingsProvider)
+  await root.plugin(requireMemorySettings())
   const { fiber, engine } = await mountEngine(root)
   try {
     const list = await runAcp(engine.env, 'config')
@@ -286,9 +320,9 @@ test('M6: /acp-prune config list/set/reset round-trips through a real provider',
   }
 })
 
-test('M6: settingsEnabled false is a kill switch — composition values stay, provider ignored', async () => {
+test('M6: settingsEnabled false is a kill switch — composition values stay, provider ignored', { skip: SEAM_SKIP }, async () => {
   const root = new Context()
-  await root.plugin(MemorySettingsProvider)
+  await root.plugin(requireMemorySettings())
   const { fiber, engine } = await mountEngine(root, { settingsEnabled: false, nudgeMaxContextLimitPct: 0.66 })
   try {
     assert.equal(engine.env.nudgeMaxContextLimitPct, 0.66)
@@ -302,9 +336,9 @@ test('M6: settingsEnabled false is a kill switch — composition values stay, pr
   }
 })
 
-test('M6: HMR-style remount of the same namespace does not hit duplicate registration (V1 gate)', async () => {
+test('M6: HMR-style remount of the same namespace does not hit duplicate registration (V1 gate)', { skip: SEAM_SKIP }, async () => {
   const root = new Context()
-  await root.plugin(MemorySettingsProvider)
+  await root.plugin(requireMemorySettings())
   const first = await mountEngine(root)
   assert.equal(first.engine.env.nudgeMaxContextLimitPct, 0.7)
   await first.fiber.dispose()
@@ -320,9 +354,9 @@ test('M6: HMR-style remount of the same namespace does not hit duplicate registr
 
 // ── Locks for the merge-review findings ───────────────────────────────────
 
-test('M6: installSection registers the FILTERED composition subset as `base`', async () => {
+test('M6: installSection registers the FILTERED composition subset as `base`', { skip: SEAM_SKIP }, async () => {
   const root = new Context()
-  await root.plugin(MemorySettingsProvider)
+  await root.plugin(requireMemorySettings())
   const { fiber, engine } = await mountEngine(root, { nudgeMaxContextLimitPct: 0.66 })
   try {
     const descriptor = engine.env.settingsCommand?.describe()
@@ -339,9 +373,9 @@ test('M6: installSection registers the FILTERED composition subset as `base`', a
   }
 })
 
-test('M6: a settings edit reaches kernelConfigFor, not just the env getters', async () => {
+test('M6: a settings edit reaches kernelConfigFor, not just the env getters', { skip: SEAM_SKIP }, async () => {
   const root = new Context()
-  await root.plugin(MemorySettingsProvider)
+  await root.plugin(requireMemorySettings())
   const { fiber, engine } = await mountEngine(root)
   try {
     assert.equal(kernelConfigFor(engine.env).nudge.maxContextLimitPct, 0.7)
@@ -354,9 +388,9 @@ test('M6: a settings edit reaches kernelConfigFor, not just the env getters', as
   }
 })
 
-test('M6: a settings-layer autoModelContextLimit false gates the window projection', async () => {
+test('M6: a settings-layer autoModelContextLimit false gates the window projection', { skip: SEAM_SKIP }, async () => {
   const root = new Context()
-  await root.plugin(MemorySettingsProvider)
+  await root.plugin(requireMemorySettings())
   // Composition keeps auto detection ON — only the settings layer turns it off.
   const { fiber, engine } = await mountEngine(root)
   try {
@@ -385,9 +419,9 @@ test('M6: a settings-layer autoModelContextLimit false gates the window projecti
   }
 })
 
-test('M6: a detached provider falls back to the composition values', async () => {
+test('M6: a detached provider falls back to the composition values', { skip: SEAM_SKIP }, async () => {
   const root = new Context()
-  const providerFiber = await root.plugin(MemorySettingsProvider)
+  const providerFiber = await root.plugin(requireMemorySettings())
   const { fiber, engine } = await mountEngine(root, { nudgeMaxContextLimitPct: 0.66 })
   try {
     const provider = root.get('settings') as MemorySettingsProvider
@@ -408,9 +442,9 @@ test('M6: a detached provider falls back to the composition values', async () =>
   }
 })
 
-test('M6: reset keeps keys the six-key schema does not know (no silent data loss)', async () => {
+test('M6: reset keeps keys the six-key schema does not know (no silent data loss)', { skip: SEAM_SKIP }, async () => {
   const root = new Context()
-  await root.plugin(MemorySettingsProvider)
+  await root.plugin(requireMemorySettings())
   const { fiber, engine } = await mountEngine(root)
   try {
     const provider = root.get('settings') as MemorySettingsProvider
@@ -475,9 +509,9 @@ test('M6: a settings service WITHOUT installSection degrades gracefully (issue #
 // source, never through `this.config` — so the preset has to be present in the
 // base layer and the seeded snapshot, or it silently never fires.
 
-test('M6: a composed preset seeds the base layer AND the live reads (issue #176)', async () => {
+test('M6: a composed preset seeds the base layer AND the live reads (issue #176)', { skip: SEAM_SKIP }, async () => {
   const root = new Context()
-  await root.plugin(MemorySettingsProvider)
+  await root.plugin(requireMemorySettings())
   const { fiber, engine } = await mountEngine(root, { preset: 'aggressive' })
   try {
     // Exactly the three preset-filled threshold keys — not the full resolved
@@ -506,9 +540,9 @@ test('M6: a composed preset seeds the base layer AND the live reads (issue #176)
   }
 })
 
-test('M6: /acp-prune config attributes a preset-filled key to `base`, reset returns to the preset (issue #176)', async () => {
+test('M6: /acp-prune config attributes a preset-filled key to `base`, reset returns to the preset (issue #176)', { skip: SEAM_SKIP }, async () => {
   const root = new Context()
-  await root.plugin(MemorySettingsProvider)
+  await root.plugin(requireMemorySettings())
   const { fiber, engine } = await mountEngine(root, { preset: 'aggressive' })
   try {
     const list = await runAcp(engine.env, 'config')
