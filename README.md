@@ -272,7 +272,7 @@ DSH 的每个模型请求都派生自其 append-only 会话日志（*surface*）
 - **反向窗口直接报错**：与显式阈值合并后若出现 `min > max`、`max > emergency` 或 `min > emergency`（例如 `preset: 'preserve'` 配 `nudgeMaxContextLimitPct: 0.5`），引擎在构造期抛错并列出三个值。内核对这种配置只打警告、不会拒绝，所以这道校验由引擎在 `resolveAcpConfig` 里补上。
 - **与宿主 80% 线赛跑的是 `max`**：反复触发的过限提醒（`OVER-LIMIT`）由 `max` 决定；`preserve` / `relaxed` 的 emergency（0.93 / 0.90）高于宿主 compaction-basic 的 80% 线，只是超过它之后的标签升级，宿主先压缩时不会到达。
 - **`min` 是首见提醒与 T2/T3 块数触发的地板**：内核 0.0.63 在运行时读它两处——① `firstSightMassReady`（从未提醒过、还没有基线、用量 ≥ `min` 且待压内容达到增长下限时立刻提醒一次，理由串带 `[first-sight mass]`）；② `tierCountUsageFloor`（T2/T3 的「块数达标」触发同样要求用量 ≥ `min`）。常规 T1 增长提醒不看 `min`（由 `max` 与 `growthRatio` 决定），所以五档之间的主要差异仍来自 `max` 与 `emergency`，但更低的 `min` 会让首见提醒来得更早。
- - **两个暂未纳入的旋钮**：原始需求里的 `growthRatio`（内核已有 `nudge.growthRatio`，可经 `coreOverrides` 调）和 `protectedLastMessages`（≈ 内核 `preserveRecentMessages`）目前不是本项目的一等旋钮；是否采纳为命名键 / UI 项由维护者决定，未擅自并入预设。
+- **两个暂未纳入的旋钮**：原始需求里的 `growthRatio`（内核已有 `nudge.growthRatio`，可经 `coreOverrides` 调）和 `protectedLastMessages`（≈ 内核 `preserveRecentMessages`）目前不是本项目的一等旋钮；是否采纳为命名键 / UI 项由维护者决定，未擅自并入预设。
 
 ## 已知问题
 
