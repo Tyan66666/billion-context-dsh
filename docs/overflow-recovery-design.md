@@ -81,7 +81,7 @@ PR #153 原实现走的是另一条路：`CompactionTransactionInput` 加一个 
 2. **marker 不是摘要**：恢复后的上下文质量低于模型自己写的摘要。模型可以之后对同一 block 再 `compress` 一次（block 仍然 live、checkpoint seq 可在 `acp_status` 看到）写一份正式摘要。
 3. **媒体密集会话依赖计量表**：选择哪一段最大，用的是范围表的 `range.tokens`，其中媒体加价来自宿主计量（rule 19）。计量器缺失/抛错时退回固定结构价，排名可能不最优，但不会把图片当 0 成本。
 4. **不覆盖其他失败**：只处理 `CONTEXT_WINDOW_EXCEEDED_CODE`。provider 的限流、网关错误等仍交给宿主原本的重试策略。
-5. **宿主版本门**：本仓库的 peer 区间是 `>=0.1.5-alpha.1 <0.1.6-0`（§4 规定），`{ kind: 'retry' }` 协议与 `agent/request-error` 的载荷形状都在这个区间内验证过。
+5. **宿主版本门**：本仓库的 peer 区间是 `>=0.1.5-alpha.1 <0.2.1-0`（§4 规定），`{ kind: 'retry' }` 协议与 `agent/request-error` 的载荷形状在 0.1.5 与 0.2.0 两条基线上都经 e2e 验证过。
 
 ## 6. 配置
 

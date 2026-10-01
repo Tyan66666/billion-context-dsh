@@ -385,8 +385,8 @@ private onSettingsChanged(prev: AcpSettings, next: AcpSettings): void {
     （dsh-compaction / dsh-session / dsh-llm / dsh-tools）**同一形式、同一 0.1.5 下限**。
     为什么不能再写 0.1.0 线的双元组 clause：现在调用的是 provider 方法
     `SettingsProvider.installSection`，它只存在于 0.1.5 线；0.1.0/0.1.1 线只有自由函数
-    `installSettingsSection`，装上也无法工作。显式区间钉死整条 0.1.5 线（全部 0.1.5 预发布
-    加最终 0.1.5），`0.1.6-0` 上界挡住未验证的下一线（house rule：不默许未验证的版本线）。
+    `installSettingsSection`，装上也无法工作。显式区间当时钉死整条 0.1.5 线（全部 0.1.5 预发布
+    加最终 0.1.5），`0.1.6-0` 上界挡住未验证的下一线（house rule：不默许未验证的版本线；后续 #190 验证 0.1.6/0.1.7/0.2.0 线后将上界放宽至 `<0.2.1-0`）。
   - `"@deepseek-ai/schemastery": "^3.18.1"` —— 普通语义化版本，与宿主包一致，无 tuple 问题。
 - devDependencies 新增两者：`dsh-settings` 与宿主接缝 devDep 统一钉在 `0.1.5-rc.2`，
   `schemastery` 钉在 `3.18.1`（稳定测试基线规则）。
@@ -403,7 +403,7 @@ private onSettingsChanged(prev: AcpSettings, next: AcpSettings): void {
  服务类改名 `SettingsProvider` → `SettingsForms`，`installSection` 被移除，新 API
  （`configure/describe/update/replace/mutate`）面向 profile entry id + schema 上的 `meta.volatile`
  字段，与「插件注册自建 namespace」的旧语义不是一一对应。我们的 peer 区间
- （`>=0.1.5-alpha.1 <0.1.6-0`）本就把 0.1.7 挡在外面，但真实环境里用户确实会在 0.1.7 宿主上装我们：
+ （当时 `>=0.1.5-alpha.1 <0.1.6-0`，#190 验证后放宽至 `>=0.1.5-alpha.1 <0.2.1-0`）本就把 0.1.7 挡在外面，但真实环境里用户确实会在 0.1.7 宿主上装我们：
  此前引擎在注入回调里无条件调用 `settingsCtx.settings.installSection(...)`，抛出
  `TypeError: ...installSection is not a function`（#173 实机 stack，dist/index.js:6206），
  cordis 把它记成**启动 error**——而引擎本体与四个工具在同一次运行中全部正常，
@@ -421,9 +421,8 @@ private onSettingsChanged(prev: AcpSettings, next: AcpSettings): void {
  `/acp-prune config list` 照旧渲染表格（值来自组合行/默认，source 列全为 default）；
  `set`/`reset` 返回既有的「no settings provider」指引文案（指向组合行编辑）。
 
- **本文档范围之外**：迁移到 SettingsForms API 是完整的接缝线移植任务
- （五个接缝逐一核验 + `meta.volatile` schema 标注 + 按 house rule 显式拓宽 peer 区间），
- 单独立项跟踪（自 #173 分析中新开的 issue，编号见该 issue 的评论），不在本修复内做。
+  **后续（已完成，见 §4.9）**：SettingsForms 迁移自 #173 分析中单独立项为 issue #193，
+  已由本 PR 完成——双轨能力探测 + 静态 Config schema + 按 profile entry id 寻址的写路径。
 
  **测试**（tests/settings.test.ts）：`FormsLikeSettingsService` fixture 镜像 0.1.7 表面
  （有 configure/describe/update/replace/mutate、无 installSection）→ 构造不抛、
@@ -432,7 +431,71 @@ private onSettingsChanged(prev: AcpSettings, next: AcpSettings): void {
  （受支持的宿主上探测必须静默）。注：cordis 日志默认阈值丢弃 warn 级消息，
  断言前需注册带 `levels: { default: 3 }` 的 exporter 才能观测到。
 
- ## 5. 明确不做的事（及优先级语义）
+  ## 4.9 SettingsForms 写路径迁移（issue #193，双轨探测 + 静态 Config schema）
+
+  **背景**：§4.8 把 ≥0.1.7 宿主线降级为只读 + 指引（#173 的临时状态）；PR #191 已把 peer
+  区间扩到 `>=0.1.5-alpha.1 <0.2.1-0`（0.2.0 线端到端核验通过），但写路径仍缺。本节完成它：
+  引擎声明自己的静态 Config schema，经 SettingsForms 的 describe/update/replace 三件套重新注册
+  六个标量键；旧服务形状（installSection）分支逐字保留。
+
+  **契约核实**（2026-10-01，对已发布 tarball，非猜测）：dsh-settings `0.1.7-rc.2` 与
+  `0.2.0-rc.2` 的 `lib/index.js` **字节相同**——一次核实覆盖两条线。公开面：
+  `configure/describe/update/replace/mutate/writable/documentPath/prepareDocument` +
+  `SettingsConflictError`（`code: 'SETTINGS_CONFLICT'`，位置参数 `(ns, expected, actual)`）。
+  寻址按 profile entry id（我们是 `compaction-acp`）；descriptor 行形状
+  `{ ns, autoGenerate, schema, value, revision, base?, user?, applies: 'live' }`，其中
+  value/base/user 均为 `projectForm(form, layer)` 投影（只含 volatile 字段）。写机制：
+  `update = mergeLayers(projectForm(form, raw), input)`、`replace = mergeLayers(projectForm(form, inherited), input)`、
+  最终 entry config = `mergeLayers(strip(raw, form), next)` —— **非 volatile 键在写后保留**；
+  revision map 按 entry id 维护、从 0 起、raw 变化时 +1；`expectedRevision === undefined` 时跳过冲突检查；
+  写入经 `configEditor.edit` 落到 profile patch 文档。volatile 接线在 cordis-plugin-loader：挂载时把插件
+  静态 Config schema 中 `.volatile()` 标注的**每个**字段包成 ref cell 放进 fiber config（用户没写过的
+  键也有 ref，初值取组合层值），步骤之间表单写入经 `updateVolatile(ref, source)` 原地提交进同一批 ref，
+  **不发出任何本引擎能收到的事件**（只在其自身 fiber 上 emit `loader/volatile-update`）；非 volatile
+  变更才走完整 remount。
+
+  **引擎侧设计**：
+  - `AcpPluginConfigSchema`（src/settings.ts:184）：六键各标 `.volatile()`，**刻意不设默认值**
+    （显式值 > preset > 引擎默认的分层由 preset 层负责填，schema 里的默认会盖住 preset 补齐的 base）。
+  - `static readonly Config = AcpPluginConfigSchema`（src/index.ts:386）：cordis 从原始插件值上读
+    `plugin.Config`，SettingsForms 依此构建设置表单段。
+  - 注入回调双轨探测（src/index.ts:535-604）：`typeof service.installSection === 'function'`
+    → legacy 分支（注册过滤后的组合子集 + onChange 驱动，行为不变）；否则
+    `describe + update + replace` 三件齐全 → forms 分支：捕获**绑定 receiver 的包装器**
+    `{ describe: fn.bind(service), update: …, replace: … }`（宿主方法经 `this` 读实例状态，cordis
+    注入的面可能是代理，裸引用丢绑定）、把活读取源换成 live thunk
+    `() => resolveAcpSettings(liveSettingsFromRefs(compositionEntry))`（src/index.ts:573，每次旋钮读取
+    都解包当前 ref 值，从不缓存）；注册时一次性诊断——`describe()` 看不到
+    `ns === 'compaction-acp'` 的行记一条 warn（操作者改过自己的组合行 id，后续写入会以晦涩错误失败，
+    不如提前点名）；两轨都不匹配 → 单条 warn 干净降级（src/index.ts:600，文案同时点名两种形状）。
+  - **热应用驱动**：env getter 走 live thunk，提交即在下一次旋钮读取可见（无需等步骤）；
+    `resyncSettings()`（赋值 src/index.ts:507，调用 src/index.ts:722，位于 autoNudge 闸门之前）在每个
+    `agent/pre-step` 顶部重跑 `applySettings`——刷新 `current` 快照基线并触发 diff 诊断
+    （如 min/max 倒挂告警）；无变化时是廉价 no-op。legacy/degrade 模式下同样调用，重解同一组值。
+  - 命令面零改动：`makeSettingsCommandSurface` 对两轨同形工作（describe/update/replace + trackedRevision，
+    每次写前刷新 token，单写流永不假冲突）；`SettingsConflictError` 经 `settingsWriteFailure`
+    映射为指引文案（commands.ts）。
+
+  **行为变更披露（旧 → 新）**：
+  - DSH ≥0.1.7 宿主：「启动一条 warn + 六键只能改组合行 + 重启」（#173 降级）→ **完整支持、无 warn**，
+    六键经 `/acp-prune config set/reset` 运行时热调；写路径按 profile entry id 寻址，
+    `~/.dsh/settings.yaml` 在该线上本就不存在（宿主侧行为，非本插件写路径）。
+  - DSH ≤0.1.6 宿主：零变化（installSection 分支代码路径逐字保留，`~/.dsh/settings.yaml` 行为不变）。
+  - 区间外 / 两轨都不匹配的宿主：零变化（单条 warn 降级保留，仅文案更新为同时点名两种形状）。
+
+  **回归测试**（tests/settings.test.ts）：`FormsSettingsService` fixture 镜像真实表面——用引擎自己的
+  `VOLATILE_WRITE` 符号构造 ref cell（`makeVolatileRef`），同一批 cell 既传给
+  `root.plugin(FormsSettingsService, knobs)` 又作为挂载 config 传入（复刻 loader：插件读到的正是
+  SettingsForms 稍后提交写入的那批引用）；五个用例——静态 schema 契约（`.dict` 字段全部
+  `meta.volatile === true` 且无 defaultValue；注意 schemastery 对象 schema 暴露 `.dict` 而非 zod 的
+  `.shape`，后者类型可过、运行时 undefined）、forms 写入下次读取即生效 + 顺序内变更的步骤静默、
+  `/acp-prune config` 往返（set → ref 落地 + revision 递增 + list 归因 `user`，reset → 回落默认）、
+  服务级陈旧 revision 触发 `SettingsConflictError`（落败写入不覆盖新值；命令面自刷新 token 故单写流
+  不会命中此路径，冲突只能由外部陈旧 token 触发）、倒挂对在 pre-step 驱动下恰好告警一次。
+  结果：standalone 25（14 过 / 11 legacy-seam 跳过）、全量 386（375 过 / 0 败）、e2e 五场景全绿
+  （0.2.0-rc.2 基线）。
+
+  ## 5. 明确不做的事（及优先级语义）
 
 | 项 | 决定 | 理由 |
 |---|---|---|
@@ -558,6 +621,15 @@ v2 状态：R1–R5 已由评审核验关闭，遗留两个实现期验证门（
 
 ## 修订记录
 
+- **v5（issue #193，SettingsForms 迁移）**：把 ≥0.1.7 线的写路径补全——双轨能力探测
+ （≤0.1.6 走 `installSection`，≥0.1.7 走 `describe/update/replace`，两轨都不匹配单条 warn
+ 干净降级）；forms 分支按 profile entry id `compaction-acp` 寻址，六键经静态 Config schema
+ （`AcpPluginConfigSchema`，各标 `.volatile()`、不设默认）进入表单；热应用 = env getter live 读
+ ref（提交即下次读取可见）+ 每步 `resyncSettings()` 重解快照并触发 diff 诊断；命令面零改动。
+ 契约对已发布 tarball 核实：0.1.7-rc.2 与 0.2.0-rc.2 的 lib 字节相同，一次核实覆盖两条线。
+ 新增 §4.9；peer 区间沿用 PR #191 的 `>=0.1.5-alpha.1 <0.2.1-0`（devDep 基线 0.2.0-rc.2）。
+ 回归测试：tests/settings.test.ts forms 五用例（schema 契约 / 热应用 / config 往返 / 陈旧 revision /
+ 倒挂告警），standalone 25、全量 386、e2e 五场景全绿。
 - **v4（issue #173，能力探测）**：dsh-settings 0.1.7 全线移除 `installSection`
  （服务改名 `SettingsForms`），超区间安装时在启动期抛 TypeError 污染日志。
  注入回调加 `typeof` 能力探测：缺失时记一条 warn 并干净降级（不注册、不捕获句柄、

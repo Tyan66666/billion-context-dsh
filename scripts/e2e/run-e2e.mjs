@@ -184,10 +184,27 @@ const cachePrefixChecks = (result) => {
 
   // The leading message is the largest cacheable prefix. Compare from the second request
   // on: the engine injects its one-time ACP guidance section during the first turn's
-  // pre-step, so request 1 may legitimately precede that injection.
-  const leading = requests.slice(1).map((request) => JSON.stringify(outboundMessagesOf(request)[0] ?? null))
-  const leadingDistinct = new Set(leading).size
-  list.push(['wire: leading message byte-stable after request 1', leadingDistinct === 1, `${leadingDistinct} distinct`])
+  // pre-step, so request 1 may legitimately precede that injection. Byte-stability
+  // only holds UNTIL the scenario's first durable surface rewrite — a landed compress
+  // splices its summary node ahead of older nodes, and an overflow recovery hides
+  // whole ranges — so compare only the requests sent before that rewrite (the rewrite
+  // request itself is still pre-rewrite: it is built before the tool result lands).
+  // On the Anthropic Messages wire the system prompt travels in a top-level field
+  // (already pinned by the raw-envelope check above), so the leading message is the
+  // first user message; the old OpenAI wire led the array with a stable system
+  // message that survived compaction, which is why this used to scan every request.
+  const rewriteIdx = Math.max(
+    requests.findIndex((request) => request.kind === 'tool'),
+    requests.findIndex((request) => request.kind === 'error'),
+  )
+  const leadWindow = requests.slice(1, rewriteIdx < 1 ? requests.length : rewriteIdx + 1)
+  if (leadWindow.length >= 2) {
+    const leading = leadWindow.map((request) => JSON.stringify(outboundMessagesOf(request)[0] ?? null))
+    const leadingDistinct = new Set(leading).size
+    list.push(['wire: leading message byte-stable until first surface rewrite', leadingDistinct === 1, `${leadingDistinct} distinct`])
+  } else {
+    list.push(['wire: leading message byte-stable until first surface rewrite', true, `no comparable requests before the rewrite (${leadWindow.length})`])
+  }
 
   // A scenario with no compaction is append-only by construction, so the previous
   // request's message list must be a byte-identical prefix of the next one — any
