@@ -71,18 +71,19 @@ Restart `dsh` afterwards (bundle layers are composed at startup), open a new ses
 > **DSH version compatibility.** The package declares all five runtime seam
 > packages (`dsh-compaction` / `dsh-session` / `dsh-llm` / `dsh-tools` /
 > `dsh-settings`) as peer
-> dependencies, sharing the range `>=0.1.5-alpha.1 <0.1.6-0` — exactly the
-> `0.1.5` line (every prerelease plus the final `0.1.5`). From the `0.1.5` line
-> on, the session's replace operation was renamed from `{ op, start, end }` to
-> `{ op, startSeq, endSeq }` and is validated strictly (exactly those three
-> keys), so the engine emits the new shape only: on older DSH hosts (< 0.1.5)
-> every `compress` call is rejected at runtime (issue #136), which is why the
-> old lines are out of contract — upgrade DSH before installing this release.
-> The explicit bounds (instead of a caret) are deliberate: a caret would
-> silently admit the unverified 0.1.6+ line. Declaring all five seam packages
-> as peers (not just `dsh-compaction`) ensures that, even under pnpm's
-> hoisted/linked layout, installations resolve them to the **host's own** copy
-> rather than a stale nested copy inconsistent with the host.
+> dependencies, sharing the range
+> `>=0.2.0-rc.2 <0.3.0-0` — exactly the `0.2.0` line. From the `0.2.0` line on,
+> the host changed the tool-result event payload to be the tool-result message
+> itself (call id promoted to message level), which the engine adapts to; the
+> settings service was redesigned at the same time (the legacy registration seam
+> is gone), so on this release the `/acp-prune config` write path degrades to
+> read-only with advice (issue #192). This release therefore requires DSH ≥ 0.2.0:
+> on older hosts, stay on an earlier release of this plugin (≤ v0.2.26, still
+> compatible with the 0.1.5 line). The explicit bounds (instead of a caret) are
+> deliberate: a caret would silently admit the unverified 0.3.0+ line. Declaring
+> all five seam packages as peers (not just `dsh-compaction`) ensures that, even
+> under pnpm's hoisted/linked layout, installations resolve them to the **host's
+> own** copy rather than a stale nested copy inconsistent with the host.
 >
 > Behavior note (from 0.1.5 on): the host no longer permits invisible
 > replacement nodes, so when the engine cleans up orphaned tool messages it

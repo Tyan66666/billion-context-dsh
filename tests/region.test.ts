@@ -64,11 +64,13 @@ test('M5: runCompactionTransaction lands the four events and shadows the range',
   for (const seq of [1, 2, 3, 4]) assert.ok(!session.surface.nodes.includes(seq))
   assert.ok(session.surface.nodes.includes(seqs[2]!), 'the replacement node joins the surface')
 
-  // The summary node carries the checkpoint source.
+  // The summary node carries the checkpoint source — the 0.2.0 producer kind
+  // whose compaction id ties it to the compaction/summary event.
   const replaceEvent = session.snapshotEvents()[seqs[2]!]!
   assert.equal(replaceEvent.type, 'user/message')
-  const source = (replaceEvent.data as { source?: { plugin?: string } }).source
-  assert.equal(source?.plugin, 'compact')
+  const source = (replaceEvent.data as { source?: { kind?: string; compactionId?: string } }).source
+  assert.equal(source?.kind, 'compact-checkpoint')
+  assert.equal(source?.compactionId, compactionId)
 
   // Derived messages shrank: 6 messages → 2 surviving + 1 summary = 3.
   assert.equal(session.deriveMessages().length, 3)

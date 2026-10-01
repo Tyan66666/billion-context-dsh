@@ -48,18 +48,51 @@ const runScenario = async (scenario) => {
   const server = await startFakeLlm({ port: 0, turns: expand(scenario.responses), seqs })
   process.env.DEEPSEEK_BASE_URL = `${server.baseURL}/v1`
   process.env.DEEPSEEK_API_KEY = 'mock-key'
-  const { Context } = await import('@deepseek-ai/cordis')
+  const { Context, Service } = await import('@deepseek-ai/cordis')
   const { SessionId } = await import('@deepseek-ai/dsh-session')
   const { createUserMessage } = await import('@deepseek-ai/dsh-llm')
   const AgentLoop = (await import('@deepseek-ai/dsh-agent-loop')).default
   const { mountAgentLoopTestDependencies } = await import('@deepseek-ai/dsh-agent-loop-testkit')
-  const LlmDeepSeek = await import('@deepseek-ai/dsh-llm-deepseek')
+  const { registerDeepSeekProvider, resolveAdapterOptions, catalogModelInfo } = await import('@deepseek-ai/dsh-llm-deepseek')
   const TokenMeter = (await import('@deepseek-ai/dsh-token-meter')).default
   const AcpEngine = (await import(String(ENGINE))).default
+  // The 0.2.0 provider registration injects a `settings` service to disable
+  // config auto-refresh; the e2e host has no settings file, so a no-op
+  // stand-in satisfies the dependency.
+  class StubSettings extends Service {
+    constructor(ctx) { super(ctx, 'settings') }
+    configure() {}
+  }
+  const model = {
+    id: 'deepseek-v4-flash',
+    name: 'DeepSeek V4 Flash',
+    description: 'e2e mock model',
+    contextWindow: scenario.engine.modelContextLimit,
+    maxTokens: 8192,
+  }
+  const DeepSeekE2E = {
+    name: 'dsh-llm-deepseek-e2e',
+    // registerDeepSeekProvider registers the adapter through ctx.llm, so the
+    // LLM registry must be a declared dependency of this plugin lifetime.
+    inject: ['llm'],
+    apply(ctx) {
+      registerDeepSeekProvider(ctx, 'deepseek-official', {
+        providerName: 'DeepSeek',
+        options: () => resolveAdapterOptions({
+          baseURL: process.env.DEEPSEEK_BASE_URL,
+          defaultContextWindow: scenario.engine.modelContextLimit,
+          models: [model],
+        }),
+        resolveAuth: async () => ({ headers: { Authorization: `Bearer ${process.env.DEEPSEEK_API_KEY}` } }),
+        discoverModels: async (provider) => [catalogModelInfo(provider, model)],
+      })
+    },
+  }
   const ctx = new Context()
   await mountAgentLoopTestDependencies(ctx, { systemPrompt: { persona: scenario.persona } })
   await ctx.plugin(AgentLoop, { agents: [] })
-  await ctx.plugin(LlmDeepSeek, { models: [{ id: 'deepseek-v4-flash', contextWindow: scenario.engine.modelContextLimit }] })
+  await ctx.plugin(StubSettings)
+  await ctx.plugin(DeepSeekE2E)
   await ctx.plugin(TokenMeter)
   await ctx.plugin(AcpEngine, { ...scenario.engine })
   const agent = await ctx.agentLoop.create(SessionId(scenario.name), {

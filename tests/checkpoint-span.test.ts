@@ -35,7 +35,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { createCore, type CompressionCore } from 'acp-kernel'
 import { Session } from '@deepseek-ai/dsh-session'
-import { allLogMessages } from '../src/messages.ts'
+import { allLogMessages, isCheckpointNode } from '../src/messages.ts'
 import { kernelConfigFor } from '../src/config.ts'
 import { AcpStateStore } from '../src/state.ts'
 import { blockRefForSummarySeq, rebuildBlockLedger, resolveSurfaceRange, shadowedSeqsOf } from '../src/region.ts'
@@ -125,8 +125,9 @@ function kernelRefs(env: ToolEnvironment, session: Session): Record<string, stri
 function checkpointSeqs(session: Session): number[] {
   const seqs: number[] = []
   for (const event of session.snapshotEvents()) {
-    const record = event as { type?: string; seq?: number; data?: { source?: { plugin?: string } } }
-    if (record.type === 'user/message' && record.data?.source?.plugin === 'compact') seqs.push(Number(record.seq))
+    // ONE classifier for both host shapes (legacy plugin wrapper and the 0.2.0
+    // producer kind) — the engine's own predicate, never a local copy.
+    if (isCheckpointNode(event)) seqs.push(Number(event.seq))
   }
   return seqs
 }
