@@ -493,3 +493,16 @@ test('PR1: the rejection names the compressible slices so the model can re-cut i
   const fullyCovered = protectedRowRejectionNote(10, 12, [10, 12], [10, 11, 12])
   assert.match(fullyCovered, /no part of this span is compressible/, 'a fully covered span says so instead of implying a cut exists')
 })
+
+test('PR: guardedSurfaceSeqsOf guards the newest real user turn', () => {
+  const session = Session.create('user-guard')
+  appendTurn(session, 1)
+  appendUser(session, longText('q0', 0))            // seq 1
+  appendAssistant(session, longText('a0', 1), 1, 1) // seq 2
+  appendUser(session, longText('q1', 2))            // seq 3 (newest user)
+  appendAssistant(session, longText('a1', 3), 1, 3) // seq 4
+
+  const guarded = guardedSurfaceSeqsOf(session)
+  assert.ok(guarded.has(3), 'the newest real user turn (seq 3) is guarded')
+  assert.ok(!guarded.has(1), 'older user turns (seq 1) stay compressible')
+})

@@ -1017,6 +1017,14 @@ export function guardedSurfaceSeqsOf(session: Session): Set<number> {
     if (event === undefined) continue
     if (isAgentInstructionsRow(event) && newestInstructions.has(seq)) guarded.add(seq)
   }
+  for (let index = session.surface.nodes.length - 1; index >= 0; index -= 1) {
+    const seq = session.surface.nodes[index]!
+    const event = eventAtOf(session, seq)
+    if (event !== undefined && isRealUserTurn(event)) {
+      guarded.add(seq)
+      break
+    }
+  }
   return guarded
 }
 

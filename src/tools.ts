@@ -38,7 +38,7 @@ import {
   DEFAULT_DECOMPRESS_PAGE_CHARS,
   type ResolvedSurfaceRange,
 } from './region.ts'
-import { allLogMessages, attachmentsOfEvent, buildToolCallIndex, eventsToCoreMessages, extractEventText, isCheckpointNode, surfaceEventsOf, toolCallsOf } from './messages.ts'
+import { allLogMessages, attachmentsOfEvent, buildToolCallIndex, eventsToCoreMessages, extractEventText, isAgentInstructionsRow, isCheckpointNode, isRealUserTurn, surfaceEventsOf, toolCallsOf } from './messages.ts'
 import { shadowedTokensViaMeter } from './host-tokens.ts'
 import { eventAtOf, sessionEventsOf } from './session-events.ts'
 import { DEFAULT_RESOLVED, type ResolvedPrompts } from './prompts.ts'
@@ -353,7 +353,13 @@ export function guardedRowsInSpan(guarded: ReadonlySet<number>, shadowed: readon
   return [...guarded].filter((seq) => inSpan.has(seq)).sort((a, b) => a - b)
 }
 
-export function protectedRowRejectionNote(start: number, end: number, hits: readonly number[], shadowed: readonly number[]): string {
+export function protectedRowRejectionNote(
+  start: number,
+  end: number,
+  hits: readonly number[],
+  shadowed: readonly number[],
+  session?: Session,
+): string {
   const preview = hits.slice(0, 4).join(', ')
   const more = hits.length > 4 ? ` +${hits.length - 4} more` : ''
   const first = shadowed.indexOf(hits[0]!)
@@ -366,7 +372,26 @@ export function protectedRowRejectionNote(start: number, end: number, hits: read
   const recovery = slices.length === 0
     ? 'no part of this span is compressible while those rows are current — pick an OLDER span instead (acp_status lists the live ranges)'
     : `the compressible part of this span is seq ${slices.join(' and ')} — submit them as separate content entries (or two compress calls), each with its own summary`
-  return `  seqs ${start}..${end} rejected — the span covers ${hits.length} CURRENT injected instruction row(s) (seq ${preview}${more}); the host re-injects the newest AGENTS.md copy the moment it leaves the surface, so compressing it reclaims nothing — ${recovery} (older/stale copies of the same file are fine to compress)`
+  let hasInstructions = false
+  let hasUserTurn = false
+  if (session !== undefined) {
+    for (const seq of hits) {
+      const event = eventAtOf(session, seq)
+      if (event === undefined) continue
+      if (!hasInstructions && isAgentInstructionsRow(event)) hasInstructions = true
+      if (!hasUserTurn && isRealUserTurn(event)) hasUserTurn = true
+    }
+  }
+  const reasons: string[] = []
+  if (hasInstructions || (!hasInstructions && !hasUserTurn)) {
+    reasons.push('the host re-injects the newest AGENTS.md copy the moment it leaves the surface, so compressing it reclaims nothing')
+  }
+  if (hasUserTurn) {
+    reasons.push('the active user message must stay live to preserve conversation intent')
+  }
+  const reasonText = reasons.join('; ')
+  const rowLabel = hasUserTurn && !hasInstructions ? 'CURRENT guarded row(s)' : 'CURRENT injected instruction row(s)'
+  return `  seqs ${start}..${end} rejected — the span covers ${hits.length} ${rowLabel} (seq ${preview}${more}); ${reasonText} — ${recovery} (older/stale copies of the same file are fine to compress)`
 }
 
 /**
@@ -554,7 +579,7 @@ async function handleCompress(env: ToolEnvironment, args: CompressArgs, exec: To
     const shadowedSpan = shadowedSeqsOf(session, resolved.start, resolved.end)
     const instructionHits = guardedRowsInSpan(guardedSeqs, shadowedSpan)
     if (instructionHits.length > 0) {
-      rejectedNotes.push(protectedRowRejectionNote(resolved.start, resolved.end, instructionHits, shadowedSpan))
+      rejectedNotes.push(protectedRowRejectionNote(resolved.start, resolved.end, instructionHits, shadowedSpan, session))
       continue
     }
     // An edge on an ACTIVE block's checkpoint summary node resolves to the
