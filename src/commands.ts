@@ -126,12 +126,15 @@ function compressText(env: ToolEnvironment, agent: Agent, args: string[]): strin
   if (blockRefForSummarySeq(session, start) !== null || blockRefForSummarySeq(session, end) !== null) {
     return '/acp-prune compress: the range touches a compressed block summary node — distill it with the compress tool (seq-based batch), not /acp-prune compress'
   }
-  // The same hard reject as the compress tool (src/tools.ts): a CURRENT
-  // injected instruction row cannot be legitimately compressed by ANY caller,
-  // human or model — the host re-injects the newest AGENTS.md copy
-  // unconditionally, so the tokens come straight back and nothing is
-  // reclaimed. Explicit intent does not override that arithmetic; older
-  // copies of the same file stay compressible.
+  // The same hard reject as the compress tool (src/tools.ts): a guarded row —
+  // the CURRENT injected instruction row of any scope OR the newest real user
+  // turn (issue #196) — cannot be legitimately compressed by ANY caller,
+  // human or model. For instruction rows the host re-injects the newest
+  // AGENTS.md copy unconditionally, so the tokens come straight back and
+  // nothing is reclaimed; for the active user turn the question itself would
+  // vanish from the surface. Explicit intent does not override that
+  // arithmetic; older copies of the same file and superseded user turns stay
+  // compressible.
   // Probe the span that will ACTUALLY be shadowed — the positional slice the
   // transaction prices and `assertProvenance` verifies — never a numeric
   // `start <= seq <= end` interval: the surface is locally non-monotonic after
@@ -143,7 +146,7 @@ function compressText(env: ToolEnvironment, agent: Agent, args: string[]): strin
   const shadowed = shadowedSeqsOf(session, start, end)
   const instructionHits = guardedRowsInSpan(guardedSurfaceSeqsOf(session), shadowed)
   if (instructionHits.length > 0) {
-    return protectedRowRejectionNote(start, end, instructionHits, shadowed)
+    return protectedRowRejectionNote(start, end, instructionHits, shadowed, session)
   }
   // Price the reclaimed tokens in the HOST's token vocabulary (rule 12):
   // prefer the live meter's per-node prices, fall back to the exact mirror.
