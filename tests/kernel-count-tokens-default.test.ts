@@ -10,9 +10,10 @@
  * acp-kernel@0.0.63 the suspicion does NOT hold: `createCore` resolves
  * `ports.countTokens ?? defaultCountTokens` (verified in the bundled source),
  * so the empty ports object src/index.ts builds when unconfigured already lands
- * on the CJK-aware counter, and the two flat-4 defaults inside the bundle
- * (`computeContextBreakdown`'s shadowed parameter, `renderWithSnapshot`'s
- * default argument) are unreachable on every engine path. What was missing is
+ * on the CJK-aware counter, and the bundle's other flat-4 fallbacks
+ * (`computeContextBreakdown`'s optional parameter, `renderWithSnapshot`'s
+ * default argument, `applyAbsorb`'s input default) are unreachable on every
+ * engine path. What was missing is
  * a guard for the invariant the whole audit depends on — that is this file.
  *
  * The fixture is driven through the engine's own feeding pattern
