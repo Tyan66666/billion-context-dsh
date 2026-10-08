@@ -67,7 +67,7 @@
 		"@deepseek-ai/schemastery": "^3.18.2"
 	},
 	"devDependencies": {
-		"acp-kernel": "0.0.63",
+		"acp-kernel": "0.0.101",
 		"@deepseek-ai/cordis": "4.0.4",
 		"@deepseek-ai/cordis-plugin-loader": "1.0.5",
 		"@deepseek-ai/cosmokit": "1.8.5",

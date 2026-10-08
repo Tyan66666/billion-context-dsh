@@ -112,8 +112,8 @@ test('M4/prompts 2: default normal nudge — efficiency note + tip, guidance mov
   assert.ok(!text.includes('KEEP VERBATIM'), 'KEEP VERBATIM 不在 nudge（B6）')
   // No "suggestion, not a requirement"
   assert.ok(!text.includes('suggestion, not a requirement'), 'no "suggestion, not a requirement"')
-  // Tip at end
-  assert.ok(text.endsWith('💡 Compress all ranges in one call (pass multiple content entries: `content: [{...}, {...}]`).'), 'tip at end')
+  // Tip at end (kernel 0.0.101 copy: the batch fold is ONE call, array OR plain-string form)
+  assert.ok(text.endsWith('💡 If you compress, fold the ranges you keep in ONE call — pass multiple content entries (`content: [{...}, {...}]`) or ONE plain string holding every range, each block starting with its \'mNNNNN–mNNNNN topic\' header line (most robust through lossy gateways). Ranges the task still needs can wait — they reappear in later nudges.'), 'tip at end')
 })
 
 test('M4/prompts 2b: default nudge renders through the kernel renderNudgeText path (seq table replaces ref table)', () => {
@@ -125,7 +125,7 @@ test('M4/prompts 2b: default nudge renders through the kernel renderNudgeText pa
   // Kernel frame + tip verbatim；B6 起哲学/规则段被摘掉（改住系统提示）
   assert.ok(text.startsWith('This is an efficiency nudge to compress early and keep context lean — not an overflow warning.'), 'kernel EFFICIENCY_NOTE frame')
   assert.ok(!text.includes('HOW TO COMPRESS'), 'B6：规则段不在 nudge')
-  assert.ok(text.endsWith('💡 Compress all ranges in one call (pass multiple content entries: `content: [{...}, {...}]`).'), 'kernel batch tip at end')
+  assert.ok(text.endsWith('💡 If you compress, fold the ranges you keep in ONE call — pass multiple content entries (`content: [{...}, {...}]`) or ONE plain string holding every range, each block starting with its \'mNNNNN–mNNNNN topic\' header line (most robust through lossy gateways). Ranges the task still needs can wait — they reappear in later nudges.'), 'kernel batch tip at end')
   // Ref-ID rangesStr replaced by the surface-seq table. The title KEEPS the
   // kernel header format ("N, oldest first") with the seq dialect appended —
   // the kernel mN range rows are what must be gone.
