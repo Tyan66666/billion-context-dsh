@@ -30,6 +30,7 @@ import {
   isAgentInstructionsRow,
   isCheckpointNode,
   isRealUserTurn,
+  isSkillCatalogRow,
   toolCallIdOfResultEvent,
   toolCallsOf,
   withSummaryFramePrefix,
@@ -1098,28 +1099,66 @@ export function newestInstructionSeqsOf(session: Session): Set<number> {
 }
 
 /**
+ * Newest skill-catalog row (issue #185). ONE group: every catalog row is the
+ * full current list, so each new one supersedes all earlier ones (unlike
+ * agent-instructions, which group per file scope). The guard matters because
+ * the host does NOT re-inject a folded catalog — dsh-tool-skill's resend gate
+ * is the catalog DIGEST, and shadowing the visible row changes nothing about
+ * it, so the model loses skill discovery until the catalog actually changes.
+ * Tail-scan the log like newestInstructionSeqsOf; null when the session never
+ * carried a catalog.
+ */
+export function newestSkillCatalogSeqOf(session: Session): number | null {
+  const events = sessionEventsOf(session)
+  for (let seq = events.length - 1; seq >= 0; seq -= 1) {
+    const event = events[seq]
+    if (event !== undefined && isSkillCatalogRow(event)) return seq
+  }
+  return null
+}
+
+/**
  * Surface seqs NO caller may compress: the CURRENT (newest) injected
- * agent-instructions row of every scope, restricted to rows still visible on
- * the surface (one definition of "current" — `newestInstructionSeqsOf`).
- * `buildCompressibleSeqRanges` never OFFERS them, and both compress entry
- * points (`handleCompress` in src/tools.ts, `/acp-prune compress` in
- * src/commands.ts) probe the RESOLVED span against this set and HARD-REJECT a
- * covering range before the kernel applies it, so nothing durable lands and no
- * phantom block can exist. This supersedes the earlier F7 draft (warn only):
- * folding a current copy reclaims nothing — the host re-injects it — so there
- * is no legitimate outcome to warn about. Deliberately NARROW (issue #71
- * review F4): only CURRENT agent-instructions rows — the audited loop driver.
- * Engine-authored metadata rows (nudge echo, compress-pair stub) stay
- * foldable like main, and STALE copies of the same file stay compressible —
- * removing them while the newest copy stays visible is the real cleanup.
+ * agent-instructions row of every scope (restricted to rows still visible on
+ * the surface — one definition of "current" — `newestInstructionSeqsOf`) PLUS
+ * the newest visible REAL user turn (`isRealUserTurn` reverse scan over
+ * `session.surface.nodes`, issue #196): a wide or miscalculated model span
+ * must never shadow the active question, while OLDER user turns stay
+ * compressible once superseded by a newer one. `buildCompressibleSeqRanges`
+ * never OFFERS them, and both compress entry points (`handleCompress` in
+ * src/tools.ts, `/acp-prune compress` in src/commands.ts) probe the RESOLVED
+ * span against this set and HARD-REJECT a covering range before the kernel
+ * applies it, so nothing durable lands and no phantom block can exist. This
+ * supersedes the earlier F7 draft (warn only): folding a current copy reclaims
+ * nothing — the host re-injects it — and folding the active user turn loses the
+ * conversation intent, so neither has a legitimate outcome to warn about.
+ * Deliberately NARROW (issue #71 review F4): for instruction rows, only CURRENT
+ * ones — the audited loop driver; for skill catalogs (issue #185) it is the ONE
+ * visible copy, because unlike AGENTS.md the host does NOT re-send a folded
+ * catalog (resend is keyed on the digest, which a fold cannot change), so
+ * folding it loses skill discovery until the catalog actually changes.
+ * Engine-authored metadata rows (nudge echo, compress-pair stub) stay foldable
+ * like main, and STALE copies (older AGENTS.md scopes, superseded catalog rows)
+ * stay compressible — removing them while the newest copy stays visible is the
+ * real cleanup.
  */
 export function guardedSurfaceSeqsOf(session: Session): Set<number> {
   const guarded = new Set<number>()
   const newestInstructions = newestInstructionSeqsOf(session)
+  const newestCatalog = newestSkillCatalogSeqOf(session)
   for (const seq of session.surface.nodes) {
     const event = eventAtOf(session, seq)
     if (event === undefined) continue
     if (isAgentInstructionsRow(event) && newestInstructions.has(seq)) guarded.add(seq)
+    else if (newestCatalog !== null && seq === newestCatalog) guarded.add(seq)
+  }
+  for (let index = session.surface.nodes.length - 1; index >= 0; index -= 1) {
+    const seq = session.surface.nodes[index]!
+    const event = eventAtOf(session, seq)
+    if (event !== undefined && isRealUserTurn(event)) {
+      guarded.add(seq)
+      break
+    }
   }
   return guarded
 }
@@ -1162,7 +1201,10 @@ function seqOfKernelRef(refs: KernelRangeView['refs'], ref: string): number | nu
  * - the last REAL user turn (never an injected row — see `isRealUserTurn`);
  * - the newest instruction row of every scope: the host re-injects the current
  *   copy of an instruction file the moment it disappears from the surface, so
- *   folding it reclaims nothing (rule 16).
+ *   folding it reclaims nothing (rule 16);
+ * - the newest skill-catalog row: the host never re-sends a folded catalog
+ *   (resend keyed on the digest), so the visible copy must stay on the
+ *   surface (issue #185).
  */
 function protectedSurfaceSeqs(session: Session, preserve: number): Set<number> {
   const nodes = session.surface.nodes
@@ -1187,6 +1229,10 @@ function protectedSurfaceSeqs(session: Session, preserve: number): Set<number> {
     }
   }
   for (const seq of newestInstructionSeqsOf(session)) protectedSeqs.add(seq)
+  // Belt-and-braces alongside the classifier barrier: a catalog row must stay
+  // out of every offered range even if its shape recognition regresses.
+  const newestCatalog = newestSkillCatalogSeqOf(session)
+  if (newestCatalog !== null) protectedSeqs.add(newestCatalog)
   return protectedSeqs
 }
 

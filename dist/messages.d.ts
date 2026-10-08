@@ -204,9 +204,12 @@ export declare function checkpointCompactionIdOf(event: SessionEvent): string | 
  * - `real` — genuine conversation content (user turns without an injected
  *   source, assistant prose/tool-calls, tool results, sub-agent relay rows,
  *   and host content channels in BOTH spellings: legacy plugin names and the
- *   DSH >= 0.1.7 direct-kind renames, issue #169). This is the only class
- *   that may win "last real user message" protection (minus all non-user
- *   rows, see `isRealUserTurn`).
+ *   DSH >= 0.1.7 direct-kind renames, issue #169). EXCEPTION: skill-catalog
+ *   rows carrying the `<available_skills>` marker stay `instruction` even
+ *   when their source shape is unusable (issue #185) — folding one loses
+ *   skill discovery permanently. This is the only class that may win "last
+ *   real user message" protection (minus all non-user rows, see
+ *   `isRealUserTurn`).
  * - `metadata` — the engine's own ephemeral rows: nudge echoes and
  *   compress-pair replacement stubs. Their content is derived from
  *   already-visible messages, so folding them into an adjacent real segment
@@ -252,6 +255,32 @@ export declare function sourcePluginOf(source: {
  * AGENTS.md row.
  */
 export declare function isAgentInstructionsRow(event: SessionEvent): boolean;
+/**
+ * True for skill-catalog rows (issue #185) — the `<available_skills>` list the
+ * harness injects (dsh-tool-skill's `agent/pre-step`) so the model knows which
+ * skills are installed. Recognized in every known host shape:
+ *
+ * - the direct kind `{ kind: 'skill-catalog', form: 'catalog' }` (audited;
+ *   already in HOST_INSTRUCTION_KINDS);
+ * - the plugin shapes, legacy wrapper `{ kind: 'plugin', plugin:
+ *   'dsh-tool-skill' }` and V4 producer kind `plugin:dsh-tool-skill`
+ *   (unknown plugin names already fall to instruction — naming the channel
+ *   explicitly pins it there so a future REAL_CONTENT_PLUGINS entry can never
+ *   silently re-admit the catalog as foldable content);
+ * - CONTENT FALLBACK: any user row whose text carries the `<available_skills>`
+ *   marker, whatever its source shape. Hosts that inject the catalog through a
+ *   plain user message with NO usable source marker (the wild shape behind
+ *   issue #185) would otherwise classify as `real`, get offered in the nudge
+ *   range table, and be folded away. Folding the visible catalog is NOT
+ *   recoverable by the host: dsh-tool-skill's resend gate is the catalog
+ *   DIGEST, and shadowing the visible row changes nothing about it, so the
+ *   model loses skill discovery until the catalog actually changes. The
+ *   marker is the stable contract between harness and model; a user who pastes
+ *   it into a chat turn becomes a barrier for that one row (harmless), while
+ *   folding a real catalog is a permanent capability loss (not harmless) —
+ *   the asymmetry decides.
+ */
+export declare function isSkillCatalogRow(event: SessionEvent): boolean;
 export declare function classifySurfaceEvent(event: SessionEvent): SurfaceEventClass;
 /**
  * Whether an event is a real user turn — the protected-tail criterion. An

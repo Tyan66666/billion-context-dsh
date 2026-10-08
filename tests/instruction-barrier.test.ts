@@ -19,6 +19,11 @@
  *   review: compressing a current row has no legitimate outcome, the host
  *   re-injects unconditionally). Stale copies stay compressible — that is
  *   the actual cleanup, and it triggers no re-injection.
+ * - Skill-catalog rows join the guard as the ONE visible copy (issue #185):
+ *   the host never re-sends a folded catalog (resend keyed on the digest), so
+ *   the newest visible catalog row is hard-rejected exactly like the current
+ *   AGENTS.md copy; superseded catalogs stay compressible. The rejection note
+ *   names the per-channel reason for both.
  *
  * Fixtures use the REAL host injection shape audited from live session logs:
  * source { kind: 'agent-instructions', form: 'instructions', baseline,
@@ -240,18 +245,20 @@ test('PR1: newestInstructionSeqsOf groups per scope — one newest per file, wor
   assert.ok(!newest.has(legacy), 'a row without changes[] has no file identity — the host cannot re-inject it, so guarding it would only block compression (issue #71 review S3)')
 })
 
-test('PR1: guardedSurfaceSeqsOf keeps only CURRENT agent-instructions rows', () => {
+test('PR1+#185: guardedSurfaceSeqsOf keeps CURRENT agent-instructions rows AND the newest visible skill catalog', () => {
   const session = Session.create('guarded')
   appendTurn(session, 1)
   appendUser(session, longText('q0', 0))
   const stale = appendInstruction(session, '.\u0000AGENTS.md', 'v1')
   const current = appendInstruction(session, '.\u0000AGENTS.md', 'v2')
-  const catalog = appendPluginRow(session, { kind: 'skill-catalog' })
+  const staleCatalog = appendPluginRow(session, { kind: 'skill-catalog' })
+  const catalog = appendPluginRow(session, { kind: 'plugin', plugin: 'dsh-tool-skill' })
 
   const guarded = guardedSurfaceSeqsOf(session)
-  assert.ok(guarded.has(current), 'the current copy is guarded')
+  assert.ok(guarded.has(current), 'the current AGENTS.md copy is guarded')
   assert.ok(!guarded.has(stale), 'a stale copy of the same file is NOT guarded (compression-safe)')
-  assert.ok(!guarded.has(catalog), 'non-agent-instructions policy rows stay outside the advisory set (F4 narrowing)')
+  assert.ok(!guarded.has(staleCatalog), 'a SUPERSEDED catalog is NOT guarded — compressing it while the newest stays visible is the cleanup')
+  assert.ok(guarded.has(catalog), 'the newest visible skill catalog IS guarded (issue #185: the host never re-sends a folded catalog)')
 })
 
 test('PR1: current-instruction-row gate — pure helpers pin the rejection', () => {
@@ -264,14 +271,31 @@ test('PR1: current-instruction-row gate — pure helpers pin the rejection', () 
   // no hit even when it sits numerically between the span's edges.
   assert.deepEqual(guardedRowsInSpan(new Set([5]), [1, 9]), [], 'seq 5 sits between 1 and 9 but the span does not carry it')
 
-  const one = protectedRowRejectionNote(1, 6, [5], [1, 2, 3, 4, 5, 6])
+  // The note reads each hit off the log to name the per-channel WHY (issue
+  // #185): seq 5 = current AGENTS.md row, seq 6 = the newest skill catalog.
+  const noteSession = Session.create('note-fixture')
+  appendTurn(noteSession, 1)                             // seq 0
+  appendUser(noteSession, longText('q0', 0))             // seq 1
+  appendAssistant(noteSession, longText('a0', 1), 1, 1)  // seq 2
+  appendUser(noteSession, longText('q1', 2))             // seq 3
+  appendAssistant(noteSession, longText('a1', 3), 1, 3)  // seq 4
+  appendInstruction(noteSession, '.\u0000AGENTS.md', 'v1') // seq 5
+  appendPluginRow(noteSession, { kind: 'skill-catalog' }) // seq 6
+  appendUser(noteSession, longText('q2', 5))             // seq 7
+  appendAssistant(noteSession, longText('a2', 7), 1, 7)  // seq 8
+  appendUser(noteSession, longText('q3', 9))             // seq 9
+
+  const one = protectedRowRejectionNote(1, 6, [5], [1, 2, 3, 4, 5, 6], noteSession)
   assert.match(one, /seqs 1\.\.6 rejected/)
   assert.match(one, /1 CURRENT injected instruction row\(s\) \(seq 5\)/)
-  assert.match(one, /re-injects the newest AGENTS\.md copy/)
+  assert.match(one, /re-injects the newest AGENTS\.md copy/, 'the instructions reason is named')
+  assert.doesNotMatch(one, /catalog digest/, 'an AGENTS.md-only hit names only that reason')
   assert.match(one, /stale copies/, 'the model is pointed at the stale-copy escape')
 
-  const many = protectedRowRejectionNote(1, 9, [5, 6, 7, 8, 9], [1, 2, 3, 4, 5, 6, 7, 8, 9])
-  assert.match(many, /5 CURRENT injected instruction row\(s\) \(seq 5, 6, 7, 8 \+1 more\)/)
+  const many = protectedRowRejectionNote(1, 9, [5, 6, 7, 8, 9], [1, 2, 3, 4, 5, 6, 7, 8, 9], noteSession)
+  assert.match(many, /5 CURRENT guarded row\(s\) \(seq 5, 6, 7, 8 \+1 more\)/)
+  assert.match(many, /re-injects the newest AGENTS\.md copy/, 'the instructions reason is named')
+  assert.match(many, /never re-sent|catalog digest/, 'the catalog reason is named too — the two channels fail differently')
 })
 
 test('PR1: handleCompress REJECTS a manual range covering a current instruction row; stale copies still compress', async () => {
@@ -486,10 +510,112 @@ test('PR1: an identity-less instruction row is never guarded (issue #71 review S
 })
 
 test('PR1: the rejection names the compressible slices so the model can re-cut instead of retrying', () => {
-  const note = protectedRowRejectionNote(10, 40, [20], [10, 11, 12, 20, 30, 31])
+  // Hits beyond this small fixture's log exercise the generic-reason fallback:
+  // eventAtOf returns undefined for unknown seqs, so neither channel is named.
+  const session = Session.create('note-slices')
+  appendTurn(session, 1)
+  appendUser(session, longText('q0', 0))
+  const note = protectedRowRejectionNote(10, 40, [20], [10, 11, 12, 20, 30, 31], session)
   assert.match(note, /seq 20/, 'the offending row is named')
+  assert.match(note, /must stay visible on the surface/, 'unknown channels get the generic reason')
   assert.match(note, /seq 10\.\.12 and 30\.\.31/, 'the legal slices on both sides are named')
   assert.match(note, /separate content entries/, 'the model gets an actionable re-cut, not just "shrink the range"')
-  const fullyCovered = protectedRowRejectionNote(10, 12, [10, 12], [10, 11, 12])
+  const fullyCovered = protectedRowRejectionNote(10, 12, [10, 12], [10, 11, 12], session)
   assert.match(fullyCovered, /no part of this span is compressible/, 'a fully covered span says so instead of implying a cut exists')
+})
+
+test('PR: guardedSurfaceSeqsOf guards the newest real user turn', () => {
+  const session = Session.create('user-guard')
+  appendTurn(session, 1)
+  appendUser(session, longText('q0', 0))            // seq 1
+  appendAssistant(session, longText('a0', 1), 1, 1) // seq 2
+  appendUser(session, longText('q1', 2))            // seq 3 (newest user)
+  appendAssistant(session, longText('a1', 3), 1, 3) // seq 4
+
+  const guarded = guardedSurfaceSeqsOf(session)
+  assert.ok(guarded.has(3), 'the newest real user turn (seq 3) is guarded')
+  assert.ok(!guarded.has(1), 'older user turns (seq 1) stay compressible')
+})
+
+test('PR #196: the rejection note distinguishes user-turn hits from instruction-row hits', () => {
+  const session = Session.create('note-variants')
+  appendTurn(session, 1)
+  appendUser(session, longText('q0', 0))                 // seq 1
+  appendInstruction(session, '.\u0000AGENTS.md', 'v1')   // seq 2 — current copy
+  appendUser(session, longText('q1', 1))                 // seq 3 — newest real user turn
+
+  const userOnly = protectedRowRejectionNote(1, 3, [3], [1, 2, 3], session)
+  assert.match(userOnly, /CURRENT guarded row\(s\)/)
+  assert.match(userOnly, /active user message must stay live/)
+  assert.doesNotMatch(userOnly, /AGENTS\.md/, 'the re-injection story does not apply to a user message')
+  assert.doesNotMatch(userOnly, /stale copies/, 'nor does the stale-copy escape')
+  assert.match(userOnly, /seq 1\.\.2/, 'the compressible slice in front of the user turn is named')
+
+  const mixed = protectedRowRejectionNote(1, 3, [2, 3], [1, 2, 3], session)
+  assert.match(mixed, /active user message must stay live/)
+  assert.match(mixed, /re-injects the newest AGENTS\.md copy/, 'both reasons appear when both row kinds are hit')
+  assert.match(mixed, /stale copies/, 'the stale-copy escape still applies to the instruction row')
+
+  const legacy = protectedRowRejectionNote(1, 3, [2], [1, 2, 3])
+  assert.match(legacy, /CURRENT injected instruction row\(s\)/, 'callers without a session keep the pre-#196 wording')
+})
+
+test('PR #196: handleCompress hard-rejects a span covering the newest real user turn; the re-cut lands', async () => {
+  const env = makeEnv()
+  const session = Session.create('user-turn-gate')
+  appendTurn(session, 1)
+  appendUser(session, longText('q0', 0))                // seq 1
+  appendAssistant(session, longText('a0', 1), 1, 1)     // seq 2
+  appendToolCall(session, longText('call0', 2), 'c0')   // seq 3
+  appendToolResult(session, longText('res0', 3), 'c0')  // seq 4
+  appendUser(session, longText('q1', 4))                // seq 5
+  appendAssistant(session, longText('a1', 5), 1, 5)     // seq 6
+  appendToolCall(session, longText('call1', 6), 'c1')   // seq 7
+  appendToolResult(session, longText('res1', 7), 'c1')  // seq 8
+  appendUser(session, longText('q2', 8))                // seq 9 — newest real user turn
+  appendAssistant(session, longText('a2', 9), 1, 9)     // seq 10
+
+  const compress = makeTools(env).find((definition) => definition.name === 'compress')
+  assert.ok(compress, 'compress tool registered')
+  const agent = {
+    id: session.id,
+    session,
+    options: { provider: 'test-provider', model: 'test-model' },
+    ctx: { tokenMeter: undefined },
+  } as never
+  const exec = { callId: 'call-user-gate', name: 'compress', arguments: {}, signal: new AbortController().signal, agent } as never
+  const summary = 'Earlier exchange: JWT access tokens with 15 minute expiry, refresh tokens in Redis with 30 day TTL, login flow in src/auth/login.ts.'
+
+  // A wide span that swallows the active question is refused before the kernel
+  // sees it: nothing durable lands, the user turn is named with its OWN reason
+  // (not the AGENTS.md story), and the re-cut is offered.
+  const result = await compress.execute({ content: [{ startSeq: 1, endSeq: 9, summary }] } as never, exec)
+  const text = (result as { text: string }).text
+  assert.match(text, /Compressed 0 block/)
+  assert.match(text, /seqs \d+\.\.\d+ rejected/)
+  assert.match(text, /seq 9/, 'the active user turn is named')
+  assert.match(text, /active user message must stay live/)
+  assert.doesNotMatch(text, /stale copies/, 'no AGENTS.md escape applies to a user message')
+  assert.ok(
+    !sessionEventsOf(session).some((event) => String((event as { type?: string }).type).startsWith('compaction')),
+    'nothing durable landed — the kernel never saw the rejected range',
+  )
+
+  // The re-cut the note offers succeeds: everything BEFORE the active turn compresses.
+  const recut = await compress.execute({ content: [{ startSeq: 1, endSeq: 8, summary }] } as never, exec)
+  assert.match((recut as { text: string }).text, /Compressed 1 block/, 'span 1..8 (before the user turn) compresses normally')
+
+  // The human path explains the same reason (src/commands.ts passes the session through).
+  const command = acpCommand(env)
+  const run = (rawInput: string) => command.handler({
+    commandId: 'cmd-test' as never,
+    agent,
+    rawInput,
+    signal: new AbortController().signal,
+  } as never) as Promise<{ kind: string; text: string }>
+  const human = await run(`compress 1 10 ${summary}`)
+  assert.equal(human.kind, 'success')
+  assert.match(human.text, /rejected/)
+  assert.match(human.text, /active user message must stay live/, '/acp-prune compress names the user-turn reason too')
+  assert.doesNotMatch(human.text, /injected instruction row/, 'a user-turn-only hit is not mislabelled as an instruction row')
 })

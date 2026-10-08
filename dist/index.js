@@ -3675,22 +3675,29 @@ function isAgentInstructionsRow(event) {
   if (!source) return false;
   return source.kind === "agent-instructions" || sourcePluginOf(source) === "agent-instructions";
 }
+function isSkillCatalogRow(event) {
+  if (event.type !== "user/message") return false;
+  const source = event.data.source;
+  if (source?.kind === "skill-catalog") return true;
+  if (sourcePluginOf(source) === "dsh-tool-skill") return true;
+  return extractText(contentBlocksOfEvent(event)).includes("<available_skills>");
+}
 function classifySurfaceEvent(event) {
   if (isCheckpointNode(event)) return "checkpoint";
   const eventType = event.type;
   if (eventType === "developer/message") return "metadata";
   if (event.type !== "user/message") return "real";
   const source = event.data.source;
-  if (!source) return "real";
+  if (!source) return isSkillCatalogRow(event) ? "instruction" : "real";
   const kind = source.kind;
-  if (kind === "user") return "real";
+  if (kind === "user") return isSkillCatalogRow(event) ? "instruction" : "real";
   const plugin = sourcePluginOf(source);
   if (kind === "plugin" || plugin !== void 0) {
     if (plugin !== void 0 && METADATA_PLUGINS.has(plugin)) return "metadata";
     if (plugin !== void 0 && REAL_CONTENT_PLUGINS.has(plugin)) return "real";
     return "instruction";
   }
-  if (typeof kind !== "string") return "real";
+  if (typeof kind !== "string") return isSkillCatalogRow(event) ? "instruction" : "real";
   if (HOST_INSTRUCTION_KINDS.has(kind)) return "instruction";
   if (REAL_CONTENT_KINDS.has(kind) || AUDITED_RELAY_KINDS.has(kind)) return "real";
   return "instruction";
@@ -4363,13 +4370,31 @@ function newestInstructionSeqsOf(session) {
   }
   return new Set(newest.values());
 }
+function newestSkillCatalogSeqOf(session) {
+  const events = sessionEventsOf(session);
+  for (let seq = events.length - 1; seq >= 0; seq -= 1) {
+    const event = events[seq];
+    if (event !== void 0 && isSkillCatalogRow(event)) return seq;
+  }
+  return null;
+}
 function guardedSurfaceSeqsOf(session) {
   const guarded = /* @__PURE__ */ new Set();
   const newestInstructions = newestInstructionSeqsOf(session);
+  const newestCatalog = newestSkillCatalogSeqOf(session);
   for (const seq of session.surface.nodes) {
     const event = eventAtOf(session, seq);
     if (event === void 0) continue;
     if (isAgentInstructionsRow(event) && newestInstructions.has(seq)) guarded.add(seq);
+    else if (newestCatalog !== null && seq === newestCatalog) guarded.add(seq);
+  }
+  for (let index = session.surface.nodes.length - 1; index >= 0; index -= 1) {
+    const seq = session.surface.nodes[index];
+    const event = eventAtOf(session, seq);
+    if (event !== void 0 && isRealUserTurn(event)) {
+      guarded.add(seq);
+      break;
+    }
   }
   return guarded;
 }
@@ -4393,6 +4418,8 @@ function protectedSurfaceSeqs(session, preserve) {
     }
   }
   for (const seq of newestInstructionSeqsOf(session)) protectedSeqs.add(seq);
+  const newestCatalog = newestSkillCatalogSeqOf(session);
+  if (newestCatalog !== null) protectedSeqs.add(newestCatalog);
   return protectedSeqs;
 }
 function compressibleSegmentsOf(session, fromIndex, toIndex, protectedSeqs, mediaPriceOf) {
@@ -5325,7 +5352,7 @@ function guardedRowsInSpan(guarded, shadowed) {
   const inSpan = new Set(shadowed);
   return [...guarded].filter((seq) => inSpan.has(seq)).sort((a, b) => a - b);
 }
-function protectedRowRejectionNote(start, end, hits, shadowed) {
+function protectedRowRejectionNote(start, end, hits, shadowed, session) {
   const preview = hits.slice(0, 4).join(", ");
   const more = hits.length > 4 ? ` +${hits.length - 4} more` : "";
   const first = shadowed.indexOf(hits[0]);
@@ -5334,7 +5361,39 @@ function protectedRowRejectionNote(start, end, hits, shadowed) {
   const after = last >= 0 && last < shadowed.length - 1 ? shadowed.slice(last + 1) : [];
   const slices = [before, after].filter((slice) => slice.length > 0).map((slice) => `${slice[0]}..${slice[slice.length - 1]}`);
   const recovery = slices.length === 0 ? "no part of this span is compressible while those rows are current \u2014 pick an OLDER span instead (acp_status lists the live ranges)" : `the compressible part of this span is seq ${slices.join(" and ")} \u2014 submit them as separate content entries (or two compress calls), each with its own summary`;
-  return `  seqs ${start}..${end} rejected \u2014 the span covers ${hits.length} CURRENT injected instruction row(s) (seq ${preview}${more}); the host re-injects the newest AGENTS.md copy the moment it leaves the surface, so compressing it reclaims nothing \u2014 ${recovery} (older/stale copies of the same file are fine to compress)`;
+  let hasInstructions = false;
+  let hasCatalog = false;
+  let hasUserTurn = false;
+  if (session !== void 0) {
+    for (const seq of hits) {
+      const event = eventAtOf(session, seq);
+      if (event === void 0) continue;
+      if (!hasInstructions && isAgentInstructionsRow(event)) hasInstructions = true;
+      if (!hasCatalog && isSkillCatalogRow(event)) hasCatalog = true;
+      if (!hasUserTurn && isRealUserTurn(event)) hasUserTurn = true;
+      if (hasInstructions && hasCatalog && hasUserTurn) break;
+    }
+  }
+  const reasons = [];
+  if (session === void 0) {
+    reasons.push("the host re-injects the newest AGENTS.md copy the moment it leaves the surface, so compressing it reclaims nothing");
+  } else if (!hasInstructions && !hasCatalog && !hasUserTurn) {
+    reasons.push("these rows must stay visible on the surface");
+  } else {
+    if (hasInstructions) {
+      reasons.push("the host re-injects the newest AGENTS.md copy the moment it leaves the surface, so compressing it reclaims nothing");
+    }
+    if (hasCatalog) {
+      reasons.push("a folded skill catalog is never re-sent \u2014 its resend gate is the catalog digest, which folding cannot change");
+    }
+    if (hasUserTurn) {
+      reasons.push("the active user message must stay live to preserve conversation intent");
+    }
+  }
+  const userOnly = hasUserTurn && !hasInstructions && !hasCatalog;
+  const rowLabel = hasUserTurn ? "CURRENT guarded row(s)" : "CURRENT injected instruction row(s)";
+  const staleCopyTail = userOnly ? "" : " (older/stale copies of the same channel are fine to compress)";
+  return `  seqs ${start}..${end} rejected \u2014 the span covers ${hits.length} ${rowLabel} (seq ${preview}${more}); ${reasons.join("; ")} \u2014 ${recovery}${staleCopyTail}`;
 }
 function edgeRefForSeq(session, byRaw, seq, role, oppositeSeq) {
   const nodes = session.surface.nodes;
@@ -5417,7 +5476,7 @@ async function handleCompress(env, args, exec) {
     const shadowedSpan = shadowedSeqsOf(session, resolved.start, resolved.end);
     const instructionHits = guardedRowsInSpan(guardedSeqs, shadowedSpan);
     if (instructionHits.length > 0) {
-      rejectedNotes.push(protectedRowRejectionNote(resolved.start, resolved.end, instructionHits, shadowedSpan));
+      rejectedNotes.push(protectedRowRejectionNote(resolved.start, resolved.end, instructionHits, shadowedSpan, session));
       continue;
     }
     const startBlockRef = blockRefForSummarySeq(session, resolved.start);
@@ -5456,7 +5515,7 @@ async function handleCompress(env, args, exec) {
     } else if (duplicateRangeNotes.length > 0 && rejectedNotes.length === 0) {
       text.push("  (nothing compressed \u2014 every range resolved to a span an earlier range in this call already covers)");
     } else if (rejectedNotes.length > 0) {
-      text.push("  (nothing compressed \u2014 every range covered a current injected instruction row; see the rejections above)");
+      text.push("  (nothing compressed \u2014 every range covered a current guarded row, an injected policy row or the active user turn; see the rejections above)");
     }
     return { text: text.join("\n") };
   }
@@ -6061,7 +6120,7 @@ function compressText(env, agent, args) {
   const shadowed = shadowedSeqsOf(session, start, end);
   const instructionHits = guardedRowsInSpan(guardedSurfaceSeqsOf(session), shadowed);
   if (instructionHits.length > 0) {
-    return protectedRowRejectionNote(start, end, instructionHits, shadowed);
+    return protectedRowRejectionNote(start, end, instructionHits, shadowed, session);
   }
   const shadowedTokens = shadowedTokensViaMeter(session, shadowed, agent.ctx);
   const { provider, model } = routeFor(agent);
