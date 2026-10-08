@@ -30,6 +30,7 @@ import {
   rebuildBlockLedger,
   resolveSurfaceRange,
   runCompactionTransaction,
+  liveCheckpointCarriersInSpan,
   shadowedSeqsOf,
   stripOrphanedSurfaceToolMessages,
   openToolCallIds,
@@ -358,6 +359,22 @@ export function guardedRowsInSpan(guarded: ReadonlySet<number>, shadowed: readon
   return [...guarded].filter((seq) => inSpan.has(seq)).sort((a, b) => a - b)
 }
 
+/**
+ * Advisory note for a plain range that would fold a LIVE block's checkpoint
+ * carrier (see `liveCheckpointCarriersInSpan`). Names the block ids the model
+ * can use instead — a block-ref boundary is the call that legitimately folds
+ * carriers (tier 2/3 distillation).
+ */
+export function liveCarrierRejectionNote(
+  start: number,
+  end: number,
+  carriers: readonly { seq: number; kernelBlockId: string }[],
+): string {
+  const list = carriers.map((carrier) => `seq ${carrier.seq} (${carrier.kernelBlockId})`).join(', ')
+  const first = carriers[0]!
+  return `  seqs ${start}..${end} rejected — checkpoint ${list} carries the visible summary of a still-active block, and a plain seq range never supersedes one. Distill it with the block ids instead (compress({ content: [{ startId: "${first.kernelBlockId}", endId: "${first.kernelBlockId}", summary }] })), or cut the span around those seqs.`
+}
+
 export function protectedRowRejectionNote(
   start: number,
   end: number,
@@ -634,6 +651,22 @@ async function handleCompress(env: ToolEnvironment, args: CompressArgs, exec: To
         `billion-context-dsh: seq ${resolved.start}..${resolved.end} has no assigned ref — `
         + 'the range must be on the current surface (run acp_status for the live seq list)',
       )
+    }
+    // A plain (message-ref) range must not fold a LIVE block's checkpoint
+    // carrier. The kernel keeps that carrier visible — our projection marks it
+    // via `summaryOfBlockId`, upstream #335 — but this host transaction replaces
+    // the WHOLE span in one `surfaceOp`, so the carrier would leave the surface
+    // anyway: the block's summary would vanish while the kernel still counts the
+    // block as active. Block-ref boundaries (bN..bM) are the call that SHOULD
+    // fold carriers (tier 2/3), so the reject fires only when NEITHER edge is a
+    // block ref — the same rule the kernel applies (`resolveBoundaries` reports
+    // boundary kind `block` as soon as one edge is a block ref).
+    if (startBlockRef == null && endBlockRef == null) {
+      const carriers = liveCheckpointCarriersInSpan(session, shadowedSpan)
+      if (carriers.length > 0) {
+        rejectedNotes.push(liveCarrierRejectionNote(resolved.start, resolved.end, carriers))
+        continue
+      }
     }
     const rangeKey = `${startRef}::${endRef}`
     if (seenRangeKeys.has(rangeKey)) {

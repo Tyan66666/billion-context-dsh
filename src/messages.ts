@@ -14,6 +14,7 @@
 import type { CoreMessage } from 'acp-kernel'
 import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
 import { eventAtOf, sessionEventsOf } from './session-events.ts'
+import { decodeAcpBlockLedger } from './block-ledger.ts'
 
 // DSH ≥0.1.7's V4 session format admits producer-owned source kinds
 // ('plugin:<name>') and rejects the legacy wrapper shape
@@ -259,7 +260,44 @@ export function overflowMarkerSummary(hiddenCount: number): string {
   return `${ENGINE_SUMMARY_LEAD}: ${hiddenCount} surface message(s) hidden because the provider rejected the request as exceeding the context window. The originals are intact in the session log — use search_context or decompress (see acp_status) to read them, or re-run the compress tool over this range to write a proper summary.]`
 }
 
-export function projectEvent(event: SessionEvent, toolNames?: ReadonlyMap<string, string>): CoreMessage[] {
+/**
+ * Kernel block id per compaction id, read from the durable block ledger.
+ *
+ * The kernel needs the block id on every host-carried checkpoint message:
+ * `CoreMessage.summaryOfBlockId` tells it that this message is the host's own
+ * rendering of a compression block, so a PLAIN message-ref range does not
+ * supersede that block — the kernel keeps the carrier visible and says so in
+ * its warning list (upstream #335, adopted with the 0.0.101 pin). A carrier of
+ * an inactive or unknown block folds normally, so an absent/legacy id degrades
+ * to the pre-#335 behavior instead of over-protecting.
+ *
+ * The join key (the `compaction/summary` `compactionId`) and the two accepted
+ * field locations (rawOutput-embedded payload, then the legacy top-level
+ * member) mirror `rebuildBlockLedger` in src/region.ts. That twin cannot be
+ * called from here: the region layer imports this module, so the dependency
+ * would cycle. `tests/checkpoint-span.test.ts` pins the two in lockstep.
+ */
+export function kernelBlockIdByCompactionId(
+  events: readonly SessionEvent[],
+): ReadonlyMap<string, string> {
+  const map = new Map<string, string>()
+  for (const event of events) {
+    if (event.type !== 'compaction/summary') continue
+    const data = event.data as { compactionId?: unknown; rawOutput?: unknown; kernelBlockId?: unknown }
+    const compactionId = typeof data.compactionId === 'string' ? data.compactionId : null
+    if (compactionId === null) continue
+    const embedded = decodeAcpBlockLedger(data.rawOutput).kernelBlockId
+    const kernelBlockId = embedded ?? (typeof data.kernelBlockId === 'string' ? data.kernelBlockId : null)
+    if (kernelBlockId !== null && kernelBlockId !== undefined) map.set(compactionId, kernelBlockId)
+  }
+  return map
+}
+
+export function projectEvent(
+  event: SessionEvent,
+  toolNames?: ReadonlyMap<string, string>,
+  kernelBlockIds?: ReadonlyMap<string, string>,
+): CoreMessage[] {
   switch (event.type) {
     case 'user/message': {
       const raw = extractText((event.data as { content?: unknown }).content)
@@ -267,7 +305,16 @@ export function projectEvent(event: SessionEvent, toolNames?: ReadonlyMap<string
       // framing already covers new blocks; this catches legacy blocks whose nodes
       // were written before the feature existed).
       const text = isCheckpointNode(event) ? withSummaryFramePrefix(raw) : raw
-      return text.length > 0 ? [{ id: String(event.seq), role: 'user', contentType: 'text', text }] : []
+      if (text.length === 0) return []
+      const compactionId = isCheckpointNode(event) ? checkpointCompactionIdOf(event) : null
+      const summaryOfBlockId = compactionId === null ? undefined : kernelBlockIds?.get(compactionId)
+      return [{
+        id: String(event.seq),
+        role: 'user',
+        contentType: 'text',
+        text,
+        ...(summaryOfBlockId === undefined ? {} : { summaryOfBlockId }),
+      }]
     }
     case 'assistant/message': {
       const content = (event.data as { message?: { content?: unknown } }).message?.content
@@ -325,7 +372,15 @@ export function projectEvent(event: SessionEvent, toolNames?: ReadonlyMap<string
 export function eventsToCoreMessages(events: readonly SessionEvent[], toolNames?: ReadonlyMap<string, string>): CoreMessage[] {
   const index = toolNames ?? buildToolCallIndex(events)
   const out: CoreMessage[] = []
-  for (const event of events) out.push(...projectEvent(event, index))
+  // The compactionId → block-id map is built LAZILY: a session with no
+  // checkpoint carrier on its surface pays nothing, and a session with them
+  // pays one pass over the log (the numbers only matter for the checkpoint
+  // branch of projectEvent).
+  let kernelBlockIds: ReadonlyMap<string, string> | null = null
+  for (const event of events) {
+    if (kernelBlockIds === null && isCheckpointNode(event)) kernelBlockIds = kernelBlockIdByCompactionId(events)
+    out.push(...projectEvent(event, index, kernelBlockIds ?? undefined))
+  }
   return out
 }
 

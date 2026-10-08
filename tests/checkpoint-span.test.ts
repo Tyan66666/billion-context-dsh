@@ -14,31 +14,28 @@
  *    call-less empty assistant nodes are not anchorable at all. The tier-3 walk in
  *    `edgeRefForSeq` therefore never walks forward into a later checkpoint.
  *
- * 2. (CHARACTERIZATION — flips when the upstream fix lands) A PLAIN range whose
- *    span crosses a checkpoint folds that checkpoint message like any other
- *    message: the kernel's summary filter is `isSummaryMessageId` (the
- *    `acp_summary_*` prefix of summaries the kernel renders itself), and a
- *    host-carried checkpoint is a plain `user/message` whose CoreMessage id is its
- *    surface seq, so nothing recognizes it as a summary. The behavior stays
- *    coherent (the superseded block is recorded as a parent, the tier is reported,
- *    the originals stay recoverable from the log) but the absorbed summary text
- *    silently leaves the visible surface.
- *
- *    UPSTREAM: ranxianglei/acp-kernel#335 (filed 2026-09-20) — a
- *    host-carried summary should be recognizable so a plain range (neither edge a
- *    block ref) skips it, while a block-ref boundary keeps distilling (tier 2/3,
- *    covered by tests/tools.test.ts). When that lands: flip the assertion in
- *    `folds it like any other message` to `does NOT fold it`, keep the parent/tier
- *    assertions, and delete this marker (AGENTS.md rule 11 discipline).
+ * 2. (CONTRACT since the acp-kernel 0.0.101 pin) A PLAIN range whose span
+ *    crosses a live block's checkpoint carrier is REJECTED, and every carrier is
+ *    marked for the kernel. The kernel recognizes a host-carried summary through
+ *    `CoreMessage.summaryOfBlockId` (upstream #335, fixed by acp-kernel #338): for
+ *    a plain message-ref range it keeps such a carrier visible and reports the
+ *    exclusion in its warning list, while block-ref boundaries (bN..bM, tier 2/3)
+ *    still fold it. Our projection attaches that marker
+ *    (`kernelBlockIdByCompactionId` → `projectEvent`), and because the host
+ *    transaction replaces the whole span in ONE `surfaceOp` — which would hide
+ *    the carrier the kernel just kept — the compress path (and
+ *    `/acp-prune compress`) refuses the span and hands back the block-id call
+ *    instead. Before the pin the crossed checkpoint was folded silently: the
+ *    superseded block's summary left the visible surface with no signal.
  */
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { createCore, type CompressionCore } from 'acp-kernel'
 import { Session } from '@deepseek-ai/dsh-session'
-import { allLogMessages, isCheckpointNode } from '../src/messages.ts'
+import { allLogMessages, eventsToCoreMessages, isCheckpointNode } from '../src/messages.ts'
 import { kernelConfigFor } from '../src/config.ts'
 import { AcpStateStore } from '../src/state.ts'
-import { blockRefForSummarySeq, rebuildBlockLedger, resolveSurfaceRange, shadowedSeqsOf } from '../src/region.ts'
+import { blockRegistry, blockRefForSummarySeq, rebuildBlockLedger, resolveSurfaceRange, shadowedSeqsOf } from '../src/region.ts'
 import { edgeRefForSeq, makeTools, type ToolEnvironment } from '../src/tools.ts'
 import {
   appendAssistant,
@@ -219,7 +216,7 @@ test('cross-checkpoint span: no range edge ever takes a checkpoint ref the model
   )
 })
 
-test('cross-checkpoint span: a PLAIN range folds the checkpoint like any other message (characterization)', async () => {
+test('cross-checkpoint span: a PLAIN range that crosses a live checkpoint carrier is rejected', async () => {
   const env = makeEnv()
   const session = crossCheckpointFixture('checkpoint-plain-range')
   const compress = tool(env, 'compress')
@@ -230,49 +227,46 @@ test('cross-checkpoint span: a PLAIN range folds the checkpoint like any other m
   assert.match((first as { text: string }).text, /Compressed 1 block/)
 
   const checkpointSeq = checkpointSeqs(session)[0]!
-  // Push the checkpoint out of the protected recent/last-user window, otherwise the
-  // host-side protection (not a kernel barrier) hides it from the fold.
+  // Push the checkpoint out of the protected recent/last-user window: this test is
+  // about the carrier guard, not about host-side protection.
   appendTraffic(session, 17, 8)
   const lastSeq = session.surface.nodes[session.surface.nodes.length - 1]!
   // End two nodes early: since issue #196 the newest real user turn (lastSeq - 1)
-  // is hard-guarded engine-side, and this test's subject is the CHECKPOINT fold,
-  // not the user-turn gate. The span still crosses the checkpoint positionally.
+  // is hard-guarded engine-side. The span still crosses the checkpoint.
   const second = await compress.execute(
     { content: [{ startSeq: 1, endSeq: lastSeq - 2, summary: `${summary} Whole span.` }] } as never,
     execStub(session, 'call-checkpoint-plain-2'),
   )
   const text = (second as { text: string }).text
-  assert.match(text, /Compressed 1 block/)
-  // Neither edge is a block ref, so the kernel reports a plain fold: no tier upgrade.
-  assert.match(text, /tier 1/)
+  assert.match(text, /Compressed 0 block/)
+  assert.match(text, /still-active block/, 'the reject names the reason')
+  assert.match(text, /startId: "b1"/, 'the reject hands back the block-id call')
 
   const ledger = rebuildBlockLedger(session.snapshotEvents())
-  assert.equal(ledger.length, 2, 'two blocks: the first fold and the range that swallowed it')
-  const newest = ledger[ledger.length - 1]!
-  const folded = newest.effectiveMessageIds ?? []
-
-  // CHARACTERIZATION (see the file header): the checkpoint message is folded.
+  assert.equal(ledger.length, 1, 'no second block: the crossing span never landed')
   assert.ok(
-    folded.includes(String(checkpointSeq)),
-    `current behavior: the crossed checkpoint (seq ${checkpointSeq}) is folded into the new block; `
-    + `effective ids = ${folded.join(',')}`,
-  )
-  // Coherence that must hold in either world:
-  assert.deepEqual(newest.parentBlockIds, [ledger[0]!.blockId], 'the superseded block is recorded as a parent')
-  assert.equal(newest.tier, 1, 'a plain (non-block-boundary) range does not upgrade the tier')
-  assert.ok(
-    newest.shadowedSeqs.includes(checkpointSeq),
-    'the shadowed slice names the checkpoint, so the transaction is internally consistent',
+    session.surface.nodes.includes(checkpointSeq as never),
+    `the live carrier stays visible on the surface (seq ${checkpointSeq})`,
   )
 
-  // Nothing is lost: the superseded block still decompresses from the log.
+  // The projection marks the carrier with its kernel block id — the datum the
+  // kernel's exclusion rests on. Pinned against `blockRegistry` so the two
+  // mappings (projection vs ledger rebuild) cannot drift apart.
+  const projected = eventsToCoreMessages(session.snapshotEvents()).find((message) => message.id === String(checkpointSeq))
+  assert.equal(
+    projected?.summaryOfBlockId,
+    blockRegistry(session)[0]!.kernelBlockId,
+    'the checkpoint carrier carries its kernel block id',
+  )
+
+  // Nothing is lost: the block still decompresses from the log.
   const decompress = tool(env, 'decompress')
   const recovered = await decompress.execute({ blockId: ledger[0]!.blockId, inline: true } as never, exec)
   const recoveredText = (recovered as { text: string }).text
   assert.match(recoveredText, /a6|r8/, 'the superseded block\'s originals are still recoverable')
 })
 
-test('cross-checkpoint span: while the checkpoint is inside the protection window it is not folded', async () => {
+test('cross-checkpoint span: the carrier guard holds while the checkpoint is inside the protection window too', async () => {
   const env = makeEnv()
   const session = crossCheckpointFixture('checkpoint-protected')
   const compress = tool(env, 'compress')
@@ -284,9 +278,11 @@ test('cross-checkpoint span: while the checkpoint is inside the protection windo
   assert.match((first as { text: string }).text, /Compressed 1 block/)
   const checkpointSeq = checkpointSeqs(session)[0]!
 
-  // No fresh traffic: the checkpoint is still within the recent zone, so the
-  // protected-message filter removes it from the fold (this is host protection,
-  // NOT a kernel checkpoint barrier — see the test above for the other side).
+  // No fresh traffic: the checkpoint is still within the recent zone. Inside the
+  // window the kernel protects the carrier from folding, and outside it the
+  // kernel's #335 exclusion does — in BOTH worlds a plain span that crosses the
+  // carrier is refused rather than folded (the single-op replace below would hide
+  // what the kernel kept visible either way).
   // The span ends two nodes early: since issue #196 the newest real user turn
   // (lastSeq - 1) is hard-guarded; the span still crosses the checkpoint.
   const lastSeq = session.surface.nodes[session.surface.nodes.length - 1]!
@@ -294,12 +290,14 @@ test('cross-checkpoint span: while the checkpoint is inside the protection windo
     { content: [{ startSeq: 1, endSeq: lastSeq - 2, summary: `${SUMMARY} Whole span.` }] } as never,
     execStub(session, 'call-checkpoint-protected-2'),
   )
-  assert.match((second as { text: string }).text, /Compressed 1 block/)
+  const text = (second as { text: string }).text
+  assert.match(text, /Compressed 0 block/)
+  assert.match(text, /still-active block/, 'host protection and the carrier guard agree: refused, not folded')
 
   const ledger = rebuildBlockLedger(session.snapshotEvents())
-  const folded = ledger[ledger.length - 1]!.effectiveMessageIds ?? []
+  assert.equal(ledger.length, 1, 'the crossing span never landed')
   assert.ok(
-    !folded.includes(String(checkpointSeq)),
-    `inside the protection window the checkpoint is excluded from the fold (seq ${checkpointSeq})`,
+    session.surface.nodes.includes(checkpointSeq as never),
+    `the carrier is still visible (seq ${checkpointSeq})`,
   )
 })
