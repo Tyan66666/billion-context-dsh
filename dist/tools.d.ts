@@ -121,8 +121,12 @@ export declare const compressParameters: {
  * manual path consistent with the system-side GC's iron rule (PR2: never
  * clear a group's newest row). STALE copies stay compressible: removing them
  * while the newest stays visible is the actual cleanup and triggers no
- * re-injection. The range table (buildCompressibleSeqRanges) never offers
- * these rows, so the gate only fires on hand-built ranges.
+ * re-injection. Skill-catalog rows joined the guard set for a DIFFERENT
+ * reason (issue #185): they are not self-healing at all — the host resends
+ * the catalog only when its digest changes, so a folded catalog stays gone
+ * until the catalog actually changes. The range table
+ * (buildCompressibleSeqRanges) never offers these rows, so the gate only fires
+ * on hand-built ranges.
  *
  * `guardedRowsInSpan` is the overlap probe. It takes the POSITIONAL span the
  * transaction will actually shadow (`shadowedSeqsOf`), never a numeric

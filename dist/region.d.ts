@@ -302,6 +302,17 @@ export declare function deferCompressPairHide(session: Session, callId: string, 
  */
 export declare function newestInstructionSeqsOf(session: Session): Set<number>;
 /**
+ * Newest skill-catalog row (issue #185). ONE group: every catalog row is the
+ * full current list, so each new one supersedes all earlier ones (unlike
+ * agent-instructions, which group per file scope). The guard matters because
+ * the host does NOT re-inject a folded catalog — dsh-tool-skill's resend gate
+ * is the catalog DIGEST, and shadowing the visible row changes nothing about
+ * it, so the model loses skill discovery until the catalog actually changes.
+ * Tail-scan the log like newestInstructionSeqsOf; null when the session never
+ * carried a catalog.
+ */
+export declare function newestSkillCatalogSeqOf(session: Session): number | null;
+/**
  * Surface seqs NO caller may compress: the CURRENT (newest) injected
  * agent-instructions row of every scope (restricted to rows still visible on
  * the surface — one definition of "current" — `newestInstructionSeqsOf`) PLUS
@@ -314,13 +325,17 @@ export declare function newestInstructionSeqsOf(session: Session): Set<number>;
  * span against this set and HARD-REJECT a covering range before the kernel
  * applies it, so nothing durable lands and no phantom block can exist. This
  * supersedes the earlier F7 draft (warn only): folding a current copy reclaims
- * nothing — the host re-injects it — and folding the active user turn loses
- * the conversation intent, so neither has a legitimate outcome to warn about.
- * Deliberately NARROW (issue #71 review F4): for instruction rows, only
- * CURRENT ones — the audited loop driver. Engine-authored metadata rows
- * (nudge echo, compress-pair stub) stay foldable like main, and STALE copies
- * of the same file stay compressible — removing them while the newest copy
- * stays visible is the real cleanup.
+ * nothing — the host re-injects it — and folding the active user turn loses the
+ * conversation intent, so neither has a legitimate outcome to warn about.
+ * Deliberately NARROW (issue #71 review F4): for instruction rows, only CURRENT
+ * ones — the audited loop driver; for skill catalogs (issue #185) it is the ONE
+ * visible copy, because unlike AGENTS.md the host does NOT re-send a folded
+ * catalog (resend is keyed on the digest, which a fold cannot change), so
+ * folding it loses skill discovery until the catalog actually changes.
+ * Engine-authored metadata rows (nudge echo, compress-pair stub) stay foldable
+ * like main, and STALE copies (older AGENTS.md scopes, superseded catalog rows)
+ * stay compressible — removing them while the newest copy stays visible is the
+ * real cleanup.
  */
 export declare function guardedSurfaceSeqsOf(session: Session): Set<number>;
 /**

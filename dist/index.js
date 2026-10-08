@@ -3675,22 +3675,29 @@ function isAgentInstructionsRow(event) {
   if (!source) return false;
   return source.kind === "agent-instructions" || sourcePluginOf(source) === "agent-instructions";
 }
+function isSkillCatalogRow(event) {
+  if (event.type !== "user/message") return false;
+  const source = event.data.source;
+  if (source?.kind === "skill-catalog") return true;
+  if (sourcePluginOf(source) === "dsh-tool-skill") return true;
+  return extractText(contentBlocksOfEvent(event)).includes("<available_skills>");
+}
 function classifySurfaceEvent(event) {
   if (isCheckpointNode(event)) return "checkpoint";
   const eventType = event.type;
   if (eventType === "developer/message") return "metadata";
   if (event.type !== "user/message") return "real";
   const source = event.data.source;
-  if (!source) return "real";
+  if (!source) return isSkillCatalogRow(event) ? "instruction" : "real";
   const kind = source.kind;
-  if (kind === "user") return "real";
+  if (kind === "user") return isSkillCatalogRow(event) ? "instruction" : "real";
   const plugin = sourcePluginOf(source);
   if (kind === "plugin" || plugin !== void 0) {
     if (plugin !== void 0 && METADATA_PLUGINS.has(plugin)) return "metadata";
     if (plugin !== void 0 && REAL_CONTENT_PLUGINS.has(plugin)) return "real";
     return "instruction";
   }
-  if (typeof kind !== "string") return "real";
+  if (typeof kind !== "string") return isSkillCatalogRow(event) ? "instruction" : "real";
   if (HOST_INSTRUCTION_KINDS.has(kind)) return "instruction";
   if (REAL_CONTENT_KINDS.has(kind) || AUDITED_RELAY_KINDS.has(kind)) return "real";
   return "instruction";
@@ -4363,13 +4370,23 @@ function newestInstructionSeqsOf(session) {
   }
   return new Set(newest.values());
 }
+function newestSkillCatalogSeqOf(session) {
+  const events = sessionEventsOf(session);
+  for (let seq = events.length - 1; seq >= 0; seq -= 1) {
+    const event = events[seq];
+    if (event !== void 0 && isSkillCatalogRow(event)) return seq;
+  }
+  return null;
+}
 function guardedSurfaceSeqsOf(session) {
   const guarded = /* @__PURE__ */ new Set();
   const newestInstructions = newestInstructionSeqsOf(session);
+  const newestCatalog = newestSkillCatalogSeqOf(session);
   for (const seq of session.surface.nodes) {
     const event = eventAtOf(session, seq);
     if (event === void 0) continue;
     if (isAgentInstructionsRow(event) && newestInstructions.has(seq)) guarded.add(seq);
+    else if (newestCatalog !== null && seq === newestCatalog) guarded.add(seq);
   }
   for (let index = session.surface.nodes.length - 1; index >= 0; index -= 1) {
     const seq = session.surface.nodes[index];
@@ -4401,6 +4418,8 @@ function protectedSurfaceSeqs(session, preserve) {
     }
   }
   for (const seq of newestInstructionSeqsOf(session)) protectedSeqs.add(seq);
+  const newestCatalog = newestSkillCatalogSeqOf(session);
+  if (newestCatalog !== null) protectedSeqs.add(newestCatalog);
   return protectedSeqs;
 }
 function compressibleSegmentsOf(session, fromIndex, toIndex, protectedSeqs, mediaPriceOf) {
@@ -5343,27 +5362,38 @@ function protectedRowRejectionNote(start, end, hits, shadowed, session) {
   const slices = [before, after].filter((slice) => slice.length > 0).map((slice) => `${slice[0]}..${slice[slice.length - 1]}`);
   const recovery = slices.length === 0 ? "no part of this span is compressible while those rows are current \u2014 pick an OLDER span instead (acp_status lists the live ranges)" : `the compressible part of this span is seq ${slices.join(" and ")} \u2014 submit them as separate content entries (or two compress calls), each with its own summary`;
   let hasInstructions = false;
+  let hasCatalog = false;
   let hasUserTurn = false;
   if (session !== void 0) {
     for (const seq of hits) {
       const event = eventAtOf(session, seq);
       if (event === void 0) continue;
       if (!hasInstructions && isAgentInstructionsRow(event)) hasInstructions = true;
+      if (!hasCatalog && isSkillCatalogRow(event)) hasCatalog = true;
       if (!hasUserTurn && isRealUserTurn(event)) hasUserTurn = true;
+      if (hasInstructions && hasCatalog && hasUserTurn) break;
     }
   }
-  const userOnly = hasUserTurn && !hasInstructions;
   const reasons = [];
-  if (!userOnly) {
+  if (session === void 0) {
     reasons.push("the host re-injects the newest AGENTS.md copy the moment it leaves the surface, so compressing it reclaims nothing");
+  } else if (!hasInstructions && !hasCatalog && !hasUserTurn) {
+    reasons.push("these rows must stay visible on the surface");
+  } else {
+    if (hasInstructions) {
+      reasons.push("the host re-injects the newest AGENTS.md copy the moment it leaves the surface, so compressing it reclaims nothing");
+    }
+    if (hasCatalog) {
+      reasons.push("a folded skill catalog is never re-sent \u2014 its resend gate is the catalog digest, which folding cannot change");
+    }
+    if (hasUserTurn) {
+      reasons.push("the active user message must stay live to preserve conversation intent");
+    }
   }
-  if (hasUserTurn) {
-    reasons.push("the active user message must stay live to preserve conversation intent");
-  }
-  const reasonText = reasons.join("; ");
+  const userOnly = hasUserTurn && !hasInstructions && !hasCatalog;
   const rowLabel = hasUserTurn ? "CURRENT guarded row(s)" : "CURRENT injected instruction row(s)";
-  const staleCopyTail = userOnly ? "" : " (older/stale copies of the same file are fine to compress)";
-  return `  seqs ${start}..${end} rejected \u2014 the span covers ${hits.length} ${rowLabel} (seq ${preview}${more}); ${reasonText} \u2014 ${recovery}${staleCopyTail}`;
+  const staleCopyTail = userOnly ? "" : " (older/stale copies of the same channel are fine to compress)";
+  return `  seqs ${start}..${end} rejected \u2014 the span covers ${hits.length} ${rowLabel} (seq ${preview}${more}); ${reasons.join("; ")} \u2014 ${recovery}${staleCopyTail}`;
 }
 function edgeRefForSeq(session, byRaw, seq, role, oppositeSeq) {
   const nodes = session.surface.nodes;
