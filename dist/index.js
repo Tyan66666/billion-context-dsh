@@ -3460,8 +3460,7 @@ function stringifyArgs(args) {
 function toolCallIdOfResultEvent(event) {
   if (event.type !== "tool/result") return null;
   const message = event.data.message;
-  const block = Array.isArray(message?.content) ? message.content.find((candidate) => candidate?.type === "tool-result") : void 0;
-  const id = block?.toolCallId ?? message?.source?.callId;
+  const id = message?.toolCallId ?? message?.source?.callId;
   return typeof id === "string" ? id : null;
 }
 function buildToolCallIndex(events) {
@@ -3677,6 +3676,7 @@ function isAgentInstructionsRow(event) {
 }
 function classifySurfaceEvent(event) {
   if (isCheckpointNode(event)) return "checkpoint";
+  if (event.type === "developer/message") return "metadata";
   if (event.type !== "user/message") return "real";
   const source = event.data.source;
   if (!source) return "real";
@@ -4038,10 +4038,15 @@ function prefixSummaryBlocks(blocks) {
 }
 function checkpointSourceFor(session, compactionId) {
   const source = compactCheckpointSource(compactionId);
-  if (!(source.kind === "plugin" && source.plugin === "compact")) return source;
+  const shape = source;
+  if (shape.kind !== "plugin" || shape.plugin !== "compact") return source;
   if (Number(session.header.version) < 4) return source;
-  const { kind: _kind, plugin: _plugin, ...rest } = source;
-  return Object.freeze({ ...rest, kind: "compact-checkpoint" });
+  const { compactionId: id, sourceCommandId } = source;
+  return Object.freeze({
+    kind: "compact-checkpoint",
+    compactionId: id,
+    ...sourceCommandId === void 0 ? {} : { sourceCommandId }
+  });
 }
 function runCompactionTransaction(session, input) {
   assertNoActiveCompaction(sessionEventsOf(session));
@@ -6289,9 +6294,9 @@ var AcpCompactionEngine = class extends CompactionEngine {
   compressCallIdsToHide = /* @__PURE__ */ new Set();
   /** Per provider/model route the resolved window (probe failures cached too). */
   windowCache = /* @__PURE__ */ new Map();
-  /** Live settings snapshot thunk (composition → user settings layer); swapped when the settings provider attaches (SettingsProvider.installSection). */
+  /** Live settings snapshot thunk (composition row as of this line; a registered settings section would swap it). */
   readSettingsSource = () => resolveAcpSettings({});
-  /** The settings service, captured lazily for /acp-prune config (undefined in provider-less processes). */
+  /** The settings service for /acp-prune config; undefined until the engine declares a static Config schema and the host registers the section. */
   settingsService;
   /** /acp-prune config read/write surface. */
   settingsCommand;
@@ -6310,44 +6315,14 @@ var AcpCompactionEngine = class extends CompactionEngine {
     setDocCacheCap(128 * 1024 * 1024);
     this.store = new AcpStateStore();
     const compositionEntry = presetFilledSettingsEntry(config);
-    let current = resolveAcpSettings(compositionEntry);
+    const current = resolveAcpSettings(compositionEntry);
     this.readSettingsSource = () => current;
     const engine = this;
-    const applySettings = () => {
-      const next = this.readSettingsSource();
-      const prev = current;
-      current = next;
-      try {
-        engine.onSettingsChanged(prev, next);
-      } catch (error) {
-        this.ctx.logger.warn(`billion-context-dsh: applying settings change failed: ${String(error)}`);
-      }
-    };
     this.settingsCommand = makeSettingsCommandSurface(() => this.settingsService, () => current);
     if (this.config.settingsEnabled !== false) {
-      ctx.inject(["settings"], (settingsCtx) => {
-        if (typeof settingsCtx.settings?.installSection !== "function") {
-          this.ctx.logger.warn(
-            "billion-context-dsh: host settings service has no installSection (removed in dsh-settings >= 0.1.7) \u2014 the compaction-acp settings section is not registered; the six knobs keep their composition values and /acp-prune config reports the section unavailable"
-          );
-          return void 0;
-        }
-        settingsCtx.settings.installSection(ctx, ACP_SETTINGS_NAMESPACE, AcpSettingsSchema, compositionEntry, {
-          // The seam's source type follows the entry it registered, so `source`
-          // is a partial view of the settings; re-resolve it into a
-          // fully-defaulted snapshot so every reader sees the same shape the
-          // composition path produced.
-          setSource: (source) => {
-            this.readSettingsSource = () => resolveAcpSettings(source());
-          },
-          onChange: applySettings
-        });
-        this.settingsService = settingsCtx.settings;
-        return () => {
-          this.settingsService = void 0;
-          this.readSettingsSource = () => current;
-        };
-      });
+      this.ctx.logger.warn(
+        "billion-context-dsh: runtime settings are not registered on the 0.2.0 settings line yet (the engine declares no static Config schema for SettingsForms) \u2014 the six knobs keep their composition values and /acp-prune config reports the section unavailable"
+      );
     }
     const env = {
       kernel: this.kernel,
@@ -6421,8 +6396,7 @@ var AcpCompactionEngine = class extends CompactionEngine {
       }
       if (event.type !== "tool/result") return;
       const message = event.data.message;
-      const block = message.content[0];
-      const callId = block?.toolCallId ?? message.source.callId;
+      const callId = message.toolCallId ?? message.source.callId;
       if (typeof callId !== "string" || !this.compressCallIdsToHide.has(callId)) return;
       this.compressCallIdsToHide.delete(callId);
       deferCompressPairHide(session, callId, event.seq, (error) => {

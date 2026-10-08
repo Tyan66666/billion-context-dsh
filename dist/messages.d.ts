@@ -12,7 +12,7 @@
  */
 import type { CoreMessage } from 'acp-kernel';
 import type { Session, SessionEvent } from '@deepseek-ai/dsh-session';
-declare module '@deepseek-ai/dsh-llm/message' {
+declare module '@deepseek-ai/dsh-llm' {
     interface MessageSourceMap {
         acpNudge: {
             kind: 'plugin:acp-nudge';
@@ -30,11 +30,13 @@ declare module '@deepseek-ai/dsh-llm/message' {
 /**
  * Extract plain text from a DSH content block array or string.
  *
- * Recursive: a real DSH `tool-result` block is `{ type: 'tool-result',
- * toolCallId, content: ContentBlock[] }` — the inner `content` array holds
- * the actual `text` blocks, so a top-level-only walk would drop every tool
- * result from the projection (and with it the seq's ref assignment, breaking
- * compress boundary resolution). Nested arrays are flattened depth-first.
+ * On the 0.2.0 seam line a tool result is a first-class ToolResultMessage
+ * whose content blocks are plain text/image/file blocks — no special unwrap
+ * needed (pre-0.2.0 hosts wrapped the payload in a nested `tool-result`
+ * block; that shape no longer loads on this line). The recursive branch
+ * below still flattens arbitrary nesting depth-first, because a
+ * top-level-only walk would drop text and with it the seq's ref assignment,
+ * breaking compress boundary resolution.
  *
  * Non-text blocks that the provider still bills for render as a deterministic
  * one-line placeholder instead of vanishing (issue #117). An `image`/`file`
@@ -68,10 +70,13 @@ export declare function toolCallsOf(content: unknown): ToolCallBlock[];
 /**
  * The tool-call id of one tool/result surface message, or null.
  *
- * Real DSH tool-result events carry NO `message.toolCallId` (hard-won rule
- * 10): the identity lives in the nested `{ type: 'tool-result', toolCallId }`
- * content block, falling back to `message.source.callId`. Shared with
- * `src/region.ts`'s call/result pairing — one implementation, never a copy.
+ * On the 0.2.0 seam line the identity is a MESSAGE-LEVEL field:
+ * `ToolResultMessage.toolCallId` (required on the type), with
+ * `source.callId` carrying the same value as fallback. Pre-0.2.0 hosts put
+ * it in a nested `tool-result` content block instead — that shape no longer
+ * loads on this line, so there is deliberately no dual-shape read here.
+ * Shared with `src/region.ts`'s call/result pairing — one implementation,
+ * never a copy.
  */
 export declare function toolCallIdOfResultEvent(event: SessionEvent): string | null;
 /**
@@ -86,11 +91,12 @@ export declare function buildToolCallIndex(events: readonly SessionEvent[]): Rea
  * Project one surface message event into CoreMessage(s).
  *  - user/message      → user text (verbatim content)
  *  - assistant/message → assistant text, or one CoreMessage per tool-call
- *  - tool/result       → tool result (role 'tool'); toolName/toolCallId are
- *                        backfilled from `toolNames` (assistant tool-call
- *                        index) — real DSH events do not carry them at the
- *                        message level. Without an index the result stays
- *                        untagged (`toolName: ''`), never "text".
+ *  - tool/result       → tool result (role 'tool'); toolCallId is a
+ *                        message-level field on the 0.2.0 line and toolName
+ *                        is backfilled from `toolNames` (assistant tool-call
+ *                        index) — the event never carries a tool name.
+ *                        Without an index the result stays untagged
+ *                        (`toolName: ''`), never "text".
  * Non-surface events project to nothing.
  */
 /**

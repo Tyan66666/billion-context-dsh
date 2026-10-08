@@ -125,8 +125,11 @@ function kernelRefs(env: ToolEnvironment, session: Session): Record<string, stri
 function checkpointSeqs(session: Session): number[] {
   const seqs: number[] = []
   for (const event of session.snapshotEvents()) {
-    // ONE shared classifier: the stored checkpoint source shape follows the installed
-    // dsh-compaction line ({kind:'plugin',plugin:'compact'} ≤0.1.6 vs {kind:'compact-checkpoint'} ≥0.1.7).
+    // ONE shared classifier (the engine's own predicate, never a local copy):
+    // the stored source shape follows the installed dsh-compaction line — the
+    // legacy {kind:'plugin',plugin:'compact'} wrapper (measured on the
+    // 0.1.5-rc.2 closure) vs the {kind:'compact-checkpoint'} producer kind
+    // (measured on 0.2.0-rc.2).
     if (isCheckpointNode(event)) seqs.push(Number((event as { seq?: number }).seq))
   }
   return seqs

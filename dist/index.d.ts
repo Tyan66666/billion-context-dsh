@@ -164,9 +164,9 @@ export declare class AcpCompactionEngine extends CompactionEngine {
     private readonly compressCallIdsToHide;
     /** Per provider/model route the resolved window (probe failures cached too). */
     private readonly windowCache;
-    /** Live settings snapshot thunk (composition → user settings layer); swapped when the settings provider attaches (SettingsProvider.installSection). */
+    /** Live settings snapshot thunk (composition row as of this line; a registered settings section would swap it). */
     private readSettingsSource;
-    /** The settings service, captured lazily for /acp-prune config (undefined in provider-less processes). */
+    /** The settings service for /acp-prune config; undefined until the engine declares a static Config schema and the host registers the section. */
     private settingsService;
     /** /acp-prune config read/write surface. */
     readonly settingsCommand: SettingsCommandSurface;

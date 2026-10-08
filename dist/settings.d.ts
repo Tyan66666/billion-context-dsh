@@ -1,9 +1,15 @@
 /**
- * M6 — runtime settings integration. Wires the engine's scalar knobs into the
- * host's user-settings layer (`~/.dsh/settings.yaml`, section
- * `compaction-acp`) through the official consumer seam
- * `SettingsProvider.installSection` (@deepseek-ai/dsh-settings), so editing the file
- * applies to RUNNING sessions without a restart.
+ * M6 — runtime settings integration. Exposes the engine's scalar knobs in the
+ * host's per-profile settings layer under the section `compaction-acp`, so
+ * editing it applies to RUNNING sessions without a restart.
+ *
+ * On the 0.2.0 line the section is projected from each plugin's OWN
+ * `static Config` schema by dsh-settings' `SettingsForms` (ctx.settings) —
+ * there is no consumer-side installSection anymore. This engine declares no
+ * static Config yet (tracked follow-up: authoring the full AcpConfig schema
+ * against cosmokit's validation strictness), so the service handle is never
+ * captured on this line and `/acp-prune config` degrades to advice; the pure
+ * helpers below keep feeding the live snapshot every knob consumer reads.
  *
  * Layering (per key): schemastery schema default → composition-row subset
  * (the `base` layer, filtered by `filterSettingsEntry`) → user section.
@@ -18,13 +24,24 @@
  * @module billion-context-dsh/settings
  */
 import z from '@deepseek-ai/schemastery';
-import type { SettingsDescriptor, SettingsProvider } from '@deepseek-ai/dsh-settings';
+import type { SettingsDescriptor } from '@deepseek-ai/dsh-settings';
+/**
+ * The slice of the host's settings service this engine drives. Structural on
+ * purpose: the 0.2.0 line satisfies it with `SettingsForms` (ctx.settings),
+ * whose describe()/update()/replace() signatures match exactly, and test
+ * fakes need only these three methods.
+ */
+export interface AcpSettingsService {
+    describe(options?: {
+        redactSecrets?: boolean;
+    }): readonly SettingsDescriptor[];
+    update(ns: string, patch: object, expectedRevision?: number): Promise<void>;
+    replace(ns: string, section: object, expectedRevision?: number): Promise<void>;
+}
 /**
  * The host settings namespace — same id as the bundle/composition row, so "the
- * settings.yaml section" and "the cordis.patch.yml row" are one mental object.
- * A plain string literal as of the 0.1.5 line: the seam's `settingsNamespace()`
- * runtime helper is gone and the brand is applied at the call site instead
- * (`installSection`'s `Namespace & SettingsNamespaceInput<Namespace>`).
+ * profile patch section" and "the cordis.patch.yml row" are one mental object.
+ * A plain string: SettingsForms' write methods take the unbranded entry id.
  */
 export declare const ACP_SETTINGS_NAMESPACE = "compaction-acp";
 /** The six knobs exposed to the runtime settings layer. Order defines /acp-prune config listing order. */
@@ -84,21 +101,21 @@ export declare function resolveAcpSettings(input: AcpSettingsInput): AcpSettings
  * today's behavior. Integer constraint uses `.step(1).min(1)` because
  * schemastery 3.18.x has no `.int()`/`.positive()` helpers.
  */
-export declare const AcpSettingsSchema: z<Schemastery.ObjectS<{
-    modelContextLimit: z<number, number>;
-    autoModelContextLimit: z<boolean, boolean>;
-    nudgeMinContextLimitPct: z<number, number>;
-    nudgeMaxContextLimitPct: z<number, number>;
-    nudgeEmergencyThresholdPct: z<number, number>;
-    autoNudge: z<boolean, boolean>;
-}>, Schemastery.ObjectT<{
-    modelContextLimit: z<number, number>;
-    autoModelContextLimit: z<boolean, boolean>;
-    nudgeMinContextLimitPct: z<number, number>;
-    nudgeMaxContextLimitPct: z<number, number>;
-    nudgeEmergencyThresholdPct: z<number, number>;
-    autoNudge: z<boolean, boolean>;
-}>>;
+export declare const AcpSettingsSchema: z<Schemastery.ObjectS<NoInfer<{
+    modelContextLimit: z<number, number, "plain">;
+    autoModelContextLimit: z<boolean, boolean, "defined">;
+    nudgeMinContextLimitPct: z<number, number, "plain">;
+    nudgeMaxContextLimitPct: z<number, number, "defined">;
+    nudgeEmergencyThresholdPct: z<number, number, "defined">;
+    autoNudge: z<boolean, boolean, "defined">;
+}>>, Schemastery.ObjectT<NoInfer<{
+    modelContextLimit: z<number, number, "plain">;
+    autoModelContextLimit: z<boolean, boolean, "defined">;
+    nudgeMinContextLimitPct: z<number, number, "plain">;
+    nudgeMaxContextLimitPct: z<number, number, "defined">;
+    nudgeEmergencyThresholdPct: z<number, number, "defined">;
+    autoNudge: z<boolean, boolean, "defined">;
+}>>, "plain">;
 /** What changed between two settings snapshots, and what the engine must do about it. */
 export interface SettingsChangeEffect {
     /**
@@ -150,8 +167,9 @@ export interface SettingsCommandSurface {
 }
 /**
  * Build the command surface over a lazily-captured settings service. The
- * engine captures the service through a parallel `ctx.inject(['settings'])`,
- * so the reference may legitimately be undefined for the whole process life
- * (headless/plain compositions have no settings provider).
+ * reference is undefined for the whole process life until the host registers
+ * our section (on the 0.2.0 line that requires the engine's own `static
+ * Config` schema); while it is, the surface reports unavailable and the
+ * command degrades to advice.
  */
-export declare function makeSettingsCommandSurface(getService: () => SettingsProvider | undefined, getSnapshot: () => AcpSettings): SettingsCommandSurface;
+export declare function makeSettingsCommandSurface(getService: () => AcpSettingsService | undefined, getSnapshot: () => AcpSettings): SettingsCommandSurface;

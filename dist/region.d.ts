@@ -178,12 +178,22 @@ export declare function prefixSummaryBlocks(blocks: readonly ContentBlock[]): Co
  *
  * Removal gate: delete once the peer floor moves past the last
  * wrapper-emitting dsh-compaction line (or upstream retires the shape there).
+ *
+ * Reachability is line-dependent, and so is its coverage: each dsh-compaction
+ * line derives its `CompactionCheckpointSource` type from its OWN marker
+ * constant, so the wrapper variant is present in the 0.1.5-line types (whose
+ * `compactCheckpointSource()` really does emit it) and absent from the 0.2.0-line
+ * ones (marker `{ kind: 'compact-checkpoint' }`). On the 0.2.0 baseline the
+ * rewrite below is therefore unreachable — and untypeable if written as a plain
+ * `source.kind === 'plugin'` comparison (TS2367 against a literal kind) — which is
+ * why the two identifying fields are read through a structural view and the
+ * normalized object is rebuilt from the fields both lines share.
  */
 export declare function checkpointSourceFor(session: Pick<Session, 'header'>, compactionId: CompactionId): Readonly<{
+    kind: 'compact-checkpoint';
     compactionId: CompactionId;
-    sourceCommandId?: import("@deepseek-ai/dsh-commands").CommandId;
-    kind: "compact-checkpoint";
-}> | import("@deepseek-ai/dsh-compaction").CompactionCheckpointSource;
+    sourceCommandId?: import("@deepseek-ai/dsh-commands").CommandId | undefined;
+}>;
 /**
  * Run one durable compression transaction. Throws on invalid state; on success
  * the four events are in the log and the surface has one summary node.

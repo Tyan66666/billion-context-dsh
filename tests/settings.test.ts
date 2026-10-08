@@ -490,6 +490,25 @@ test('M6: settingsEnabled false is a kill switch — composition values stay, pr
   }
 })
 
+/**
+ * Ported back from main during the seam consolidation: the forms-line rewrite of
+ * this suite kept the provider-driven kill switch but lost main's warn-silence
+ * assertion. No provider here — this is the plain npm-install composition, so
+ * anything logged would come from the engine itself.
+ */
+test('M6: settingsEnabled false is a kill switch — not even the warn fires', async () => {
+  const root = new Context()
+  const logs: Message[] = []
+  const { fiber } = await mountEngine(root, { settingsEnabled: false }, (ctx) => {
+    ctx.logger.exporter({ levels: { default: 3 }, export: (message) => { logs.push(message) } })
+  })
+  try {
+    assert.equal(logs.filter((m) => m.type === 'warn').length, 0)
+  } finally {
+    await fiber.dispose()
+  }
+})
+
 test('M6: HMR-style remount of the same namespace does not hit duplicate registration (V1 gate)', { skip: SEAM_SKIP }, async () => {
   const root = new Context()
   await root.plugin(requireMemorySettings())
@@ -567,6 +586,36 @@ test('M6: a settings-layer autoModelContextLimit false gates the window projecti
     const provider = root.get('settings') as MemorySettingsProvider
     provider.publishForTest({ [ACP_SETTINGS_NAMESPACE]: { autoModelContextLimit: false } })
     await flushRounds()
+    assert.notEqual((await engine.windowFor(agent)).source, 'projection')
+  } finally {
+    await fiber.dispose()
+  }
+})
+
+/**
+ * Ported back from main during the seam consolidation: the gate must also honour
+ * a COMPOSITION `false`. With no settings layer registered the read source IS
+ * the composition snapshot, so this is the path that keeps auto detection off on
+ * the plain npm-install line. The positive control (no flag → the projection
+ * wins) is the first assertion of the settings-layer test above.
+ */
+test('M6: a COMPOSITION autoModelContextLimit false gates the window projection', async () => {
+  const root = new Context()
+  const { fiber, engine } = await mountEngine(root, { autoModelContextLimit: false })
+  try {
+    const ctx = new Context()
+    ctx.provide('sessionProjections', {
+      snapshot: () => ({ values: { contextPressure: { contextWindow: 1000000 } } }),
+    })
+    ctx.provide('llm', {
+      resolveModelInfo: async () => ({ context: { contextWindow: 64000 } }),
+    })
+    const agent = {
+      id: 'test-session',
+      session: Session.create('test-session'),
+      options: { provider: 'test-provider', model: 'test-model' },
+      ctx,
+    } as unknown as Agent
     assert.notEqual((await engine.windowFor(agent)).source, 'projection')
   } finally {
     await fiber.dispose()
@@ -881,6 +930,25 @@ test('M6: a composed preset seeds the base layer AND the live reads (issue #176)
     await flushRounds()
     assert.equal(engine.env.nudgeMaxContextLimitPct, 0.55)
     // ...and the other two keys stay at their preset values.
+    assert.equal(engine.env.nudgeMinContextLimitPct, 0.3)
+    assert.equal(engine.env.nudgeEmergencyThresholdPct, 0.7)
+  } finally {
+    await fiber.dispose()
+  }
+})
+
+/**
+ * Ported back from main during the seam consolidation: the preset test above
+ * pins the preset fill and a RUNTIME override beating it; this is the sibling
+ * rule — an explicit COMPOSITION value wins for its own key while the other two
+ * threshold keys keep the preset's values.
+ */
+test('M6: an explicit composition value beats the composed preset', async () => {
+  const root = new Context()
+  const { fiber, engine } = await mountEngine(root, { preset: 'aggressive', nudgeMaxContextLimitPct: 0.55 })
+  try {
+    assert.equal(engine.env.nudgeMaxContextLimitPct, 0.55)
+    // The other two threshold keys stay at their preset values.
     assert.equal(engine.env.nudgeMinContextLimitPct, 0.3)
     assert.equal(engine.env.nudgeEmergencyThresholdPct, 0.7)
   } finally {
