@@ -312,7 +312,7 @@ npm run build       # tsup 打包（内联 acp-kernel）+ .d.ts
 npm run test:e2e   # 端到端宿主回归：真实 agent 循环 + 脚本化假 LLM（见下文）
 ```
 
-端到端回归（`scripts/e2e/`）在进程内组装真实 DSH 宿主（cordis + agent-loop + DeepSeek 适配器），指向脚本化假 LLM 服务，挂载本引擎作为压缩后端，然后断言持久化事件日志：compaction 起止配对、durable replace 节点、严格 tool-call/result 配对、nudge 注入节奏；以及假 LLM **实际收到的请求体**（wire 级 prompt-cache 字节稳定性：envelope、`tools` 数组、leading message，无 compaction 场景全程 append-only）。背景与取舍见 [docs/e2e-harness-design.md](docs/e2e-harness-design.md)（issue #120）。
+端到端回归（`scripts/e2e/`）在进程内组装真实 DSH 宿主（cordis + agent-loop + DeepSeek 适配器），指向脚本化假 LLM 服务，挂载本引擎作为压缩后端，然后断言持久化事件日志：compaction 起止配对、durable replace 节点、严格 tool-call/result 配对、nudge 注入节奏；以及假 LLM **实际收到的请求体**（wire 级 prompt-cache 字节稳定性：envelope、`tools` 数组、leading message，无 compaction 场景全程 append-only）。自 issue #183 起，每个场景都在**真实 JSONL 持久化 writer**（`JsonlSessionPersistence`，会话落盘到每次运行全新的临时根目录）上跑：runner 用全新只读句柄解码每个场景的落盘文件——lossless round-trip、replay 后 surface 与 live 一致、零退役 source 形状——只在 durable 编码阶段暴露的准入级缺陷无法再全绿穿过套件（#163/#181 类盲区）。背景与取舍见 [docs/e2e-harness-design.md](docs/e2e-harness-design.md)（issue #120/#183）。
 
 另有一层单元级 durable 行准入网（`tests/durable-admission.test.ts`，issue #183）：把引擎写出的每种持久化行形状过一遍真实发布版 JSONL 存储的完整往返（append→读回→逐行比对 + 负向对照），钉住「我们写的每一行都能被声明 peer 区间内的 writer 编码并读回」。
 
