@@ -26,7 +26,13 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          # Node 22, not 20: the durable-row admission net (issue #183) loads
+          # the released JSONL persistence codec, which statically imports the
+          # node:zlib zstd API that only exists from Node 22.15 on — on Node 20
+          # the module fails at link time before any test runs. e2e.yml already
+          # ran on 22; the package's own support floor (engines >= 20) is
+          # unchanged, this is only the test-runner runtime.
+          node-version: 22
           cache: npm
 
       - name: Install dependencies

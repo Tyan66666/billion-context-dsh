@@ -313,6 +313,8 @@ npm run test:e2e   # end-to-end host regression: real agent loop + scripted fake
 
 The end-to-end regression suite (`scripts/e2e/`) assembles the real DSH host in-process (cordis + agent-loop + the DeepSeek adapter), points it at a scripted fake LLM server, mounts this engine as the compaction backend, and asserts the persisted event log: compaction start/end pairing, the durable replace node, strict tool-call/result pairing, and the nudge injection rhythm — plus the request bodies the fake LLM **actually received** (wire-level prompt-cache byte-stability: envelope, `tools` array, leading message, and append-only turns for scenarios without compaction). Background and trade-offs: [docs/e2e-harness-design.md](docs/e2e-harness-design.md) (issue #120).
 
+A unit-level durable-row admission net (`tests/durable-admission.test.ts`, issue #183) additionally round-trips every persisted row shape the engine writes through the real released JSONL storage (append → read back → row-by-row comparison, plus negative controls), pinning that every row we write encodes and reads back under the writers our declared peer range ships.
+
 `dist/index.js` is self-contained except for the `@deepseek-ai/*` seam packages, which the hosting deployment provides.
 
 ## Architecture
