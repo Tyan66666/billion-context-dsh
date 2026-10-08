@@ -20,14 +20,25 @@ import { eventAtOf, sessionEventsOf } from './session-events.ts'
 // `{ kind: 'plugin', plugin: '<name>' }` (issue #163). dsh-llm's
 // MessageSourceMap predates V4 admission, so register this plugin's two
 // producer kinds on its documented merge-extensibility seam ("plugins add
-// their own kinds"). Type-level only — no runtime effect. The map lives on
-// the ROOT module as of the 0.2.0 line (the `/message` subpath export is
-// gone; dsh-compaction itself augments the root) — augmenting the old
-// subpath silently registered nothing there.
+// their own kinds"). Type-level only — no runtime effect.
+// The target MUST be the package ROOT specifier '@deepseek-ai/dsh-llm' —
+// the same spelling dsh-compaction uses for its 'compact-checkpoint' member
+// (0.2.0 line). The map lives on the ROOT module as of the 0.2.0 line (the
+// `/message` subpath export is gone; dsh-compaction itself augments the
+// root), and under tsgo (typescript 7) augmenting the '/message' subpath
+// splits the MessageSourceMap symbol, so the host packages' root-spelled
+// augmentations stop merging into it and the checkpoint write fails
+// typecheck with TS2322. The root spelling is also what the pre-0.2.0 lines
+// need (measured green on the 0.1.5-rc.2 baseline too), so it is the one
+// spelling that serves every admitted line.
 declare module '@deepseek-ai/dsh-llm' {
   interface MessageSourceMap {
     acpNudge: { kind: 'plugin:acp-nudge' }
     acpPrune: { kind: 'plugin:billion-context-dsh' }
+    // V4 checkpoint producer kind (issue #181): emitted by checkpointSourceFor
+    // when the resolved dsh-compaction copy predates the host's v4 writer and
+    // its wrapper-shaped compactCheckpointSource() output is normalized.
+    compactCheckpoint: { kind: 'compact-checkpoint'; compactionId: string; sourceCommandId?: string }
   }
 }
 

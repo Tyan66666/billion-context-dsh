@@ -20,6 +20,11 @@ declare module '@deepseek-ai/dsh-llm/message' {
         acpPrune: {
             kind: 'plugin:billion-context-dsh';
         };
+        compactCheckpoint: {
+            kind: 'compact-checkpoint';
+            compactionId: string;
+            sourceCommandId?: string;
+        };
     }
 }
 /**
