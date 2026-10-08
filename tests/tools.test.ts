@@ -1,13 +1,13 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { Context } from '@deepseek-ai/cordis'
-import { createCore, type CompressionCore } from 'acp-kernel'
+import { createCore, indexToRef, type CompressionCore } from 'acp-kernel'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { Session } from '@deepseek-ai/dsh-session'
 import { createAssistantMessage } from '@deepseek-ai/dsh-llm'
 import { AcpStateStore } from '../src/state.ts'
-import { edgeRefForSeq, makeTools, type ToolEnvironment } from '../src/tools.ts'
+import { edgeRefForSeq, makeTools, mnRefIndex, type ToolEnvironment } from '../src/tools.ts'
 import { blockRegistry, rebuildBlockLedger, sliceDecompressPage, DEFAULT_DECOMPRESS_PAGE, DEFAULT_DECOMPRESS_PAGE_CHARS } from '../src/region.ts'
 import { rangeTable } from '../src/nudge.ts'
 import { SUMMARY_FRAME_PREFIX } from '../src/messages.ts'
@@ -705,6 +705,22 @@ test('M3: compress rejects unknown mN refs with guidance; mixed mN/seq boundarie
   assert.match((result as { text: string }).text, /Compressed 1 block/)
 })
 
+test('M3: drilldown mN refs stay parseable past the kernel ref-width bump', () => {
+  // The kernel numbers refs upward inside a session and never reuses one, so a
+  // long session keeps climbing: 0.0.101 widened `REF_PATTERN`/`MAX_INDEX` from
+  // 5 digits / 99999 to 7 digits / 9999999. A host parser still capped at five
+  // digits would reject acp_status's OWN `m100000` rows as "not a ref" — in
+  // exactly the sessions the bump exists to rescue (issue #187's ~100K-event
+  // sessions). Pin the boundary against the kernel's own formatter, so a future
+  // widening fails HERE instead of silently degrading the model's boundaries.
+  assert.equal(mnRefIndex(indexToRef(99_999)), 99_999, 'the last pre-bump ref still parses')
+  assert.equal(mnRefIndex(indexToRef(100_000)), 100_000, 'the first 6-digit ref parses (was silently rejected)')
+  assert.equal(mnRefIndex(indexToRef(9_999_999)), 9_999_999, 'the kernel cap parses')
+  // Non-refs still fall through to the bare-seq parser (no false positives).
+  assert.equal(mnRefIndex('m10000000'), null, 'an 8-digit number is not a kernel ref')
+  assert.equal(mnRefIndex('m000'), null, 'ref indices start at 1')
+  assert.equal(mnRefIndex('295'), null, 'a bare seq is not an mN ref')
+})
 test('M3: acp_status uncompressed drilldown excludes the checkpoint summary node', async () => {
   // P2-2: the summary node (source.plugin === 'compact') must not appear as a
   // drilldown row — it is already counted as block summaries. 12 msgs - 5

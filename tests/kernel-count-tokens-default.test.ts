@@ -135,14 +135,19 @@ test('the CJK fixture clears the kernel min-benefit gate under shipped defaults;
   // flat chars/4 underprices the same content below the floor and the nudge is
   // suppressed — a CJK-heavy session would go un-nudged.
   //
-  // The margin assertion pins 1.25×, not the 2× it used to: kernel 0.0.101
-  // re-accounted pending T1, so the same fixture now measures 6460 tokens
-  // against the 5000-token floor = 1.29× (it measured ≈2.5× on 0.0.63). The
-  // counter itself did NOT move — `defaultCountTokens` is byte-identical across
-  // the two kernel versions (100 CJK chars = 100 tokens on both, see the test
-  // above) and the kernel's range geometry tests are unchanged. 1.25× still
-  // proves the fixture is not marginal and fails loudly if a future kernel ever
-  // drops pending T1 below the floor.
+  // The margin assertion pins 1.25×, not the 2× it used to: the same fixture now
+  // measures 6460 pending T1 tokens against the 5000-token floor = 1.29× on
+  // 0.0.101 (it measured ≈2.5× on 0.0.63). This is NOT a tokenizer or an
+  // accounting change — the counter is byte-identical across the two pins (100
+  // CJK chars = 100 tokens on both, see the test above). It is the kernel's
+  // RANGE MERGE: 0.0.101 batches candidate ranges by array-index gaps and DROPS
+  // every batch below `minCompressRange`, and that floor is counted in CHARS
+  // while the tables above are counted in tokens — a CJK-heavy group clears the
+  // token floor while still sitting under the char floor, so ranges disappear
+  // (characterization-locked in `tests/kernel-range-source.test.ts`, including
+  // the control case that proves the gate is char-based; the real fix belongs
+  // upstream). 1.25× still proves the fixture is not marginal and fails loudly
+  // if a future kernel drops pending T1 further.
   const cjk = probeWith({}, 'CJK-aware')
   assert.equal(cjk.shouldInject, true, `expected an OVER-LIMIT T1 nudge, got: ${cjk.reason}`)
   assert.equal(cjk.tier, 1, 'the pressure nudge targets tier-1 compression')

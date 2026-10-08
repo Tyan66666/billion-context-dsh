@@ -266,3 +266,55 @@ test('kernel range source: host guards still apply on top of the kernel geometry
     assert.ok(!brackets(lastRealUserSeq), `no offered span covers the last real user message (${lastRealUserSeq})`)
   }
 })
+
+/** `appendWorkTurn`'s shape, but every message is CJK of a fixed char count. */
+function appendCjkWorkTurn(session: Session, turn: number, charsPerMessage: number): void {
+  const unit = '上下文压缩需要保留关键结论与文件路径以及验证证据。'
+  const text = (label: string): string =>
+    `${unit.repeat(Math.ceil(charsPerMessage / unit.length)).slice(0, charsPerMessage)} [${label}]`
+  appendTurn(session, turn)
+  appendUser(session, text(`q${turn}`))
+  appendAssistant(session, text(`a${turn}`), turn, 1)
+  appendToolCall(session, text(`call${turn}`), `call_${turn}`, turn, 2)
+  appendToolResult(session, text(`result${turn}`), `call_${turn}`, turn, 3)
+}
+
+function cjkDenseSession(turns: number, charsPerMessage: number): Session {
+  const session = Session.create('kernel-range-source-cjk')
+  for (let turn = 1; turn <= turns; turn += 1) appendCjkWorkTurn(session, turn, charsPerMessage)
+  return session
+}
+
+test('kernel range source: CJK sessions lose ranges to the kernel char-based merge floor (0.0.101 characterization)', () => {
+  // Kernel 0.0.101 rewrote `mergeRangesToThreshold`: it batches candidates by
+  // ARRAY-INDEX GAPS and DROPS any batch below `minCompressRange`. That floor is
+  // counted in CHARS, while every other threshold on the nudge path is counted in
+  // TOKENS — and CJK carries ~1 token per char, so a CJK-heavy batch clears the
+  // token floor while still sitting under the char floor and is thrown away.
+  //
+  // Consequence on this fixture (6 structurally identical work turns): with latin
+  // text the table offers 6 ranges; with CJK text of the same shape it offers 3,
+  // so the whole tail is unreclaimable — the model cannot compress those consumed
+  // tool outputs at all, which is the one thing the range table exists for.
+  //
+  // The CONTROL is what proves the gate is the char floor rather than "small CJK
+  // content": growing the same fixture's per-message size from 1600 to 4000 chars
+  // brings the latin count back. Flip these numbers — and the margin comment in
+  // `tests/kernel-count-tokens-default.test.ts` — when the kernel stops sizing
+  // that floor in chars; the real fix belongs upstream, not here.
+  const latinSession = denseSession(6)
+  const latin = buildCompressibleSeqRanges(latinSession, kernelProbe(latinSession).view, { preserveRecent: 0 })
+  assert.equal(latin.length, 6, 'the latin fixture offers one range per work turn')
+
+  const cjkSession = cjkDenseSession(6, 1600)
+  const cjk = buildCompressibleSeqRanges(cjkSession, kernelProbe(cjkSession).view, { preserveRecent: 0 })
+  assert.equal(cjk.length, 3, 'CJK: the char-based merge floor drops the tail ranges')
+  assert.ok(
+    cjk[cjk.length - 1]!.end < latin[latin.length - 1]!.end,
+    'the dropped tail is real: the CJK table stops well before the latin one',
+  )
+
+  const biggerSession = cjkDenseSession(6, 4000)
+  const bigger = buildCompressibleSeqRanges(biggerSession, kernelProbe(biggerSession).view, { preserveRecent: 0 })
+  assert.equal(bigger.length, 6, 'control: larger CJK messages clear the CHAR floor and the ranges return')
+})

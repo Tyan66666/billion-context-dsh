@@ -187,16 +187,27 @@ function parseSeq(value: number | string): number {
 
 /**
  * Match a drilldown mN ref: "m00306" / "m306" (kernel `refToIndex` semantics,
- * `m0*(\d{1,5})`), tolerating a trailing `#callId` fragment (symmetric with
+ * `m0*(\d{1,7})`), tolerating a trailing `#callId` fragment (symmetric with
  * `parseSeq`'s `#` handling). Returns the ref index, or null for non-mN input.
+ *
+ * The width AND the bound mirror the kernel's `REF_PATTERN` / `MAX_INDEX`
+ * (0.0.101: `\d{1,7}` and `9999999`; through 0.0.63 both were 5 digits /
+ * `99999`). They must be re-checked on every kernel bump (AGENTS.md §4b): a
+ * session numbers refs upward and never reuses one, so once it outgrows the
+ * old width the kernel keeps handing out `m100000`+ — and a host parser capped
+ * at 5 digits rejects acp_status's OWN rows as "not a ref", in exactly the long
+ * sessions a ref-width bump exists to rescue. `tests/tools.test.ts` round-trips
+ * the kernel's `indexToRef` boundaries, so a future widening turns that test
+ * red instead of degrading silently.
  */
-const MN_RE = /^m0*(\d{1,5})(?:#.*)?$/i
+const MN_RE = /^m0*(\d{1,7})(?:#.*)?$/i
 
-function mnRefIndex(value: string): number | null {
+/** Exported so the ref-width contract test can pin it without a 100K-message fixture. */
+export function mnRefIndex(value: string): number | null {
   const match = MN_RE.exec(value.trim())
   if (match === null) return null
   const index = Number(match[1])
-  return index >= 1 && index <= 99999 ? index : null
+  return index >= 1 && index <= 9999999 ? index : null
 }
 
 /**

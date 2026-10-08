@@ -272,7 +272,7 @@ DSH 的每个模型请求都派生自其 append-only 会话日志（*surface*）
 - **运行时热切换**：预设目前走组合配置（安装 / `cordis.patch.yml`）；待 #75 的 settings.yaml 热加载落地后，可在 `/acp-prune config` 里改。本 PR 先让它在组合层可用。
 - **反向窗口直接报错**：与显式阈值合并后若出现 `min > max`、`max > emergency` 或 `min > emergency`（例如 `preset: 'preserve'` 配 `nudgeMaxContextLimitPct: 0.5`），引擎在构造期抛错并列出三个值。内核对这种配置只打警告、不会拒绝，所以这道校验由引擎在 `resolveAcpConfig` 里补上。
 - **与宿主 80% 线赛跑的是 `max`**：反复触发的过限提醒（`OVER-LIMIT`）由 `max` 决定；`preserve` / `relaxed` 的 emergency（0.93 / 0.90）高于宿主 compaction-basic 的 80% 线，只是超过它之后的标签升级，宿主先压缩时不会到达。
-- **`min` 是首见提醒的地板**：内核（0.0.101）在运行时只读它一处——`firstSightMassReady`（从未提醒过、还没有基线、用量 ≥ `min` 且待压内容达到增长下限时立刻提醒一次，理由串带 `[first-sight mass]`）。T2/T3 的「块数达标」触发在 0.0.101 里**不再**要求用量 ≥ `min`（0.0.63 的 `tierCountUsageFloor` 已移除），常规 T1 增长提醒也从不看 `min`（由 `max` 与 `growthRatio` 决定），所以五档之间的主要差异来自 `max` 与 `emergency`，更低的 `min` 只让首见提醒来得更早。
+- **`min` 是首见提醒的地板**：内核（0.0.101）在运行时只读它一处——`firstSightMassReady`（从未提醒过、还没有基线、用量 ≥ `min` 且待压内容达到增长下限时立刻提醒一次，理由串带 `[first-sight mass]`）。T2/T3 的「块数达标」触发在 0.0.101 里**不再**要求用量 ≥ `min`（0.0.63 的 `tierCountUsageFloor` 已移除），常规 T1 增长提醒也从不看 `min`（由 `max` 与 `growthRatio` 决定），所以五档之间的主要差异来自 `max` 与 `emergency`，更低的 `min` 只让首见提醒来得更早。另外，T2/T3 的**块数触发阈值**在 0.0.101 里默认从 5/10 个块改为 **1000/2000** 个块（`tiers.tier2Trigger` / `tier3Trigger`，引擎不覆写 `tiers`），所以实践中 T2/T3 提醒由质量路径触发，块数路径基本不会命中。
 - **两个暂未纳入的旋钮**：原始需求里的 `growthRatio`（内核已有 `nudge.growthRatio`，可经 `coreOverrides` 调）和 `protectedLastMessages`（≈ 内核 `preserveRecentMessages`）目前不是本项目的一等旋钮；是否采纳为命名键 / UI 项由维护者决定，未擅自并入预设。
 
 ## 已修复的问题
