@@ -219,7 +219,7 @@ DSH 的每个模型请求都派生自其 append-only 会话日志（*surface*）
 
 - **摘要标源（模型自写摘要的框架行）**：每条压缩摘要在写入时前置 `[Model-written summary — not user words; re-verify any obligations before relying on them]`——同时写进持久化摘要事件与其 checkpoint 节点（同一份文本），投影路径对旧块幂等补框。目的：阻止模型把摘要里的义务句当成用户原话直接执行。
 - **瘦身 nudge**：压缩哲学/规则段不再随每次 nudge 重复（它们已在系统提示里）；nudge 正文只保留触发框架 + 上下文分解 + 范围表。模板路径（`config.prompts.nudge`）同样摘除这些段落。设计背景：[docs/injection-governance-design.md](docs/injection-governance-design.md)。
-- **未移植的上游能力 — `acp_rule`（永久规则层）**：上游 billion-context-pi 还有第五个模型工具 `acp_rule`（opt-in：`"rules": true`），用于在对话中途登记**能穿越压缩**的原则级提醒。本移植版未包含它：上游内核自 v0.0.80 起才提供规则 API（`addRule` / `removeRule` / `formatRulesForPrompt` 等），而本仓钉死 acp-kernel 0.0.63，没有可接的内核接口。移植计划见 [issue #189](https://github.com/Tyan66666/billion-context-dsh/issues/189)（文档兜底 → pin bump → 用内核 API 接第五工具）。过渡期变通：长期约定写入 AGENTS.md（注入行受屏障/pin 机制保护，天然穿越压缩），或经 `config.prompts.systemPrompt` 静态注入——两者都不支持会话中途登记/列举/撤销规则。
+- **未移植的上游能力 — `acp_rule`（永久规则层）**：上游 billion-context-pi 还有第五个模型工具 `acp_rule`（opt-in：`"rules": true`），用于在对话中途登记**能穿越压缩**的原则级提醒。本移植版尚未包含它。**内核侧阻塞已解除**：本仓 pin 已升到 acp-kernel **0.0.101**，其入口已导出完整规则 API（`RULE_TOOL_NAME` / `addRule` / `removeRule` / `clearRules` / `formatRulesForPrompt` / `formatRulesList` / `resolveRuleLimits`，来自 `dist/rules.js`），以及 `RuleRecord` / `RulesConfig` 类型与 state 里的 `rules` / `nextRuleId` 字段——剩下的是移植工作本身（第五工具 + `config.rules` 接线），不再是「没有可接的内核接口」。移植计划见 [issue #189](https://github.com/Tyan66666/billion-context-dsh/issues/189)（文档兜底 → pin bump → 用内核 API 接第五工具）。过渡期变通：长期约定写入 AGENTS.md（注入行受屏障/pin 机制保护，天然穿越压缩），或经 `config.prompts.systemPrompt` 静态注入——两者都不支持会话中途登记/列举/撤销规则。
 
 ## 上游项目与致谢
 
@@ -272,12 +272,14 @@ DSH 的每个模型请求都派生自其 append-only 会话日志（*surface*）
 - **运行时热切换**：预设目前走组合配置（安装 / `cordis.patch.yml`）；待 #75 的 settings.yaml 热加载落地后，可在 `/acp-prune config` 里改。本 PR 先让它在组合层可用。
 - **反向窗口直接报错**：与显式阈值合并后若出现 `min > max`、`max > emergency` 或 `min > emergency`（例如 `preset: 'preserve'` 配 `nudgeMaxContextLimitPct: 0.5`），引擎在构造期抛错并列出三个值。内核对这种配置只打警告、不会拒绝，所以这道校验由引擎在 `resolveAcpConfig` 里补上。
 - **与宿主 80% 线赛跑的是 `max`**：反复触发的过限提醒（`OVER-LIMIT`）由 `max` 决定；`preserve` / `relaxed` 的 emergency（0.93 / 0.90）高于宿主 compaction-basic 的 80% 线，只是超过它之后的标签升级，宿主先压缩时不会到达。
-- **`min` 是首见提醒与 T2/T3 块数触发的地板**：内核 0.0.63 在运行时读它两处——① `firstSightMassReady`（从未提醒过、还没有基线、用量 ≥ `min` 且待压内容达到增长下限时立刻提醒一次，理由串带 `[first-sight mass]`）；② `tierCountUsageFloor`（T2/T3 的「块数达标」触发同样要求用量 ≥ `min`）。常规 T1 增长提醒不看 `min`（由 `max` 与 `growthRatio` 决定），所以五档之间的主要差异仍来自 `max` 与 `emergency`，但更低的 `min` 会让首见提醒来得更早。
+- **`min` 是首见提醒的地板**：内核（0.0.101）在运行时只读它一处——`firstSightMassReady`（从未提醒过、还没有基线、用量 ≥ `min` 且待压内容达到增长下限时立刻提醒一次，理由串带 `[first-sight mass]`）。T2/T3 的「块数达标」触发在 0.0.101 里**不再**要求用量 ≥ `min`（0.0.63 的 `tierCountUsageFloor` 已移除），常规 T1 增长提醒也从不看 `min`（由 `max` 与 `growthRatio` 决定），所以五档之间的主要差异来自 `max` 与 `emergency`，更低的 `min` 只让首见提醒来得更早。
 - **两个暂未纳入的旋钮**：原始需求里的 `growthRatio`（内核已有 `nudge.growthRatio`，可经 `coreOverrides` 调）和 `protectedLastMessages`（≈ 内核 `preserveRecentMessages`）目前不是本项目的一等旋钮；是否采纳为命名键 / UI 项由维护者决定，未擅自并入预设。
 
-## 已知问题
+## 已修复的问题
 
-### 长会话撞上内核引用上限：`ref capacity exhausted: cannot allocate beyond m99999`
+> 下面这条是本项目自己撞出来的真实故障。已在内核 **acp-kernel 0.0.101** 修复，本仓 **v0.2.27** 起 pin 到该版本；老版本（≤ v0.2.26）仍会遇到。
+
+### 长会话撞上内核引用上限：`ref capacity exhausted: cannot allocate beyond m99999`（已修复）
 
 超长会话（约数万条消息级事件）跑完后，整轮可能直接失败，界面显示：
 
@@ -286,19 +288,19 @@ DSH 的每个模型请求都派生自其 append-only 会话日志（*surface*）
 ref capacity exhausted: cannot allocate beyond m99999
 ```
 
-这是上游 [acp-kernel](https://github.com/ranxianglei/acp-kernel) 的 5 位引用编号空间（`m00001`–`m99999`）被**累计**见过的消息数耗尽——引用编号在会话内只增不复用（#176 的槽复用因会让摘要里的旧 tag 静默指向另一条消息而被 #191 回退，#191 确立该不变量），与当前上下文大小无关。已确认内核 0.0.29、本仓库当前 pin 的 0.0.63、npm 最新 0.0.98 全部同样命中——**升级内核不会解决**。
+这是上游 [acp-kernel](https://github.com/ranxianglei/acp-kernel) 的 5 位引用编号空间（`m00001`–`m99999`）被**累计**见过的消息数耗尽——引用编号在会话内只增不复用（#176 的槽复用因会让摘要里的旧 tag 静默指向另一条消息而被 #191 回退，#191 确立该不变量），与当前上下文大小无关。当时确认内核 0.0.29、本仓当时 pin 的 0.0.63、以及当时的 npm 最新版 0.0.98 全部同样命中（`refs.ts` 的 `MAX_INDEX = 99999`）。**已在 acp-kernel 0.0.101 修复**：两版 `dist/index.js` 的常量实测为 `99999` → `9999999`，本仓 v0.2.27 起 pin 到该版本——**升级到 v0.2.27 及以上即不再撞限，旧会话无需重建**。
 
 **压缩救不回，重启也救不回**：本插件每轮把**整条日志**（含已被摘要遮蔽的部分）交给内核（T2/T3 蒸馏需要完整日志而不只是可见面——见 src/messages.ts:315 `allLogMessages` 的注释），而内核流水线的第一个节点就是 `assign-refs`，先给日志里的所有消息编号、然后才谈任何压缩决策。所以：
 
 - **压缩救不回**：报错在任何压缩决策之前抛出，`compress` 工具自己也走同一条路径；
 - **重启 dsh 也救不回**：内核状态是纯内存态、不落盘，重启后第一轮就要为整条日志从头重新编号——日志已超过约 10 万条消息级事件时当场再次撞限。
 
-也就是说，对本插件而言，**「日志超过约 10 万条消息级事件 = 该会话在 ACP 下永久不可用」是硬墙**。正解是内核把 `REF_WIDTH` 从 5 位放宽到 7 位，已在 [acp-kernel#483](https://github.com/ranxianglei/acp-kernel/issues/483) 提请，追踪见 [docs/upstream-tracker.md](docs/upstream-tracker.md)（issue [#187](https://github.com/Tyan66666/billion-context-dsh/issues/187)）。
+也就是说，在 0.0.101 之前的内核上，对本插件而言**「日志超过约 10 万条消息级事件 = 该会话在 ACP 下永久不可用」是硬墙**。正解是内核把引用位宽从 5 位放宽到 7 位：已在 [acp-kernel#483](https://github.com/ranxianglei/acp-kernel/issues/483) 提请并在 **0.0.101** 发布（追踪见 [docs/upstream-tracker.md](docs/upstream-tracker.md)，issue [#187](https://github.com/Tyan66666/billion-context-dsh/issues/187) 已 resolved）。
 
-**可用办法**：
+**处置**：
 
-1. **换回规则式压缩**——profile 里禁用 `compaction-acp`、启用宿主自带的 `compaction-basic`，彻底绕开这条代码路径（会话本身仍可继续）。
-2. **换新会话**——把需要的上下文手动带过去；新会话的引用从零开始计数，等它自己的日志接近约 10 万条时才会再撞这堵墙。
+1. **升级到 v0.2.27 及以上**（pin 含 acp-kernel 0.0.101）——撞限不再发生，**旧会话继续可用**，不必新建会话。
+2. 暂时无法升级时：**换回规则式压缩**——profile 里禁用 `compaction-acp`、启用宿主自带的 `compaction-basic`，绕开这条代码路径（会话本身仍可继续）；或 **换新会话**——把需要的上下文手动带过去，新会话的引用从零开始计数，等它自己的日志接近约 10 万条时才会再撞这堵墙。
 
 ## 开发
 

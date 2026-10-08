@@ -7,7 +7,7 @@
  * chars/4 counter while every model-visible face (nudge breakdown, range table,
  * acp_status) prices with the CJK-aware `defaultCountTokens` — which would
  * misprice CJK-heavy sessions by up to 4×. On v0.2.26 with the pinned
- * acp-kernel@0.0.63 the suspicion does NOT hold: `createCore` resolves
+ * acp-kernel@0.0.63 and @0.0.101 the suspicion does NOT hold: `createCore` resolves
  * `ports.countTokens ?? defaultCountTokens` (verified in the bundled source),
  * so the empty ports object src/index.ts builds when unconfigured already lands
  * on the CJK-aware counter, and the bundle's other flat-4 fallbacks
@@ -136,12 +136,13 @@ test('the CJK fixture clears the kernel min-benefit gate under shipped defaults;
   // suppressed — a CJK-heavy session would go un-nudged.
   //
   // The margin assertion pins 1.25×, not the 2× it used to: kernel 0.0.101
-  // re-accounted pending T1 (measured on the same fixture: ≈2.5× on 0.0.63 →
-  // 1.29× now), while the counter itself did NOT move — `defaultCountTokens`
-  // is byte-identical across the two kernel versions (100 CJK chars = 100
-  // tokens on both, see the test above) and the kernel's range geometry tests
-  // are unchanged. 1.25× still proves the fixture is not marginal and fails
-  // loudly if a future kernel ever drops pending T1 below the floor.
+  // re-accounted pending T1, so the same fixture now measures 6460 tokens
+  // against the 5000-token floor = 1.29× (it measured ≈2.5× on 0.0.63). The
+  // counter itself did NOT move — `defaultCountTokens` is byte-identical across
+  // the two kernel versions (100 CJK chars = 100 tokens on both, see the test
+  // above) and the kernel's range geometry tests are unchanged. 1.25× still
+  // proves the fixture is not marginal and fails loudly if a future kernel ever
+  // drops pending T1 below the floor.
   const cjk = probeWith({}, 'CJK-aware')
   assert.equal(cjk.shouldInject, true, `expected an OVER-LIMIT T1 nudge, got: ${cjk.reason}`)
   assert.equal(cjk.tier, 1, 'the pressure nudge targets tier-1 compression')
