@@ -1345,6 +1345,11 @@ test('M3: a mixed boundary [message..blockSummary] distills and folds extra mess
 
 test('M3: a kernel-rejected range does not poison the rest of the compress call', async () => {
   const env = makeEnv()
+  // The newest REAL user turn is seq 11, so the rejected range below (12..12,
+  // the assistant tail) sits in the kernel's protected zone WITHOUT covering
+  // the guarded active user turn — issue #196 moved that protection
+  // engine-side, and a range over seq 11 would be hard-rejected here instead
+  // of reaching the kernel.
   const session = buildTextSession(12)
   const compress = toolOf(env, 'compress')
   const result = await compress.execute({
@@ -1355,9 +1360,9 @@ test('M3: a kernel-rejected range does not poison the rest of the compress call'
         summary: 'Authentication system: JWT access tokens with 15 minute expiry, refresh tokens in Redis with 30 day TTL, login flow in src/auth/login.ts with sliding-window rate limiting at 10 requests per minute per IP address, bcrypt hashing at cost factor 12.',
       },
       {
-        startSeq: 11,
+        startSeq: 12,
         endSeq: 12,
-        summary: 'Recent tail messages fall inside the kernel protected zone, so the kernel rejects this range while the first range still lands.',
+        summary: 'The assistant tail falls inside the kernel protected zone, so the kernel rejects this range while the first range still lands.',
       },
     ],
   } as never, fakeExec(session))
@@ -1473,6 +1478,9 @@ test('M3: decompress keeps every tool-heavy page under the host pruner threshold
     appendToolResult(session, longText(`tool-out`, i), `call_${i}`)
   }
   appendAssistant(session, longText('done', 0), 1, 8)
+  // A follow-up user turn AFTER the span: since issue #196 the newest real
+  // user turn is hard-guarded, so the span below must end before it.
+  appendUser(session, longText('followup', 99))
   const compress = toolOf(env, 'compress')
   await compress.execute({
     content: [{ startSeq: 1, endSeq: 14, summary: 'Six large bash tool outputs and their steps: JWT access tokens, Redis refresh tokens, login flow, rate limiting, bcrypt cost 12, session revocation.' }],

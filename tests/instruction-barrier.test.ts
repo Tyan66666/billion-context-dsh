@@ -493,3 +493,99 @@ test('PR1: the rejection names the compressible slices so the model can re-cut i
   const fullyCovered = protectedRowRejectionNote(10, 12, [10, 12], [10, 11, 12])
   assert.match(fullyCovered, /no part of this span is compressible/, 'a fully covered span says so instead of implying a cut exists')
 })
+
+test('PR: guardedSurfaceSeqsOf guards the newest real user turn', () => {
+  const session = Session.create('user-guard')
+  appendTurn(session, 1)
+  appendUser(session, longText('q0', 0))            // seq 1
+  appendAssistant(session, longText('a0', 1), 1, 1) // seq 2
+  appendUser(session, longText('q1', 2))            // seq 3 (newest user)
+  appendAssistant(session, longText('a1', 3), 1, 3) // seq 4
+
+  const guarded = guardedSurfaceSeqsOf(session)
+  assert.ok(guarded.has(3), 'the newest real user turn (seq 3) is guarded')
+  assert.ok(!guarded.has(1), 'older user turns (seq 1) stay compressible')
+})
+
+test('PR #196: the rejection note distinguishes user-turn hits from instruction-row hits', () => {
+  const session = Session.create('note-variants')
+  appendTurn(session, 1)
+  appendUser(session, longText('q0', 0))                 // seq 1
+  appendInstruction(session, '.\u0000AGENTS.md', 'v1')   // seq 2 — current copy
+  appendUser(session, longText('q1', 1))                 // seq 3 — newest real user turn
+
+  const userOnly = protectedRowRejectionNote(1, 3, [3], [1, 2, 3], session)
+  assert.match(userOnly, /CURRENT guarded row\(s\)/)
+  assert.match(userOnly, /active user message must stay live/)
+  assert.doesNotMatch(userOnly, /AGENTS\.md/, 'the re-injection story does not apply to a user message')
+  assert.doesNotMatch(userOnly, /stale copies/, 'nor does the stale-copy escape')
+  assert.match(userOnly, /seq 1\.\.2/, 'the compressible slice in front of the user turn is named')
+
+  const mixed = protectedRowRejectionNote(1, 3, [2, 3], [1, 2, 3], session)
+  assert.match(mixed, /active user message must stay live/)
+  assert.match(mixed, /re-injects the newest AGENTS\.md copy/, 'both reasons appear when both row kinds are hit')
+  assert.match(mixed, /stale copies/, 'the stale-copy escape still applies to the instruction row')
+
+  const legacy = protectedRowRejectionNote(1, 3, [2], [1, 2, 3])
+  assert.match(legacy, /CURRENT injected instruction row\(s\)/, 'callers without a session keep the pre-#196 wording')
+})
+
+test('PR #196: handleCompress hard-rejects a span covering the newest real user turn; the re-cut lands', async () => {
+  const env = makeEnv()
+  const session = Session.create('user-turn-gate')
+  appendTurn(session, 1)
+  appendUser(session, longText('q0', 0))                // seq 1
+  appendAssistant(session, longText('a0', 1), 1, 1)     // seq 2
+  appendToolCall(session, longText('call0', 2), 'c0')   // seq 3
+  appendToolResult(session, longText('res0', 3), 'c0')  // seq 4
+  appendUser(session, longText('q1', 4))                // seq 5
+  appendAssistant(session, longText('a1', 5), 1, 5)     // seq 6
+  appendToolCall(session, longText('call1', 6), 'c1')   // seq 7
+  appendToolResult(session, longText('res1', 7), 'c1')  // seq 8
+  appendUser(session, longText('q2', 8))                // seq 9 — newest real user turn
+  appendAssistant(session, longText('a2', 9), 1, 9)     // seq 10
+
+  const compress = makeTools(env).find((definition) => definition.name === 'compress')
+  assert.ok(compress, 'compress tool registered')
+  const agent = {
+    id: session.id,
+    session,
+    options: { provider: 'test-provider', model: 'test-model' },
+    ctx: { tokenMeter: undefined },
+  } as never
+  const exec = { callId: 'call-user-gate', name: 'compress', arguments: {}, signal: new AbortController().signal, agent } as never
+  const summary = 'Earlier exchange: JWT access tokens with 15 minute expiry, refresh tokens in Redis with 30 day TTL, login flow in src/auth/login.ts.'
+
+  // A wide span that swallows the active question is refused before the kernel
+  // sees it: nothing durable lands, the user turn is named with its OWN reason
+  // (not the AGENTS.md story), and the re-cut is offered.
+  const result = await compress.execute({ content: [{ startSeq: 1, endSeq: 9, summary }] } as never, exec)
+  const text = (result as { text: string }).text
+  assert.match(text, /Compressed 0 block/)
+  assert.match(text, /seqs \d+\.\.\d+ rejected/)
+  assert.match(text, /seq 9/, 'the active user turn is named')
+  assert.match(text, /active user message must stay live/)
+  assert.doesNotMatch(text, /stale copies/, 'no AGENTS.md escape applies to a user message')
+  assert.ok(
+    !sessionEventsOf(session).some((event) => String((event as { type?: string }).type).startsWith('compaction')),
+    'nothing durable landed — the kernel never saw the rejected range',
+  )
+
+  // The re-cut the note offers succeeds: everything BEFORE the active turn compresses.
+  const recut = await compress.execute({ content: [{ startSeq: 1, endSeq: 8, summary }] } as never, exec)
+  assert.match((recut as { text: string }).text, /Compressed 1 block/, 'span 1..8 (before the user turn) compresses normally')
+
+  // The human path explains the same reason (src/commands.ts passes the session through).
+  const command = acpCommand(env)
+  const run = (rawInput: string) => command.handler({
+    commandId: 'cmd-test' as never,
+    agent,
+    rawInput,
+    signal: new AbortController().signal,
+  } as never) as Promise<{ kind: string; text: string }>
+  const human = await run(`compress 1 10 ${summary}`)
+  assert.equal(human.kind, 'success')
+  assert.match(human.text, /rejected/)
+  assert.match(human.text, /active user message must stay live/, '/acp-prune compress names the user-turn reason too')
+  assert.doesNotMatch(human.text, /injected instruction row/, 'a user-turn-only hit is not mislabelled as an instruction row')
+})

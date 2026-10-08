@@ -234,9 +234,11 @@ test('cross-checkpoint span: a PLAIN range folds the checkpoint like any other m
   // host-side protection (not a kernel barrier) hides it from the fold.
   appendTraffic(session, 17, 8)
   const lastSeq = session.surface.nodes[session.surface.nodes.length - 1]!
-
+  // End two nodes early: since issue #196 the newest real user turn (lastSeq - 1)
+  // is hard-guarded engine-side, and this test's subject is the CHECKPOINT fold,
+  // not the user-turn gate. The span still crosses the checkpoint positionally.
   const second = await compress.execute(
-    { content: [{ startSeq: 1, endSeq: lastSeq, summary: `${summary} Whole span.` }] } as never,
+    { content: [{ startSeq: 1, endSeq: lastSeq - 2, summary: `${summary} Whole span.` }] } as never,
     execStub(session, 'call-checkpoint-plain-2'),
   )
   const text = (second as { text: string }).text
@@ -285,9 +287,11 @@ test('cross-checkpoint span: while the checkpoint is inside the protection windo
   // No fresh traffic: the checkpoint is still within the recent zone, so the
   // protected-message filter removes it from the fold (this is host protection,
   // NOT a kernel checkpoint barrier — see the test above for the other side).
+  // The span ends two nodes early: since issue #196 the newest real user turn
+  // (lastSeq - 1) is hard-guarded; the span still crosses the checkpoint.
   const lastSeq = session.surface.nodes[session.surface.nodes.length - 1]!
   const second = await compress.execute(
-    { content: [{ startSeq: 1, endSeq: lastSeq, summary: `${SUMMARY} Whole span.` }] } as never,
+    { content: [{ startSeq: 1, endSeq: lastSeq - 2, summary: `${SUMMARY} Whole span.` }] } as never,
     execStub(session, 'call-checkpoint-protected-2'),
   )
   assert.match((second as { text: string }).text, /Compressed 1 block/)

@@ -1099,19 +1099,24 @@ export function newestInstructionSeqsOf(session: Session): Set<number> {
 
 /**
  * Surface seqs NO caller may compress: the CURRENT (newest) injected
- * agent-instructions row of every scope, restricted to rows still visible on
- * the surface (one definition of "current" — `newestInstructionSeqsOf`).
- * `buildCompressibleSeqRanges` never OFFERS them, and both compress entry
- * points (`handleCompress` in src/tools.ts, `/acp-prune compress` in
- * src/commands.ts) probe the RESOLVED span against this set and HARD-REJECT a
- * covering range before the kernel applies it, so nothing durable lands and no
- * phantom block can exist. This supersedes the earlier F7 draft (warn only):
- * folding a current copy reclaims nothing — the host re-injects it — so there
- * is no legitimate outcome to warn about. Deliberately NARROW (issue #71
- * review F4): only CURRENT agent-instructions rows — the audited loop driver.
- * Engine-authored metadata rows (nudge echo, compress-pair stub) stay
- * foldable like main, and STALE copies of the same file stay compressible —
- * removing them while the newest copy stays visible is the real cleanup.
+ * agent-instructions row of every scope (restricted to rows still visible on
+ * the surface — one definition of "current" — `newestInstructionSeqsOf`) PLUS
+ * the newest visible REAL user turn (`isRealUserTurn` reverse scan over
+ * `session.surface.nodes`, issue #196): a wide or miscalculated model span
+ * must never shadow the active question, while OLDER user turns stay
+ * compressible once superseded by a newer one. `buildCompressibleSeqRanges`
+ * never OFFERS them, and both compress entry points (`handleCompress` in
+ * src/tools.ts, `/acp-prune compress` in src/commands.ts) probe the RESOLVED
+ * span against this set and HARD-REJECT a covering range before the kernel
+ * applies it, so nothing durable lands and no phantom block can exist. This
+ * supersedes the earlier F7 draft (warn only): folding a current copy reclaims
+ * nothing — the host re-injects it — and folding the active user turn loses
+ * the conversation intent, so neither has a legitimate outcome to warn about.
+ * Deliberately NARROW (issue #71 review F4): for instruction rows, only
+ * CURRENT ones — the audited loop driver. Engine-authored metadata rows
+ * (nudge echo, compress-pair stub) stay foldable like main, and STALE copies
+ * of the same file stay compressible — removing them while the newest copy
+ * stays visible is the real cleanup.
  */
 export function guardedSurfaceSeqsOf(session: Session): Set<number> {
   const guarded = new Set<number>()
@@ -1120,6 +1125,14 @@ export function guardedSurfaceSeqsOf(session: Session): Set<number> {
     const event = eventAtOf(session, seq)
     if (event === undefined) continue
     if (isAgentInstructionsRow(event) && newestInstructions.has(seq)) guarded.add(seq)
+  }
+  for (let index = session.surface.nodes.length - 1; index >= 0; index -= 1) {
+    const seq = session.surface.nodes[index]!
+    const event = eventAtOf(session, seq)
+    if (event !== undefined && isRealUserTurn(event)) {
+      guarded.add(seq)
+      break
+    }
   }
   return guarded
 }
