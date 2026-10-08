@@ -240,7 +240,7 @@ test('cross-checkpoint span: a PLAIN range that crosses a live checkpoint carrie
   const text = (second as { text: string }).text
   assert.match(text, /Compressed 0 block/)
   assert.match(text, /still-active block/, 'the reject names the reason')
-  assert.match(text, /startId: "b1"/, 'the reject hands back the block-id call')
+  assert.match(text, /startSeq: "b1"/, 'the reject hands back the block-id call')
 
   const ledger = rebuildBlockLedger(session.snapshotEvents())
   assert.equal(ledger.length, 1, 'no second block: the crossing span never landed')
@@ -264,6 +264,50 @@ test('cross-checkpoint span: a PLAIN range that crosses a live checkpoint carrie
   const recovered = await decompress.execute({ blockId: ledger[0]!.blockId, inline: true } as never, exec)
   const recoveredText = (recovered as { text: string }).text
   assert.match(recoveredText, /a6|r8/, 'the superseded block\'s originals are still recoverable')
+
+  // The reject's OWN advice must be an executable call — and it must be SCHEMA
+  // VALID: this path goes through `dsh-tools`' argument gate (the call below is
+  // what refuses `additionalProperties`), so a hint naming `startId`/`endId`
+  // would tell the model to make a call the tool cannot even parse. It also used
+  // to name `b1`, a boundary form no parser accepted (`invalid seq "b1"`).
+  // Executing the suggestion verbatim is the only way to keep the two in sync.
+  const suggested = await compress.execute(
+    { content: [{ startSeq: 'b1', endSeq: 'b1', summary: `${summary} Distilled.` }] } as never,
+    execStub(session, 'call-checkpoint-distill'),
+  )
+  const suggestedText = (suggested as { text: string }).text
+  assert.match(suggestedText, /Compressed 1 block/, 'the suggested block-id call lands')
+  assert.match(suggestedText, /tier 2/, 'a block-id boundary distills instead of folding')
+  const distilled = rebuildBlockLedger(session.snapshotEvents())
+  assert.equal(distilled.length, 2, 'the distill wrote its own block')
+  assert.equal(distilled[1]!.tier, 2)
+  assert.deepEqual(
+    [...distilled[1]!.parentBlockIds],
+    [ledger[0]!.blockId],
+    'the distilled block records its parent',
+  )
+  assert.ok(
+    !session.surface.nodes.includes(checkpointSeq as never),
+    'the distilled carrier leaves the surface (the parent is superseded, not swallowed)',
+  )
+})
+
+test('cross-checkpoint span: an unknown block id boundary fails with guidance, not a seq error', async () => {
+  const env = makeEnv()
+  const session = crossCheckpointFixture('checkpoint-block-ref-unknown')
+  const compress = tool(env, 'compress')
+  // b9 never existed (one block at most here). Whether the failure surfaces as a
+  // thrown error (nothing landed) or as an advisory line (something did) is the
+  // batch-resilience rule's business — the MESSAGE is what must be right.
+  const outcome = await compress
+    .execute({ content: [{ startSeq: 'b9', endSeq: 'b9', summary: SUMMARY }] } as never, execStub(session, 'call-unknown-b'))
+    .then(
+      (result) => ({ text: (result as { text: string }).text }),
+      (error: Error) => ({ text: error.message }),
+    )
+  assert.match(outcome.text, /block "b9" is not an active block/, 'names the problem')
+  assert.match(outcome.text, /acp_status/, 'points at the live block ids')
+  assert.equal(rebuildBlockLedger(session.snapshotEvents()).length, 0, 'nothing landed')
 })
 
 test('cross-checkpoint span: the carrier guard holds while the checkpoint is inside the protection window too', async () => {
