@@ -302,6 +302,13 @@ test('kernel range source: CJK sessions lose ranges to the kernel char-based mer
   // brings the latin count back. Flip these numbers — and the margin comment in
   // `tests/kernel-count-tokens-default.test.ts` — when the kernel stops sizing
   // that floor in chars; the real fix belongs upstream, not here.
+  //
+  // UPSTREAM: https://github.com/ranxianglei/acp-kernel/issues/511 (filed
+  // 2026-10-08) — the floor is compared against CHARACTERS while every other
+  // threshold on this path is token-based. When that fix ships: bump the pin,
+  // then flip this test from characterization to regression (the CJK fixture must
+  // offer the same 6 ranges as the latin control) and delete this marker.
+  // Tracked in docs/upstream-tracker.md.
   const latinSession = denseSession(6)
   const latin = buildCompressibleSeqRanges(latinSession, kernelProbe(latinSession).view, { preserveRecent: 0 })
   assert.equal(latin.length, 6, 'the latin fixture offers one range per work turn')
