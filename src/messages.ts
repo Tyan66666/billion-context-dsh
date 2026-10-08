@@ -592,7 +592,12 @@ export function classifySurfaceEvent(event: SessionEvent): SurfaceEventClass {
   // host appends them once per header diff (no presence gate), so folding can
   // never provoke a re-injection loop. They can never win user-turn
   // protection either (that gate requires user/message).
-  if (event.type === 'developer/message') return 'metadata'
+  //
+  // Read through a widened local: the 0.1.5/0.1.6 seam lines' event union has
+  // no such member, so a direct comparison would not typecheck against their
+  // types even though the runtime check is exactly what we want.
+  const eventType: string = event.type
+  if (eventType === 'developer/message') return 'metadata'
   // Assistant / tool events are always genuine content.
   if (event.type !== 'user/message') return 'real'
   const source = (event.data as { source?: { kind?: string; plugin?: string } }).source

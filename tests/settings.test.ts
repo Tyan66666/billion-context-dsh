@@ -26,6 +26,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { Context, Service, type Message } from '@deepseek-ai/cordis'
 import * as dshSettings from '@deepseek-ai/dsh-settings'
+import z from '@deepseek-ai/schemastery'
 import { SettingsConflictError } from '@deepseek-ai/dsh-settings'
 import type { SettingsDescriptor, SettingsNamespace } from '@deepseek-ai/dsh-settings'
 import type { Agent } from '@deepseek-ai/dsh-agent'
@@ -674,10 +675,24 @@ test('M6: static Config schema exposes exactly the six knobs, all volatile, no d
     'nudgeEmergencyThresholdPct',
     'autoNudge',
   ])
+  // The volatile marker exists from the 0.2.0 line's schemastery onward; the
+  // 0.1.5/0.1.6 lines ship schemastery 3.18.2, which has no `.volatile()`
+  // helper at all, and calling it there throws at module load. The engine
+  // therefore applies the marker only where the runtime supports it (see
+  // markVolatile in src/settings.ts). Assert the marker where it can exist and
+  // its deliberate absence where it cannot — on BOTH baselines this test runs
+  // and asserts; neither branch silently skips. The six-key field set and the
+  // missing defaults are asserted unconditionally, because those ARE the
+  // public contract on every line.
+  const volatileSupported = typeof (z.number() as { volatile?: unknown }).volatile === 'function'
   for (const field of Object.values(AcpPluginConfigSchema.dict)) {
     // schemastery's zod extension marks volatile fields with meta.volatile —
     // the exact flag dsh-settings' volatileForm() reads off the schema.
-    assert.equal((field as { meta?: { volatile?: boolean } }).meta?.volatile, true)
+    const marker = (field as { meta?: { volatile?: boolean } }).meta?.volatile
+    assert.equal(marker, volatileSupported ? true : undefined,
+      volatileSupported
+        ? 'a runtime with .volatile() support must carry the marker (SettingsForms reads it)'
+        : 'a runtime without .volatile() must not carry the marker (the call would throw at load)')
     assert.equal((field as { defaultValue?: unknown }).defaultValue, undefined, 'a default here would shadow preset-filled base values')
   }
 })

@@ -171,6 +171,24 @@ export const AcpSettingsSchema = z.object({
 })
 
 /**
+ * Mark a schema field as hot-updatable — but only where the runtime has the
+ * helper. `.volatile()` (schemastery `extra('volatile', true)`) exists from
+ * the 0.2.0 line's schemastery 3.18.4 onward; the 0.1.5/0.1.6 lines ship
+ * schemastery 3.18.2, where the call throws at MODULE LOAD (`volatile is not
+ * a function`) and takes the whole plugin down before any tool runs. The
+ * marker itself is only read by the SettingsForms machinery (`volatileForm`
+ * in dsh-settings ≥0.1.7) and cordis' volatile-update wiring — neither exists
+ * on the older lines, which use the `installSection` seam instead and get
+ * hot-apply from the engine's live settings read + per-step resync. So the
+ * marker is applied when present and skipped when absent: one build, every
+ * admitted line.
+ */
+function markVolatile<T>(schema: T): T {
+  const capable = schema as { volatile?: () => unknown }
+  return typeof capable.volatile === 'function' ? (capable.volatile.call(schema) as T) : schema
+}
+
+/**
  * The engine's static config schema — the class-level `Config` the host
  * loader validates composition rows against, and which SettingsForms (≥0.1.7
  * line) reads to build its settings form: every field marked `.volatile()`
@@ -180,14 +198,17 @@ export const AcpSettingsSchema = z.object({
  * stays the single source of default values, and the explicit-value > preset >
  * engine-default layering is the preset layer's job to fill. A default here
  * would shadow a preset-filled base value in the live settings source.
+ *
+ * The volatile marker is applied through {@link markVolatile} because it only
+ * exists from the 0.2.0 line's schemastery onward (see the helper).
  */
 export const AcpPluginConfigSchema = z.object({
-  modelContextLimit: z.number().step(1).min(1).volatile(),
-  autoModelContextLimit: z.boolean().volatile(),
-  nudgeMinContextLimitPct: z.number().min(0).max(1).volatile(),
-  nudgeMaxContextLimitPct: z.number().min(0).max(1).volatile(),
-  nudgeEmergencyThresholdPct: z.number().min(0).max(1).volatile(),
-  autoNudge: z.boolean().volatile(),
+  modelContextLimit: markVolatile(z.number().step(1).min(1)),
+  autoModelContextLimit: markVolatile(z.boolean()),
+  nudgeMinContextLimitPct: markVolatile(z.number().min(0).max(1)),
+  nudgeMaxContextLimitPct: markVolatile(z.number().min(0).max(1)),
+  nudgeEmergencyThresholdPct: markVolatile(z.number().min(0).max(1)),
+  autoNudge: markVolatile(z.boolean()),
 })
 
 /** What changed between two settings snapshots, and what the engine must do about it. */
