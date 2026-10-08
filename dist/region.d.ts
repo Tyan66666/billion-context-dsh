@@ -421,6 +421,27 @@ export interface AcpBlockRegistryEntry {
  */
 export declare function blockRegistry(session: Session): AcpBlockRegistryEntry[];
 /**
+ * Checkpoint carriers of STILL-ACTIVE blocks inside a set of surface seqs.
+ *
+ * A plain message-ref range does not supersede a live block: the kernel keeps
+ * such a carrier visible and reports the exclusion in its warning list
+ * (upstream #335 — our projection marks carriers with
+ * `CoreMessage.summaryOfBlockId`). But our durable transaction replaces the
+ * whole span in ONE `surfaceOp`, so the carrier would leave the visible surface
+ * anyway — the block's summary would vanish while the kernel still counts the
+ * block as active, and the nudge's tier line would name a checkpoint seq that no
+ * longer exists. The compress path therefore rejects such a span (see
+ * `liveCarrierRejectionNote` in src/tools.ts).
+ *
+ * The offered range table never produces one — `compressibleSegmentsOf` flushes
+ * on every checkpoint, exactly like the instruction-row barriers — so only a
+ * hand-crafted call can reach this probe.
+ */
+export declare function liveCheckpointCarriersInSpan(session: Session, seqs: readonly number[]): {
+    seq: number;
+    kernelBlockId: string;
+}[];
+/**
  * The kernel block ref (`bN`) for a surface seq, when that seq is the
  * checkpoint summary node of a block — the edge the model must use to
  * distill (T2/T3). Active blocks distill; a stale (already-distilled) node

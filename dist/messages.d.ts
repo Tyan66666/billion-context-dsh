@@ -129,7 +129,25 @@ export declare function isEngineWrittenSummary(text: string): boolean;
  * live (the append-only log: search_context/decompress rebuild from it).
  */
 export declare function overflowMarkerSummary(hiddenCount: number): string;
-export declare function projectEvent(event: SessionEvent, toolNames?: ReadonlyMap<string, string>): CoreMessage[];
+/**
+ * Kernel block id per compaction id, read from the durable block ledger.
+ *
+ * The kernel needs the block id on every host-carried checkpoint message:
+ * `CoreMessage.summaryOfBlockId` tells it that this message is the host's own
+ * rendering of a compression block, so a PLAIN message-ref range does not
+ * supersede that block — the kernel keeps the carrier visible and says so in
+ * its warning list (upstream #335, adopted with the 0.0.101 pin). A carrier of
+ * an inactive or unknown block folds normally, so an absent/legacy id degrades
+ * to the pre-#335 behavior instead of over-protecting.
+ *
+ * The join key (the `compaction/summary` `compactionId`) and the two accepted
+ * field locations (rawOutput-embedded payload, then the legacy top-level
+ * member) mirror `rebuildBlockLedger` in src/region.ts. That twin cannot be
+ * called from here: the region layer imports this module, so the dependency
+ * would cycle. `tests/checkpoint-span.test.ts` pins the two in lockstep.
+ */
+export declare function kernelBlockIdByCompactionId(events: readonly SessionEvent[]): ReadonlyMap<string, string>;
+export declare function projectEvent(event: SessionEvent, toolNames?: ReadonlyMap<string, string>, kernelBlockIds?: ReadonlyMap<string, string>): CoreMessage[];
 /** Project a session's message events into CoreMessage[] in log order. */
 export declare function eventsToCoreMessages(events: readonly SessionEvent[], toolNames?: ReadonlyMap<string, string>): CoreMessage[];
 /** The surface-visible message events of a session, in model-visible order. */
