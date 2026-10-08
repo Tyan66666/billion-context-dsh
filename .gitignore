@@ -1,4 +1,7 @@
-node_modules/
+# Bare name (no trailing slash) so a file or symlink named node_modules is
+# ignored too — `node_modules/` only matches directories, which let an
+# accidentally committed machine-specific symlink through (PR #207 review).
+node_modules
 *.log
 .DS_Store
 
