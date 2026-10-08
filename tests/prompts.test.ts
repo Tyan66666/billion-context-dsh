@@ -138,6 +138,30 @@ test('M4/prompts 2b: default nudge renders through the kernel renderNudgeText pa
   assert.ok(!text.includes('Context usage is at'), 'no usage statement')
 })
 
+test('M4/prompts 2c: nudge states the array-only content form before the tip (0.0.101 tip advertises a plain string)', () => {
+  // The kernel's 0.0.101 batch tip offers BOTH the array form and a plain
+  // string. Our `compress` schema takes the array form only, so the engine
+  // appends one line saying so. Pinned against REAL rendered output (literal
+  // substrings, not the constant we inject), on BOTH prompt paths, and the
+  // kernel tip must stay the closing line.
+  const session = buildTextSession(12)
+  const kernelPath = buildNudgeText(fakeDecision(50, false), false, session, wholeSurfaceRangeView(session))
+  assert.ok(kernelPath.includes('this tool takes the array form only'), 'kernel path carries the array-form note')
+  assert.ok(kernelPath.includes('compress({ content: [{ startSeq, endSeq, summary }] })'), 'the note spells out the accepted shape')
+  assert.ok(
+    kernelPath.indexOf('this tool takes the array form only') < kernelPath.indexOf('💡 If you compress'),
+    'the note sits before the tip',
+  )
+  assert.ok(kernelPath.endsWith('later nudges.'), 'the kernel tip still closes the nudge')
+
+  const templatePath = buildNudgeText(
+    fakeDecision(50, false), false, session, wholeSurfaceRangeView(session),
+    resolvePrompts({ nudge: { tip: '自定义尾注' } }),
+  )
+  assert.ok(templatePath.includes('this tool takes the array form only'), 'template path carries the note too')
+  assert.ok(templatePath.endsWith('自定义尾注'), 'host tip still closes the nudge')
+})
+
 test('M4/prompts 3: default emergency nudge — ⚠️ frame + HOW_TO_COMPRESS_RULES + seq example', () => {
   const session = buildTextSession(4)
   const text = buildNudgeText(fakeDecision(96, true), true, session, wholeSurfaceRangeView(session))
