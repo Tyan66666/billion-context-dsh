@@ -3461,7 +3461,7 @@ function toolCallIdOfResultEvent(event) {
   if (event.type !== "tool/result") return null;
   const message = event.data.message;
   const block = Array.isArray(message?.content) ? message.content.find((candidate) => candidate?.type === "tool-result") : void 0;
-  const id = block?.toolCallId ?? message?.source?.callId;
+  const id = message?.toolCallId ?? block?.toolCallId ?? message?.source?.callId;
   return typeof id === "string" ? id : null;
 }
 function buildToolCallIndex(events) {
@@ -3677,6 +3677,8 @@ function isAgentInstructionsRow(event) {
 }
 function classifySurfaceEvent(event) {
   if (isCheckpointNode(event)) return "checkpoint";
+  const eventType = event.type;
+  if (eventType === "developer/message") return "metadata";
   if (event.type !== "user/message") return "real";
   const source = event.data.source;
   if (!source) return "real";
@@ -4015,6 +4017,15 @@ function shadowedSeqsOf(session, start, end) {
   const endIdx = nodes.indexOf(end);
   return nodes.slice(startIdx, endIdx + 1);
 }
+function isExactSurfaceSpan(session, start, end, declared) {
+  if (start > end || declared.length === 0) return false;
+  const nodes = session.surface.nodes;
+  const startIdx = nodes.indexOf(start);
+  const endIdx = nodes.indexOf(end);
+  if (startIdx < 0 || endIdx < startIdx) return false;
+  const slice = nodes.slice(startIdx, endIdx + 1);
+  return slice.length === declared.length && slice.every((seq, index) => Number(seq) === declared[index]);
+}
 function readCompactionSummary(event) {
   return event.data;
 }
@@ -4025,6 +4036,18 @@ function prefixSummaryBlocks(blocks) {
     done = true;
     const textBlock = block;
     return { ...textBlock, text: withSummaryFramePrefix(textBlock.text) };
+  });
+}
+function checkpointSourceFor(session, compactionId) {
+  const source = compactCheckpointSource(compactionId);
+  const shape = source;
+  if (shape.kind !== "plugin" || shape.plugin !== "compact") return source;
+  if (Number(session.header.version) < 4) return source;
+  const { compactionId: id, sourceCommandId } = source;
+  return Object.freeze({
+    kind: "compact-checkpoint",
+    compactionId: id,
+    ...sourceCommandId === void 0 ? {} : { sourceCommandId }
   });
 }
 function runCompactionTransaction(session, input) {
@@ -4039,6 +4062,11 @@ function runCompactionTransaction(session, input) {
     const failedEdge = eventAtOf(session, input.start) === void 0 ? input.start : input.end;
     throw new Error(
       `billion-context-dsh: seq ${input.start}..${input.end} not in the current surface \u2014 edge seq ${failedEdge} is not in this session's log. Surface seqs are sparse message nodes (only user/message, assistant/message, tool/result events); consult acp_status for the current surface range`
+    );
+  }
+  if (!isExactSurfaceSpan(session, input.start, input.end, input.shadowedSeqs)) {
+    throw new Error(
+      `billion-context-dsh: seq ${input.start}..${input.end} is not an exact current surface span \u2014 its edges are no longer on the surface or the declared shadowedSeqs do not match the live slice. Nothing was written; consult acp_status for the current surface range`
     );
   }
   try {
@@ -4065,7 +4093,9 @@ function runCompactionTransaction(session, input) {
     }).seq);
     const message = createUserMessage({
       content: framedSummary,
-      source: compactCheckpointSource(compactionId)
+      // Normalized for v4 writers when the resolved dsh-compaction copy still
+      // emits the retired wrapper shape (issue #181); verbatim otherwise.
+      source: checkpointSourceFor(session, compactionId)
     });
     seqs.push(session.append("user/message", message, {
       surfaceOp: { op: "replace", startSeq: input.start, endSeq: input.end },
@@ -4164,6 +4194,11 @@ function hideSurfaceSeqs(session, seqs, text, priceEvent = hostPriceEvent) {
   if (seqs.length === 0) return;
   const start = seqs[0];
   const end = seqs[seqs.length - 1];
+  if (!isExactSurfaceSpan(session, start, end, seqs)) {
+    throw new Error(
+      `billion-context-dsh: cannot prune seqs ${seqs.join(", ")} \u2014 they do not name an exact current surface span. Nothing was written; consult acp_status for the current surface range`
+    );
+  }
   let shadowedTokenCount = 0;
   for (const seq of seqs) {
     const event = eventAtOf(session, seq);
@@ -5359,6 +5394,8 @@ async function handleCompress(env, args, exec) {
   const ranges = [];
   const alreadyCompressedNotes = [];
   const rejectedNotes = [];
+  const seenRangeKeys = /* @__PURE__ */ new Set();
+  const duplicateRangeNotes = [];
   const guardedSeqs = guardedSurfaceSeqsOf(session);
   for (const range of args.content) {
     const startSeq = parseBoundary2(range.startSeq, byRef);
@@ -5392,6 +5429,14 @@ async function handleCompress(env, args, exec) {
         `billion-context-dsh: seq ${resolved.start}..${resolved.end} has no assigned ref \u2014 the range must be on the current surface (run acp_status for the live seq list)`
       );
     }
+    const rangeKey2 = `${startRef}::${endRef}`;
+    if (seenRangeKeys.has(rangeKey2)) {
+      duplicateRangeNotes.push(
+        `  seqs ${range.startSeq}..${range.endSeq} resolve to the same span as an earlier range in this call (${resolved.start}..${resolved.end}) \u2014 skipped`
+      );
+      continue;
+    }
+    seenRangeKeys.add(rangeKey2);
     ranges.push({
       ...resolved,
       startSeq,
@@ -5405,9 +5450,11 @@ async function handleCompress(env, args, exec) {
     });
   }
   if (ranges.length === 0) {
-    const text = ["Compressed 0 block(s), ~0 tokens reclaimed.", ...alreadyCompressedNotes, ...rejectedNotes];
+    const text = ["Compressed 0 block(s), ~0 tokens reclaimed.", ...alreadyCompressedNotes, ...duplicateRangeNotes, ...rejectedNotes];
     if (alreadyCompressedNotes.length > 0) {
       text.push("  (all requested ranges were already compressed \u2014 decompress a block to recover its originals)");
+    } else if (duplicateRangeNotes.length > 0 && rejectedNotes.length === 0) {
+      text.push("  (nothing compressed \u2014 every range resolved to a span an earlier range in this call already covers)");
     } else if (rejectedNotes.length > 0) {
       text.push("  (nothing compressed \u2014 every range covered a current injected instruction row; see the rejections above)");
     }
@@ -5459,6 +5506,11 @@ async function handleCompress(env, args, exec) {
     }
     const { start, end } = range;
     const shadowed = shadowedSeqsOf(session, start, end);
+    if (!isExactSurfaceSpan(session, start, end, shadowed)) {
+      skippedRanges += 1;
+      lines.push(`  skipped seqs ${start}..${end}: already shadowed by an earlier range in this call`);
+      continue;
+    }
     const shadowedTokens = shadowedTokensViaMeter(session, shadowed, agent.ctx);
     const tier = block.tier === 2 || block.tier === 3 ? block.tier : 1;
     const parentBlockIds = compactionIdsOfKernelBlocks(session, block.directBlockIds);
@@ -5492,12 +5544,13 @@ async function handleCompress(env, args, exec) {
     );
   }
   const summaryLine = `Compressed ${applied.result.blocksCreated} block(s), ~${applied.result.tokensCompressed} tokens reclaimed.`;
-  const totalSkipped = skippedRanges + alreadyCompressedNotes.length + rejectedNotes.length;
+  const totalSkipped = skippedRanges + alreadyCompressedNotes.length + duplicateRangeNotes.length + rejectedNotes.length;
   const failedLines = applied.result.errors.map((error) => `  ${error}`);
   const warningLines = [
     ...freeWarnings.map((warning) => `  ${warning}`),
     ...failedLines,
     ...alreadyCompressedNotes,
+    ...duplicateRangeNotes,
     ...rejectedNotes,
     ...lines
   ];
@@ -5782,6 +5835,22 @@ function filterSettingsEntry(entry) {
     ...entry.autoNudge !== void 0 ? { autoNudge: entry.autoNudge } : {}
   };
 }
+var VOLATILE_WRITE = /* @__PURE__ */ Symbol.for("cosmokit.volatile.write");
+function isVolatileRef(value) {
+  return typeof value === "object" && value !== null && VOLATILE_WRITE in value;
+}
+function unwrapVolatile(value) {
+  if (isVolatileRef(value)) return value.get();
+  return value;
+}
+function liveSettingsFromRefs(entry) {
+  const out = {};
+  for (const key of SETTINGS_KEYS) {
+    const value = unwrapVolatile(entry[key]);
+    if (value !== void 0) out[key] = value;
+  }
+  return out;
+}
 function resolveAcpSettings(input) {
   return {
     modelContextLimit: input.modelContextLimit,
@@ -5799,6 +5868,18 @@ var AcpSettingsSchema = z.object({
   nudgeMaxContextLimitPct: z.number().min(0).max(1).default(SETTING_DEFAULTS.nudgeMaxContextLimitPct),
   nudgeEmergencyThresholdPct: z.number().min(0).max(1).default(SETTING_DEFAULTS.nudgeEmergencyThresholdPct),
   autoNudge: z.boolean().default(SETTING_DEFAULTS.autoNudge)
+});
+function markVolatile(schema) {
+  const capable = schema;
+  return typeof capable.volatile === "function" ? capable.volatile.call(schema) : schema;
+}
+var AcpPluginConfigSchema = z.object({
+  modelContextLimit: markVolatile(z.number().step(1).min(1)),
+  autoModelContextLimit: markVolatile(z.boolean()),
+  nudgeMinContextLimitPct: markVolatile(z.number().min(0).max(1)),
+  nudgeMaxContextLimitPct: markVolatile(z.number().min(0).max(1)),
+  nudgeEmergencyThresholdPct: markVolatile(z.number().min(0).max(1)),
+  autoNudge: markVolatile(z.boolean())
 });
 function describeSettingsChange(prev, next) {
   const warnings = [];
@@ -5838,21 +5919,27 @@ function requireService(getService) {
   return service;
 }
 function makeSettingsCommandSurface(getService, getSnapshot) {
+  let trackedRevision;
+  const findDescriptor = () => {
+    const service = getService();
+    if (service === void 0) return void 0;
+    const descriptor = service.describe().find((row) => String(row.ns) === ACP_SETTINGS_NAMESPACE);
+    if (descriptor?.revision !== void 0) trackedRevision = descriptor.revision;
+    return descriptor;
+  };
   return {
     get available() {
       return getService() !== void 0;
     },
     snapshot: getSnapshot,
-    describe() {
-      const service = getService();
-      if (service === void 0) return void 0;
-      return service.describe().find((descriptor) => String(descriptor.ns) === ACP_SETTINGS_NAMESPACE);
-    },
+    describe: findDescriptor,
     async update(patch) {
-      await requireService(getService).update(ACP_SETTINGS_NAMESPACE, patch);
+      findDescriptor();
+      await requireService(getService).update(ACP_SETTINGS_NAMESPACE, patch, trackedRevision);
     },
     async replaceSection(section) {
-      await requireService(getService).replace(ACP_SETTINGS_NAMESPACE, section);
+      findDescriptor();
+      await requireService(getService).replace(ACP_SETTINGS_NAMESPACE, section, trackedRevision);
     }
   };
 }
@@ -6220,6 +6307,17 @@ function assertNudgeThresholdOrder(config) {
   }
 }
 var AcpCompactionEngine = class extends CompactionEngine {
+  /**
+   * Static plugin config schema — cordis reads `plugin.Config` off the raw
+   * plugin value at fiber start and validates the composition row against it
+   * (`resolveConfig`). Class-shaped mounts carry this (the bundle/composition
+   * row path); function-shaped mounts skip validation and receive plain
+   * values. On dsh-settings ≥ 0.1.7 hosts this SAME schema is what SettingsForms
+   * builds its form from — the volatile fields are exactly what `/acp-prune
+   * config` exposes (see AcpPluginConfigSchema for why fields are volatile and
+   * default-free).
+   */
+  static Config = AcpPluginConfigSchema;
   /** The framework-agnostic ACP compression core, reused verbatim. */
   kernel;
   /** Per-session kernel state. */
@@ -6243,9 +6341,12 @@ var AcpCompactionEngine = class extends CompactionEngine {
   compressCallIdsToHide = /* @__PURE__ */ new Set();
   /** Per provider/model route the resolved window (probe failures cached too). */
   windowCache = /* @__PURE__ */ new Map();
-  /** Live settings snapshot thunk (composition → user settings layer); swapped when the settings provider attaches (SettingsProvider.installSection). */
+  /** Live settings snapshot thunk (composition → user settings layer); swapped when the settings provider attaches (installSection on ≤0.1.6 lines, volatile-ref re-read on the ≥0.1.7 forms line). */
   readSettingsSource = () => resolveAcpSettings({});
-  /** The settings service, captured lazily for /acp-prune config (undefined in provider-less processes). */
+  /** Hot-apply driver: re-reads the live source and runs the change diff; called once per agent step, a no-op unless something changed. */
+  resyncSettings = () => {
+  };
+  /** The settings service, captured lazily for /acp-prune config (undefined in provider-less processes). Structurally typed — both host lines' real services satisfy it. */
   settingsService;
   /** /acp-prune config read/write surface. */
   settingsCommand;
@@ -6257,14 +6358,15 @@ var AcpCompactionEngine = class extends CompactionEngine {
   overflowSessions = /* @__PURE__ */ new Map();
   constructor(ctx, config = {}) {
     super(ctx);
-    this.config = resolveAcpConfig(config);
+    this.config = resolveAcpConfig({ ...config, ...liveSettingsFromRefs(filterSettingsEntry(config)) });
     this.prompts = resolvePrompts2(config.prompts);
     const ports = this.config.countTokens !== void 0 ? { countTokens: this.config.countTokens } : {};
     this.kernel = createCore(ports);
     setDocCacheCap(128 * 1024 * 1024);
     this.store = new AcpStateStore();
     const compositionEntry = presetFilledSettingsEntry(config);
-    let current = resolveAcpSettings(compositionEntry);
+    const initialCurrent = resolveAcpSettings(liveSettingsFromRefs(compositionEntry));
+    let current = initialCurrent;
     this.readSettingsSource = () => current;
     const engine = this;
     const applySettings = () => {
@@ -6277,30 +6379,54 @@ var AcpCompactionEngine = class extends CompactionEngine {
         this.ctx.logger.warn(`billion-context-dsh: applying settings change failed: ${String(error)}`);
       }
     };
+    this.resyncSettings = applySettings;
     this.settingsCommand = makeSettingsCommandSurface(() => this.settingsService, () => current);
+    const detachSettings = () => {
+      this.settingsService = void 0;
+      this.readSettingsSource = () => initialCurrent;
+    };
     if (this.config.settingsEnabled !== false) {
       ctx.inject(["settings"], (settingsCtx) => {
-        if (typeof settingsCtx.settings?.installSection !== "function") {
-          this.ctx.logger.warn(
-            "billion-context-dsh: host settings service has no installSection (removed in dsh-settings >= 0.1.7) \u2014 the compaction-acp settings section is not registered; the six knobs keep their composition values and /acp-prune config reports the section unavailable"
-          );
-          return void 0;
+        const face = settingsCtx.settings;
+        if (face === void 0 || typeof face !== "object") return void 0;
+        const service = face;
+        if (typeof service.installSection === "function") {
+          const legacy = service;
+          legacy.installSection(ctx, ACP_SETTINGS_NAMESPACE, AcpSettingsSchema, liveSettingsFromRefs(compositionEntry), {
+            // The seam's source type follows the entry it registered, so `source`
+            // is a partial view of the settings; re-resolve it into a
+            // fully-defaulted snapshot so every reader sees the same shape the
+            // composition path produced.
+            setSource: (source) => {
+              this.readSettingsSource = () => resolveAcpSettings(source());
+            },
+            onChange: applySettings
+          });
+          this.settingsService = legacy;
+          return detachSettings;
         }
-        settingsCtx.settings.installSection(ctx, ACP_SETTINGS_NAMESPACE, AcpSettingsSchema, compositionEntry, {
-          // The seam's source type follows the entry it registered, so `source`
-          // is a partial view of the settings; re-resolve it into a
-          // fully-defaulted snapshot so every reader sees the same shape the
-          // composition path produced.
-          setSource: (source) => {
-            this.readSettingsSource = () => resolveAcpSettings(source());
-          },
-          onChange: applySettings
-        });
-        this.settingsService = settingsCtx.settings;
-        return () => {
-          this.settingsService = void 0;
-          this.readSettingsSource = () => current;
-        };
+        if (typeof service.describe === "function" && typeof service.update === "function" && typeof service.replace === "function") {
+          this.settingsService = {
+            describe: service.describe.bind(service),
+            update: service.update.bind(service),
+            replace: service.replace.bind(service)
+          };
+          this.readSettingsSource = () => resolveAcpSettings(liveSettingsFromRefs(compositionEntry));
+          try {
+            const rows = service.describe.call(service);
+            if (!rows.some((row) => String(row.ns) === ACP_SETTINGS_NAMESPACE)) {
+              this.ctx.logger.warn(
+                'billion-context-dsh: SettingsForms is present but no profile entry named "compaction-acp" is visible \u2014 the six knobs keep their composition values; /acp-prune config needs a composition row with that id (the bundle install provides it)'
+              );
+            }
+          } catch {
+          }
+          return detachSettings;
+        }
+        this.ctx.logger.warn(
+          "billion-context-dsh: host settings service speaks neither installSection (dsh-settings <= 0.1.6) nor SettingsForms describe/update/replace (>= 0.1.7) \u2014 the compaction-acp settings section is unavailable; the six knobs keep their composition values"
+        );
+        return void 0;
       });
     }
     const env = {
@@ -6374,9 +6500,7 @@ var AcpCompactionEngine = class extends CompactionEngine {
         }
       }
       if (event.type !== "tool/result") return;
-      const message = event.data.message;
-      const block = message.content[0];
-      const callId = block?.toolCallId ?? message.source.callId;
+      const callId = toolCallIdOfResultEvent(event);
       if (typeof callId !== "string" || !this.compressCallIdsToHide.has(callId)) return;
       this.compressCallIdsToHide.delete(callId);
       deferCompressPairHide(session, callId, event.seq, (error) => {
@@ -6385,6 +6509,7 @@ var AcpCompactionEngine = class extends CompactionEngine {
     });
     ctx.on("agent/pre-step", async (payload, next) => {
       stripOrphanedSurfaceToolMessages(payload.agent.session);
+      engine.resyncSettings();
       if (!engine.readSettingsSource().autoNudge) return next();
       const decision = await next();
       if (decision.kind === "reject") return decision;
@@ -6673,6 +6798,7 @@ export {
   ACP_SYSTEM_PROMPT,
   ACP_SYSTEM_PROMPT_ORDER,
   AcpCompactionEngine,
+  AcpPluginConfigSchema,
   AcpSettingsSchema,
   AcpStateStore,
   AlreadyCompressedRangeError,
@@ -6684,6 +6810,7 @@ export {
   PRESET_NAMES,
   SETTINGS_KEYS,
   SETTING_DEFAULTS,
+  VOLATILE_WRITE,
   acpCommand,
   assertNoActiveCompaction,
   blockRefForSummarySeq,
@@ -6700,7 +6827,9 @@ export {
   findOpenTurn,
   hideCompressToolPair,
   isPresetName,
+  isVolatileRef,
   kernelConfigFor,
+  liveSettingsFromRefs,
   makeSettingsCommandSurface,
   makeTools,
   parseSettingValue,
@@ -6720,6 +6849,7 @@ export {
   stripOrphanedSurfaceToolMessages,
   summarySeqOfKernelBlock,
   surfaceEventsOf,
+  unwrapVolatile,
   windowSourceLabel
 };
 //# sourceMappingURL=index.js.map

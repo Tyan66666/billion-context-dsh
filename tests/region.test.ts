@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { Session } from '@deepseek-ai/dsh-session'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { AcpStateStore } from '../src/state.ts'
+import { checkpointCompactionIdOf, isCheckpointNode } from '../src/messages.ts'
 import {
   AlreadyCompressedRangeError,
   PRUNE_NOTE,
@@ -64,11 +65,13 @@ test('M5: runCompactionTransaction lands the four events and shadows the range',
   for (const seq of [1, 2, 3, 4]) assert.ok(!session.surface.nodes.includes(seq))
   assert.ok(session.surface.nodes.includes(seqs[2]!), 'the replacement node joins the surface')
 
-  // The summary node carries the checkpoint source.
+  // The summary node carries the checkpoint source — shape follows the installed
+  // dsh-compaction line, so assert through the engine's ONE classifier instead of
+  // one line's literal, and tie it to this transaction's compaction id.
   const replaceEvent = session.snapshotEvents()[seqs[2]!]!
   assert.equal(replaceEvent.type, 'user/message')
-  const source = (replaceEvent.data as { source?: { plugin?: string } }).source
-  assert.equal(source?.plugin, 'compact')
+  assert.ok(isCheckpointNode(replaceEvent), 'the replacement node is a checkpoint')
+  assert.equal(checkpointCompactionIdOf(replaceEvent), compactionId)
 
   // Derived messages shrank: 6 messages → 2 surviving + 1 summary = 3.
   assert.equal(session.deriveMessages().length, 3)
@@ -330,27 +333,56 @@ test('M5: runCompactionTransaction fails fast on a range that is not in the surf
   assert.equal(session.snapshotEvents().length, before, 'no durable event was written')
 })
 
-test('M5: a failed compaction transaction writes a compensating compaction/end before rethrowing', () => {
+test('M5: a stale-span re-compression fails before writing anything (issue #201)', () => {
   const session = buildTextSession(8)
   runCompactionTransaction(session, {
     start: 1, end: 4, shadowedSeqs: [1, 2, 3, 4],
     summary: [{ type: 'text', text: 'A summary of the range.' }],
     shadowedTokenCount: 123, provider: 'test-provider', model: 'test-model',
   })
-  // Compress the SAME span again: the host's surfaceOp replace now rejects it
-  // ("start seq N not found in surface"), which is exactly the live failure
-  // that used to leave a dangling compaction/start behind.
+  // Compressing the SAME span again used to write compaction/start + a dead
+  // compaction/summary (stale shadowedSeqs) before the host's replace rejected
+  // it — bricking the log on next load (issue #201). The write-before-validate
+  // gate now stops it as a clean zero-write error.
+  const before = session.snapshotEvents().length
   assert.throws(
     () => runCompactionTransaction(session, {
       start: 1, end: 4, shadowedSeqs: [1, 2, 3, 4],
       summary: [{ type: 'text', text: 'A summary of the range.' }],
       shadowedTokenCount: 123, provider: 'test-provider', model: 'test-model',
     }),
-    /surface replace/,
+    /not an exact current surface span/,
   )
+  assert.equal(session.snapshotEvents().length, before, 'no durable event was written')
+})
+
+test('M5: a failure after compaction/start still writes a compensating compaction/end before rethrowing', () => {
+  const session = buildTextSession(8)
+  // Simulate a host reject of the checkpoint replace for an unanticipated
+  // reason — the class of failure pre-validation cannot see (the stale-span
+  // case no longer reaches this backstop; it is caught earlier, above).
+  const originalAppend = session.append.bind(session)
+  const patched = session as unknown as { append: (...args: unknown[]) => unknown }
+  patched.append = (...args: unknown[]) => {
+    if (args[0] === 'user/message') throw new Error('simulated: surface replace rejected by host')
+    return originalAppend(...(args as Parameters<typeof originalAppend>))
+  }
+  try {
+    assert.throws(
+      () => runCompactionTransaction(session, {
+        start: 5, end: 8, shadowedSeqs: [5, 6, 7, 8],
+        summary: [{ type: 'text', text: 'A summary of the range.' }],
+        shadowedTokenCount: 123, provider: 'test-provider', model: 'test-model',
+      }),
+      /simulated: surface replace rejected by host/,
+    )
+  } finally {
+    patched.append = originalAppend
+  }
   // The transaction appended compaction/start then compaction/summary, and the
   // catch block added a compensating compaction/end — never a dangling start.
-  assert.equal(session.snapshotEvents()[session.snapshotEvents().length - 1]!.type, 'compaction/end')
+  const events = session.snapshotEvents()
+  assert.equal(events[events.length - 1]!.type, 'compaction/end')
 })
 
 test('M5: tool-call ranges are auto-adjusted to balanced edges', () => {

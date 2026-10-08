@@ -1,7 +1,7 @@
 {
   "name": "nudge-rhythm",
   "persona": "You are a concise coding agent.",
-  "engine": { "modelContextLimit": 24000, "autoCommand": false },
+  "engine": { "modelContextLimit": 20000, "autoCommand": false },
   "userTurns": [
   { "filler": { "topic": "pruning", "count": 80 } },
   { "filler": { "topic": "ledger", "count": 80 } },

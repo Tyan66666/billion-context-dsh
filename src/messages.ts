@@ -21,10 +21,24 @@ import { eventAtOf, sessionEventsOf } from './session-events.ts'
 // MessageSourceMap predates V4 admission, so register this plugin's two
 // producer kinds on its documented merge-extensibility seam ("plugins add
 // their own kinds"). Type-level only — no runtime effect.
-declare module '@deepseek-ai/dsh-llm/message' {
+// The target MUST be the package ROOT specifier '@deepseek-ai/dsh-llm' —
+// the same spelling dsh-compaction uses for its 'compact-checkpoint' member
+// (0.2.0 line). The map lives on the ROOT module as of the 0.2.0 line (the
+// `/message` subpath export is gone; dsh-compaction itself augments the
+// root), and under tsgo (typescript 7) augmenting the '/message' subpath
+// splits the MessageSourceMap symbol, so the host packages' root-spelled
+// augmentations stop merging into it and the checkpoint write fails
+// typecheck with TS2322. The root spelling is also what the pre-0.2.0 lines
+// need (measured green on the 0.1.5-rc.2 baseline too), so it is the one
+// spelling that serves every admitted line.
+declare module '@deepseek-ai/dsh-llm' {
   interface MessageSourceMap {
     acpNudge: { kind: 'plugin:acp-nudge' }
     acpPrune: { kind: 'plugin:billion-context-dsh' }
+    // V4 checkpoint producer kind (issue #181): emitted by checkpointSourceFor
+    // when the resolved dsh-compaction copy predates the host's v4 writer and
+    // its wrapper-shaped compactCheckpointSource() output is normalized.
+    compactCheckpoint: { kind: 'compact-checkpoint'; compactionId: string; sourceCommandId?: string }
   }
 }
 
@@ -36,6 +50,13 @@ declare module '@deepseek-ai/dsh-llm/message' {
  * the actual `text` blocks, so a top-level-only walk would drop every tool
  * result from the projection (and with it the seq's ref assignment, breaking
  * compress boundary resolution). Nested arrays are flattened depth-first.
+ *
+ * That nesting is the PRE-0.2.0 shape. On the 0.2.0 seam line a tool result is
+ * a first-class ToolResultMessage whose content blocks are plain
+ * text/image/file blocks — nothing to unwrap — so the recursive branch simply
+ * finds the text one level up. It stays because this engine supports every
+ * line in its declared peer range, and a top-level-only walk would silently
+ * drop text on the older ones.
  *
  * Non-text blocks that the provider still bills for render as a deterministic
  * one-line placeholder instead of vanishing (issue #117). An `image`/`file`
@@ -132,20 +153,30 @@ function stringifyArgs(args: unknown): string {
 /**
  * The tool-call id of one tool/result surface message, or null.
  *
- * Real DSH tool-result events carry NO `message.toolCallId` (hard-won rule
- * 10): the identity lives in the nested `{ type: 'tool-result', toolCallId }`
- * content block, falling back to `message.source.callId`. Shared with
- * `src/region.ts`'s call/result pairing — one implementation, never a copy.
+ * Three durable locations, in priority order (hard-won rule 10): the
+ * MESSAGE-level `toolCallId` field (written by dsh-llm's createToolResultMessage
+ * on the 0.1.7+ lines), the nested `{ type: 'tool-result', toolCallId }`
+ * content block, then `message.source.callId` (present on every line). A real
+ * event carries at least two of the three; the order only matters for
+ * fixtures that set a subset. Shared with `src/region.ts`'s call/result
+ * pairing — one implementation, never a copy.
  */
 export function toolCallIdOfResultEvent(event: SessionEvent): string | null {
   if (event.type !== 'tool/result') return null
-  const message = (event.data as {
-    message?: { content?: Array<{ type?: unknown; toolCallId?: unknown }>; source?: { callId?: unknown } }
+  // Structural read through `unknown`: the typed event data names dsh-llm's
+  // ContentBlock union (readonly, toolCallId only on some members), which no
+  // single straight assertion overlaps with across seam lines.
+  const message = (event.data as unknown as {
+    message?: {
+      toolCallId?: unknown
+      content?: Array<{ type?: unknown; toolCallId?: unknown }>
+      source?: { callId?: unknown }
+    }
   }).message
   const block = Array.isArray(message?.content)
     ? message.content.find((candidate) => candidate?.type === 'tool-result')
     : undefined
-  const id = block?.toolCallId ?? message?.source?.callId
+  const id = message?.toolCallId ?? block?.toolCallId ?? message?.source?.callId
   return typeof id === 'string' ? id : null
 }
 
@@ -565,6 +596,19 @@ export function isAgentInstructionsRow(event: SessionEvent): boolean {
 export function classifySurfaceEvent(event: SessionEvent): SurfaceEventClass {
   // Compaction summary nodes first — they are user messages too.
   if (isCheckpointNode(event)) return 'checkpoint'
+  // developer/message (DSH >= 0.2.0): host-written tool-registry diff rows
+  // (tool-addition/tool-removal blocks, source { kind: 'tool-registry' }) —
+  // bookkeeping about the request header, not conversation content. Foldable
+  // like other host metadata: they carry no text in our projection and the
+  // host appends them once per header diff (no presence gate), so folding can
+  // never provoke a re-injection loop. They can never win user-turn
+  // protection either (that gate requires user/message).
+  //
+  // Read through a widened local: the 0.1.5/0.1.6 seam lines' event union has
+  // no such member, so a direct comparison would not typecheck against their
+  // types even though the runtime check is exactly what we want.
+  const eventType: string = event.type
+  if (eventType === 'developer/message') return 'metadata'
   // Assistant / tool events are always genuine content.
   if (event.type !== 'user/message') return 'real'
   const source = (event.data as { source?: { kind?: string; plugin?: string } }).source

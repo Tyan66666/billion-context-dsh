@@ -378,6 +378,31 @@ export function shadowedSeqsOf(session: Session, start: number, end: number): nu
   return nodes.slice(startIdx, endIdx + 1)
 }
 
+/**
+ * True iff `declared` equals the CURRENT surface slice between `start` and
+ * `end` positionally — both edges on the surface, in order, element-wise equal.
+ * This mirrors exactly the invariant the released readers enforce at load time
+ * on every `compaction/summary` / `compaction/prune` event (`shadowedSeqs` must
+ * name an exact current surface span); writing an event that violates it makes
+ * the whole session log unloadable forever (issue #201). Unlike
+ * {@link shadowedSeqsOf} (which silently degrades for read-only probes), this
+ * is the strict gate for WRITES.
+ */
+export function isExactSurfaceSpan(
+  session: Session,
+  start: number,
+  end: number,
+  declared: readonly number[],
+): boolean {
+  if (start > end || declared.length === 0) return false
+  const nodes = session.surface.nodes
+  const startIdx = nodes.indexOf(start as SurfaceSeq)
+  const endIdx = nodes.indexOf(end as SurfaceSeq)
+  if (startIdx < 0 || endIdx < startIdx) return false
+  const slice = nodes.slice(startIdx, endIdx + 1)
+  return slice.length === declared.length && slice.every((seq, index) => Number(seq) === declared[index])
+}
+
 export interface CompactionTransactionInput {
   readonly start: number
   readonly end: number
@@ -443,6 +468,59 @@ export function prefixSummaryBlocks(blocks: readonly ContentBlock[]): ContentBlo
 }
 
 /**
+ * Checkpoint source for the durable summary node, normalized for V4 writers.
+ *
+ * The copy of @deepseek-ai/dsh-compaction this engine resolves to may predate
+ * the host persisting the session: the plugin's peer range floors at the
+ * 0.1.5 line, whose compactCheckpointSource() still emits the retired V3
+ * wrapper shape { kind: 'plugin', plugin: 'compact' }. A DSH ≥0.1.7 v4
+ * persistence writer rejects that shape in producer-kind admission ("format
+ * v4 message requires a producer-owned source kind") and the WHOLE write batch
+ * wedges in memory — every later event piles behind the poison row until
+ * restart (issue #181; #165 fixed our own writers but not this host-supplied
+ * one). Normalize exactly that legacy shape when the session is persisted at
+ * format v4 — header.version decides which writer encodes the row, not which
+ * package resolved — and pass everything else through verbatim: older hosts
+ * still speak the wrapper, and newer dsh-compaction copies already emit the
+ * producer kind.
+ *
+ * Removal gate: delete once the peer floor moves past the last
+ * wrapper-emitting dsh-compaction line (or upstream retires the shape there).
+ *
+ * Reachability is line-dependent, and so is its coverage: each dsh-compaction
+ * line derives its `CompactionCheckpointSource` type from its OWN marker
+ * constant, so the wrapper variant is present in the 0.1.5-line types (whose
+ * `compactCheckpointSource()` really does emit it) and absent from the 0.2.0-line
+ * ones (marker `{ kind: 'compact-checkpoint' }`). On the 0.2.0 baseline the
+ * rewrite below is therefore unreachable — and untypeable if written as a plain
+ * `source.kind === 'plugin'` comparison (TS2367 against a literal kind) — which is
+ * why the two identifying fields are read through a structural view and the
+ * normalized object is rebuilt from the fields both lines share.
+ */
+export function checkpointSourceFor(
+  session: Pick<Session, 'header'>,
+  compactionId: CompactionId,
+) {
+  const source = compactCheckpointSource(compactionId)
+  // Structural probe: never compare against `source.kind` directly (see above).
+  const shape: { readonly kind?: string; readonly plugin?: string } = source
+  if (shape.kind !== 'plugin' || shape.plugin !== 'compact') return source
+  // header.version is typed as a per-line literal (3 on the devDep line); widen
+  // through Number so this comparison compiles against both type lines.
+  if (Number(session.header.version) < 4) return source
+  // Rebuild from the known fields instead of dropping `kind`/`plugin` out of a
+  // spread: the wrapper's own `plugin` member is exactly what a v4 writer
+  // rejects, and rebuilding keeps `compactionId`/`sourceCommandId` typed by the
+  // resolved copy rather than widened.
+  const { compactionId: id, sourceCommandId } = source
+  return Object.freeze({
+    kind: 'compact-checkpoint' as const,
+    compactionId: id,
+    ...(sourceCommandId === undefined ? {} : { sourceCommandId }),
+  })
+}
+
+/**
  * Run one durable compression transaction. Throws on invalid state; on success
  * the four events are in the log and the surface has one summary node.
  */
@@ -470,6 +548,20 @@ export function runCompactionTransaction(
       + `edge seq ${failedEdge} is not in this session's log. `
       + 'Surface seqs are sparse message nodes (only user/message, assistant/message, '
       + 'tool/result events); consult acp_status for the current surface range',
+    )
+  }
+  // The log-presence check above passes for edges an EARLIER transaction already
+  // shadowed (the append-only log keeps them forever), so it cannot stop a
+  // duplicate/stale span. The readers' load-time invariant demands more: the
+  // declared shadowedSeqs must equal the CURRENT surface slice positionally.
+  // Enforce it here, before any durable event exists, so a stale span fails as
+  // a clean zero-write error instead of leaving a dead transaction that bricks
+  // the whole session log (issue #201).
+  if (!isExactSurfaceSpan(session, input.start, input.end, input.shadowedSeqs)) {
+    throw new Error(
+      `billion-context-dsh: seq ${input.start}..${input.end} is not an exact current surface span — `
+      + 'its edges are no longer on the surface or the declared shadowedSeqs do not match the live slice. '
+      + 'Nothing was written; consult acp_status for the current surface range',
     )
   }
 
@@ -519,7 +611,9 @@ export function runCompactionTransaction(
     // idempotent safety net for legacy blocks written before this feature.
     const message = createUserMessage({
       content: framedSummary,
-      source: compactCheckpointSource(compactionId),
+      // Normalized for v4 writers when the resolved dsh-compaction copy still
+      // emits the retired wrapper shape (issue #181); verbatim otherwise.
+      source: checkpointSourceFor(session, compactionId),
     })
     // The replace op MUST use the 0.1.5 field names: dsh-session's validator
     // accepts exactly { op, startSeq, endSeq } (exactly three keys) and rejects
@@ -712,11 +806,12 @@ function toolCallIdsOfEvent(event: SessionEvent): string[] {
  * every hidden span becomes a user message. Callers with meaningful text pass
  * it (compress call/result hiding keeps the tool outcome visible to the
  * model); callers without get the fixed prune note. The originals remain in
- * the append-only log.
+ * the append-only log. Exported for the issue #201 regression tests — not part
+ * of the public API (index.ts re-exports only).
  */
 export const PRUNE_NOTE = '(removed by context management)'
 
-function hideSurfaceSeqs(
+export function hideSurfaceSeqs(
   session: Session,
   seqs: readonly number[],
   text?: string,
@@ -725,6 +820,15 @@ function hideSurfaceSeqs(
   if (seqs.length === 0) return
   const start = seqs[0]!
   const end = seqs[seqs.length - 1]!
+  // Readers enforce the same exact-span invariant on compaction/prune as on
+  // compaction/summary, so a dangling prune bricks the log exactly like a dead
+  // transaction. Validate BEFORE the first append (issue #201).
+  if (!isExactSurfaceSpan(session, start, end, seqs)) {
+    throw new Error(
+      `billion-context-dsh: cannot prune seqs ${seqs.join(', ')} — they do not name an exact current surface span. `
+      + 'Nothing was written; consult acp_status for the current surface range',
+    )
+  }
   let shadowedTokenCount = 0
   for (const seq of seqs) {
     const event = eventAtOf(session, seq)

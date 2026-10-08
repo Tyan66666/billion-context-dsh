@@ -12,13 +12,18 @@
  */
 import type { CoreMessage } from 'acp-kernel';
 import type { Session, SessionEvent } from '@deepseek-ai/dsh-session';
-declare module '@deepseek-ai/dsh-llm/message' {
+declare module '@deepseek-ai/dsh-llm' {
     interface MessageSourceMap {
         acpNudge: {
             kind: 'plugin:acp-nudge';
         };
         acpPrune: {
             kind: 'plugin:billion-context-dsh';
+        };
+        compactCheckpoint: {
+            kind: 'compact-checkpoint';
+            compactionId: string;
+            sourceCommandId?: string;
         };
     }
 }
@@ -30,6 +35,13 @@ declare module '@deepseek-ai/dsh-llm/message' {
  * the actual `text` blocks, so a top-level-only walk would drop every tool
  * result from the projection (and with it the seq's ref assignment, breaking
  * compress boundary resolution). Nested arrays are flattened depth-first.
+ *
+ * That nesting is the PRE-0.2.0 shape. On the 0.2.0 seam line a tool result is
+ * a first-class ToolResultMessage whose content blocks are plain
+ * text/image/file blocks — nothing to unwrap — so the recursive branch simply
+ * finds the text one level up. It stays because this engine supports every
+ * line in its declared peer range, and a top-level-only walk would silently
+ * drop text on the older ones.
  *
  * Non-text blocks that the provider still bills for render as a deterministic
  * one-line placeholder instead of vanishing (issue #117). An `image`/`file`
@@ -63,10 +75,13 @@ export declare function toolCallsOf(content: unknown): ToolCallBlock[];
 /**
  * The tool-call id of one tool/result surface message, or null.
  *
- * Real DSH tool-result events carry NO `message.toolCallId` (hard-won rule
- * 10): the identity lives in the nested `{ type: 'tool-result', toolCallId }`
- * content block, falling back to `message.source.callId`. Shared with
- * `src/region.ts`'s call/result pairing — one implementation, never a copy.
+ * Three durable locations, in priority order (hard-won rule 10): the
+ * MESSAGE-level `toolCallId` field (written by dsh-llm's createToolResultMessage
+ * on the 0.1.7+ lines), the nested `{ type: 'tool-result', toolCallId }`
+ * content block, then `message.source.callId` (present on every line). A real
+ * event carries at least two of the three; the order only matters for
+ * fixtures that set a subset. Shared with `src/region.ts`'s call/result
+ * pairing — one implementation, never a copy.
  */
 export declare function toolCallIdOfResultEvent(event: SessionEvent): string | null;
 /**

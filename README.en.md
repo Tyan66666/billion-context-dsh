@@ -71,15 +71,13 @@ Restart `dsh` afterwards (bundle layers are composed at startup), open a new ses
 > **DSH version compatibility.** The package declares all five runtime seam
 > packages (`dsh-compaction` / `dsh-session` / `dsh-llm` / `dsh-tools` /
 > `dsh-settings`) as peer
-> dependencies, sharing the range `>=0.1.5-alpha.1 <0.1.6-0` — exactly the
-> `0.1.5` line (every prerelease plus the final `0.1.5`). From the `0.1.5` line
+> dependencies, sharing the range `>=0.1.5-alpha.1 <0.2.1-0` — every verified line: the `0.1.5` floor plus the verified `0.1.6` / `0.1.7` / `0.2.0` lines (every prerelease plus each line's final release). From the `0.1.5` line
 > on, the session's replace operation was renamed from `{ op, start, end }` to
 > `{ op, startSeq, endSeq }` and is validated strictly (exactly those three
 > keys), so the engine emits the new shape only: on older DSH hosts (< 0.1.5)
 > every `compress` call is rejected at runtime (issue #136), which is why the
 > old lines are out of contract — upgrade DSH before installing this release.
-> The explicit bounds (instead of a caret) are deliberate: a caret would
-> silently admit the unverified 0.1.6+ line. Declaring all five seam packages
+> The explicit bounds (instead of a caret) are deliberate: the `0.2.1-0` ceiling keeps the next unverified line rejected (house rule; the former `0.1.6-0` ceiling was widened after per-line verification in #190). The `0.2.0` line also changed two read-side shapes — a tool result's call id moved to the message level, and the host writes `developer/message` tool-registry rows — and the engine reads all of them, so one build serves the whole range (issue #192). Declaring all five seam packages
 > as peers (not just `dsh-compaction`) ensures that, even under pnpm's
 > hoisted/linked layout, installations resolve them to the **host's own** copy
 > rather than a stale nested copy inconsistent with the host.
@@ -167,7 +165,7 @@ compaction-acp:
 /acp-prune config reset all
 ```
 
-Changing a window key (`modelContextLimit` / `autoModelContextLimit`) clears the window-probe cache — the next pre-step re-probes under the new values (probe failures are cached too, so this is also how a fixed gateway gets re-probed). In provider-less plain-npm compositions `/acp-prune config` degrades to advice text; on DSH lines ≥0.1.7, where the host settings service no longer provides `installSection` (outside this plugin's declared peer range), the engine degrades cleanly too — one startup warning, the six keys stay adjustable through the composition-row `config:`, engine and tools unaffected (issue #173); `settingsEnabled: false` disables the integration entirely (composition-row-only — the switch is deliberately NOT part of the settings layer: it cannot turn itself off). Design details: [docs/settings-integration-design.md](docs/settings-integration-design.md).
+Changing a window key (`modelContextLimit` / `autoModelContextLimit`) clears the window-probe cache — the next pre-step re-probes under the new values (probe failures are cached too, so this is also how a fixed gateway gets re-probed). In provider-less plain-npm compositions `/acp-prune config` degrades to advice text; on DSH lines ≥0.1.7 the write path runs against the renamed `SettingsForms` service (addressed by profile entry id, the six keys marked `.volatile()` in the engine's static Config schema, committed values take effect from the next read plus per-step snapshot resync for diagnostics); hosts whose service matches neither API shape degrade cleanly — one startup warning, engine and tools unaffected (issues #173/#193); `settingsEnabled: false` disables the integration entirely (composition-row-only — the switch is deliberately NOT part of the settings layer: it cannot turn itself off). Design details: [docs/settings-integration-design.md](docs/settings-integration-design.md).
 
 **Per-mode — an agent preset's `compaction` realm.** First *disable (or delete) the realm's existing `dsh-compaction-basic` row*, then mount this engine — two backends cannot coexist in the same realm:
 
