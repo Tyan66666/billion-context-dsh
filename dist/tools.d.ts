@@ -140,7 +140,7 @@ export declare const compressParameters: {
  * `guardedSurfaceSeqsOf` supplies the protected set.
  */
 export declare function guardedRowsInSpan(guarded: ReadonlySet<number>, shadowed: readonly number[]): number[];
-export declare function protectedRowRejectionNote(start: number, end: number, hits: readonly number[], shadowed: readonly number[]): string;
+export declare function protectedRowRejectionNote(start: number, end: number, hits: readonly number[], shadowed: readonly number[], session?: Session): string;
 /**
  * Kernel ref for one RESOLVED range edge's surface node (issue #155).
  * Resolved edges are tool-pairing-balanced and anchorable, but NO LONGER
