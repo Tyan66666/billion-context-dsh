@@ -1,6 +1,10 @@
 import { runScenario } from './harness.mjs'
-import { readFileSync } from 'node:fs'
-const scenarioNames = ['basic-compress', 'nudge-rhythm', 'compress-then-decompress', 'acp-status', 'overflow-recovery']
+import { readFileSync, readdirSync, rmSync } from 'node:fs'
+import { join } from 'node:path'
+import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
+import { Context } from '@deepseek-ai/cordis'
+import { foldSurface } from '@deepseek-ai/dsh-session'
+const scenarioNames = ['basic-compress', 'nudge-rhythm', 'compress-then-decompress', 'acp-status', 'overflow-recovery', 'jsonl-compress']
 const countsOf = (events) => {
   const starts = events.filter((event) => event.type === 'compaction/start').length
   const ends = events.filter((event) => event.type === 'compaction/end').length
@@ -226,7 +230,122 @@ const cachePrefixChecks = (result) => {
   }
   return list
 }
-const checksOf = { 'basic-compress': checksBasic, 'nudge-rhythm': checksRhythm, 'compress-then-decompress': checksDecompress, 'acp-status': checksStatus, 'overflow-recovery': checksOverflow }
+// --- JSONL persistence net (issue #183 part 2) ---------------------------------
+// The harness mounts the REAL released JSONL backend for every scenario, so each
+// row the engine writes passes through the writer's encode + admission path during
+// the run. These checks decode what actually landed on disk and compare it against
+// the live run — the admission-level blind spot (#163/#181 class) where a fully
+// green in-memory suite still shipped sessions that wedged at write time.
+
+const sessionFilesOf = (root) => {
+  const found = []
+  const walk = (dir) => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const path = join(dir, entry.name)
+      if (entry.isDirectory()) walk(path)
+      else if (entry.name.endsWith('.jsonl') || entry.name.endsWith('.jsonl.zstd')) found.push(path)
+    }
+  }
+  walk(root)
+  return found
+}
+// A FRESH backend instance over the same root — as close to "restart and reload"
+// as we can get without spinning up a second agent loop. open(id, 'read') takes no
+// write claim, so it coexists with the harness's (now disposed) writer.
+const storedEventsOf = async (result) => {
+  const store = new JsonlSessionPersistence(new Context(), { root: result.persistRoot })
+  const reader = await store.open(result.sessionId, 'read')
+  try {
+    return (await reader.read(0)).events
+  } finally {
+    await reader.close()
+  }
+}
+// The retired V3 wrapper shape ({ kind: 'plugin', plugin: '<name>' }) is refused by
+// the V4-line writer outright ("format v4 message requires a producer-owned source
+// kind") — zero tolerance here is deliberate: any such row would brick the session.
+// Source lives ON THE MESSAGE, not the event envelope: data.source on
+// user/message rows, data.message.source on assistant/tool rows (rule 10's three
+// durable locations). A string scan would false-positive on echoed argument text,
+// so this checks the two structured positions only.
+const retiredWrapperRows = (events) => {
+  const rows = []
+  for (const event of events) {
+    const candidates = [event.data?.source, event.data?.message?.source].filter((s) => s && typeof s === 'object')
+    if (candidates.some((s) => s.kind === 'plugin' && typeof s.plugin === 'string')) rows.push(`seq ${event.seq} (${event.type})`)
+  }
+  return rows
+}
+const firstRowMismatch = (a, b) => {
+  for (let i = 0; i < Math.max(a.length, b.length); i += 1) {
+    if (JSON.stringify(a[i] ?? null) !== JSON.stringify(b[i] ?? null)) {
+      return `row ${i}: stored=${a[i]?.type ?? 'MISSING'}(seq ${a[i]?.seq ?? '?'}) vs live=${b[i]?.type ?? 'MISSING'}(seq ${b[i]?.seq ?? '?'})`
+    }
+  }
+  return ''
+}
+// Shared by EVERY scenario: the file materialized, decodes fail-closed through the
+// released codec, round-trips losslessly against the live log, re-folds to the same
+// surface, and carries no retired wrapper shape.
+const checksPersistence = (result, storedLoad) => {
+  const list = []
+  const files = sessionFilesOf(result.persistRoot)
+  list.push(['persist: exactly one session log materialized on disk', files.length === 1, `files=${files.length}`])
+  if (storedLoad.error) {
+    list.push(['persist: stored log decodes through the released codec', false, storedLoad.error])
+    return list
+  }
+  const stored = storedLoad.events
+  list.push(['persist: stored log decodes through the released codec', true, `${stored.length} rows`])
+  const mismatch = firstRowMismatch(stored, result.events)
+  list.push(['persist: stored rows equal live events (lossless round-trip)', mismatch === '', mismatch])
+  const replayed = foldSurface(stored).nodes.map((node) => [node.seq, node.type])
+  const live = result.surfaceNodes.map((node) => [node.seq, node.type])
+  list.push(['persist: replayed surface equals live surface (#181 restart signature)', JSON.stringify(replayed) === JSON.stringify(live), `replay=${replayed.length} live=${live.length}`])
+  const wrappers = retiredWrapperRows(stored)
+  list.push(['persist: no retired wrapper source shape in any stored row', wrappers.length === 0, wrappers.join('; ')])
+  return list
+}
+// Scenario-specific: the FIRST-turn compress transaction must be complete IN THE
+// FILE, not just in memory. The replace op must carry exactly three keys (the
+// 0.1.5+ dialect — one extra key fails both validators); the checkpoint source must
+// be producer-owned.
+const checksJsonlCompress = (result, stored) => {
+  const list = []
+  const counts = countsOf(result.events)
+  list.push(['compaction start/end paired', counts.starts >= 1 && counts.ends === counts.starts, `starts=${counts.starts} ends=${counts.ends}`])
+  list.push(['summary shadows first user turn', shadowedSeqsOf(result.events, result.seqs.U1), `U1=${result.seqs.U1}`])
+  list.push(['durable replace node landed', surfaceOpOf(result.events), ''])
+  list.push(['strict tool pairing in final request', wirePairing(result.requests), ''])
+  list.push(['conversation continued after end', continuationOf(result.events, lastEndSeq(result.events)), ''])
+  const projection = projectionAfterFirstTool(result.requests)
+  // The frame prefix rides ONLY on real summary nodes (SUMMARY_FRAME_PREFIX in
+  // src/messages.ts, pinned by tests/injection-governance.test.ts). An echoed
+  // compress argument or a failure note quoting the call never carries it, so
+  // this cannot pass on a compress that did not land.
+  list.push(['projection: framed summary node present after compress', projection.includes('[Model-written summary') && projection.includes('Exchange 1: the user asked for numbered pruning notes'), ''])
+  list.push(['projection: shadowed original gone after compress', projection.length > 0 && !projection.includes('Note 0: the pruning section documents behavior 0'), ''])
+  if (!stored) {
+    list.push(['stored transaction checks skipped (decode failed)', false, ''])
+    return list
+  }
+  const sCounts = countsOf(stored)
+  const summaries = stored.filter((event) => event.type === 'compaction/summary')
+  // data.source: user/message rows carry their source inside data (the message).
+  const checkpoint = stored.find((event) => event.type === 'user/message' && event.data?.source?.kind === 'compact-checkpoint' && event.surfaceOp?.op === 'replace')
+  list.push(['stored: compaction start/end paired', sCounts.starts >= 1 && sCounts.ends === sCounts.starts, `starts=${sCounts.starts} ends=${sCounts.ends}`])
+  list.push(['stored: summary shadows U1..A1', summaries.some((event) => {
+    const s = event.data.shadowedSeqs ?? []
+    return s.includes(result.seqs.U1) && s.includes(result.seqs.A1)
+  }), `U1=${result.seqs.U1} A1=${result.seqs.A1}`])
+  list.push(['stored: summary carries rawOutput block-ledger marker', summaries.some((event) => JSON.stringify(event.data.rawOutput ?? '').includes('$dshAcpBlockLedger')), ''])
+  list.push(['stored: checkpoint replace op has EXACTLY three keys (op/startSeq/endSeq)', !!checkpoint && Object.keys(checkpoint.surfaceOp).sort().join(',') === 'endSeq,op,startSeq' && checkpoint.surfaceOp.op === 'replace', checkpoint ? Object.keys(checkpoint.surfaceOp).sort().join(',') : 'no checkpoint row'])
+  list.push(['stored: checkpoint source is producer-owned (compact-checkpoint + compactionId)', !!checkpoint && typeof checkpoint.data.source.compactionId === 'string', ''])
+  const endSeq = lastEndSeq(stored)
+  list.push(['stored: conversation continued after the transaction', stored.some((event) => event.type === 'assistant/message' && event.seq > endSeq), ''])
+  return list
+}
+const checksOf = { 'basic-compress': checksBasic, 'nudge-rhythm': checksRhythm, 'compress-then-decompress': checksDecompress, 'acp-status': checksStatus, 'overflow-recovery': checksOverflow, 'jsonl-compress': checksJsonlCompress }
 const loadScenario = async (name) => {
   return JSON.parse(readFileSync(new URL(`./scenarios/${name}.json`, import.meta.url), 'utf8'))
 }
@@ -246,11 +365,25 @@ const main = async () => {
   console.log(`--- ${name}`)
   const kinds = result.requests.map((request) => request.kind ?? 'error').join(',')
   console.log(`requests: ${kinds}`)
-  const checks = [...checksOf[name](result), ...cachePrefixChecks(result)]
+  // Decode what actually landed on disk ONCE; every scenario's rows went through
+  // the real writer, so every scenario gets the persistence net.
+  let storedLoad
+  try {
+    storedLoad = { events: await storedEventsOf(result) }
+  } catch (err) {
+    storedLoad = { error: err && err.message ? err.message : String(err) }
+  }
+  const checks = [...checksOf[name](result, storedLoad.events ?? null), ...cachePrefixChecks(result), ...checksPersistence(result, storedLoad)]
+  const before = fails.length
   checks.forEach((row) => {
   console.log(`  ${row[1] ? 'PASS' : 'FAIL'} ${row[0]}${row[2] ? ` — ${row[2]}` : ''}`)
   if (!row[1]) fails.push(`${name}: ${row[0]}`)
   })
+  if (fails.length === before) {
+    rmSync(result.persistRoot, { recursive: true, force: true })
+  } else {
+    console.log(`  (persisted log kept at ${result.persistRoot} for inspection)`)
+  }
 }
   if (fails.length) {
     console.log(`e2e FAIL (${fails.length}): ${fails.join('; ')}`)

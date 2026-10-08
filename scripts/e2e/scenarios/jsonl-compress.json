@@ -1,0 +1,20 @@
+{
+  "name": "jsonl-compress",
+  "persona": "You are a concise coding agent.",
+  "engine": { "modelContextLimit": 32000, "autoCommand": false },
+  "userTurns": [
+  { "filler": { "topic": "pruning", "count": 100 } },
+  { "filler": { "topic": "ledger", "count": 40 } },
+  { "filler": { "topic": "regions", "count": 40 } },
+  "Please compress the oldest exchange now.",
+  "What does the checkpoint cover now?"
+  ],
+  "responses": [
+  { "kind": "text", "filler": { "topic": "pruning", "count": 100 } },
+  { "kind": "text", "filler": { "topic": "ledger", "count": 40 } },
+  { "kind": "text", "filler": { "topic": "regions", "count": 40 } },
+  { "kind": "tool", "name": "compress", "argsTemplate": "{\"content\": [{\"startSeq\": {{U1}}, \"endSeq\": {{A1}}, \"summary\": \"Exchange 1: the user asked for numbered pruning notes; the assistant answered with 100 notes on durable-surface behavior.\"}]}" },
+  { "kind": "text", "text": "Compressed the oldest exchange into a checkpoint summary." },
+  { "kind": "text", "text": "The checkpoint covers the first exchange's pruning notes as one block." }
+  ]
+}
