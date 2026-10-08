@@ -1,20 +1,21 @@
 /**
- * M6 — runtime settings integration. Exposes the engine's scalar knobs in the
- * host's per-profile settings layer under the section `compaction-acp`, so
- * editing it applies to RUNNING sessions without a restart.
+ * M6 — runtime settings integration. Wires the engine's six scalar knobs into
+ * the host's settings layer so edits apply to RUNNING sessions without a
+ * restart. Two host shapes are supported behind one source (issues #174/#193):
  *
- * On the 0.2.0 line the section is projected from each plugin's OWN
- * `static Config` schema by dsh-settings' `SettingsForms` (ctx.settings) —
- * there is no consumer-side installSection anymore. This engine declares no
- * static Config yet (tracked follow-up: authoring the full AcpConfig schema
- * against cosmokit's validation strictness), so the service handle is never
- * captured on this line and `/acp-prune config` degrades to advice; the pure
- * helpers below keep feeding the live snapshot every knob consumer reads.
+ * - 0.1.5/0.1.6 line — `SettingsProvider.installSection` registers the
+ *   composition-row subset as the section's `base` layer under
+ *   `~/.dsh/settings.yaml`; the user section overrides it.
+ * - ≥0.1.7 line — `installSection` is gone; the service is `SettingsForms`,
+ *   which addresses the profile ENTRY by id (same id as the bundle row,
+ *   `compaction-acp`) and exposes exactly the fields the plugin's static
+ *   Config schema marks `.volatile()` (`AcpPluginConfigSchema`). Writes land
+ *   directly in the profile patch (there is no settings.yaml anymore — a
+ *   legacy file is renamed `.imported` once and its sections fall back to
+ *   same-id entries).
  *
- * Layering (per key): schemastery schema default → composition-row subset
- * (the `base` layer, filtered by `filterSettingsEntry`) → user section.
  * The `/acp-prune config` slash command reads and writes the same namespace
- * through the `SettingsCommandSurface` built here.
+ * through the `SettingsCommandSurface` built here on both lines.
  *
  * Deliberately NOT exposed through settings: `coreOverrides`, `countTokens`,
  * `autoTools`, `autoCommand`, `prompts` (object/function values or
@@ -25,24 +26,13 @@
  */
 
 import z from '@deepseek-ai/schemastery'
-import type { SettingsDescriptor } from '@deepseek-ai/dsh-settings'
-
-/**
- * The slice of the host's settings service this engine drives. Structural on
- * purpose: the 0.2.0 line satisfies it with `SettingsForms` (ctx.settings),
- * whose describe()/update()/replace() signatures match exactly, and test
- * fakes need only these three methods.
- */
-export interface AcpSettingsService {
-  describe(options?: { redactSecrets?: boolean }): readonly SettingsDescriptor[]
-  update(ns: string, patch: object, expectedRevision?: number): Promise<void>
-  replace(ns: string, section: object, expectedRevision?: number): Promise<void>
-}
 
 /**
  * The host settings namespace — same id as the bundle/composition row, so "the
- * profile patch section" and "the cordis.patch.yml row" are one mental object.
- * A plain string: SettingsForms' write methods take the unbranded entry id.
+ * settings.yaml section" and "the cordis.patch.yml row" are one mental object.
+ * A plain string literal as of the 0.1.5 line: the seam's `settingsNamespace()`
+ * runtime helper is gone and the brand is applied at the call site instead
+ * (`installSection`'s `Namespace & SettingsNamespaceInput<Namespace>`).
  */
 export const ACP_SETTINGS_NAMESPACE = 'compaction-acp'
 
@@ -118,6 +108,41 @@ export function filterSettingsEntry(entry: AcpSettingsCompositionEntry): AcpSett
   }
 }
 
+/**
+ * Write symbol of the host's shared volatile-reference protocol
+ * (@deepseek-ai/cosmokit `Volatile`). `Symbol.for` is deliberate: both sides
+ * resolve to the SAME global symbol even when each realm holds its own copy
+ * of cosmokit, which is what makes cross-realm detection below work.
+ */
+export const VOLATILE_WRITE = Symbol.for('cosmokit.volatile.write')
+
+/** True for a host volatile config reference (`{ get(): snapshot }` carrying the write symbol). */
+export function isVolatileRef(value: unknown): boolean {
+  return typeof value === 'object' && value !== null && VOLATILE_WRITE in value
+}
+
+/** Read one value out of (possibly ref-wrapped) config data without mutating anything. */
+export function unwrapVolatile<T>(value: T | unknown): T | undefined {
+  if (isVolatileRef(value)) return (value as { get(): T }).get()
+  return value as T | undefined
+}
+
+/**
+ * Re-read the six knobs through whatever volatile refs they are wrapped in.
+ * The host loader hands the plugin its resolved config holding stable
+ * references; SettingsForms commits form writes into those SAME references
+ * between steps (and emits no event), so re-reading `.get()` here is how a
+ * running session sees a just-saved change. Plain values pass through.
+ */
+export function liveSettingsFromRefs(entry: AcpSettingsInput): AcpSettingsInput {
+  const out: Record<string, unknown> = {}
+  for (const key of SETTINGS_KEYS) {
+    const value = unwrapVolatile(entry[key])
+    if (value !== undefined) out[key] = value
+  }
+  return out as AcpSettingsInput
+}
+
 /** Apply the engine defaults to a (possibly partial) settings input. */
 export function resolveAcpSettings(input: AcpSettingsInput): AcpSettings {
   return {
@@ -143,6 +168,26 @@ export const AcpSettingsSchema = z.object({
   nudgeMaxContextLimitPct: z.number().min(0).max(1).default(SETTING_DEFAULTS.nudgeMaxContextLimitPct),
   nudgeEmergencyThresholdPct: z.number().min(0).max(1).default(SETTING_DEFAULTS.nudgeEmergencyThresholdPct),
   autoNudge: z.boolean().default(SETTING_DEFAULTS.autoNudge),
+})
+
+/**
+ * The engine's static config schema — the class-level `Config` the host
+ * loader validates composition rows against, and which SettingsForms (≥0.1.7
+ * line) reads to build its settings form: every field marked `.volatile()`
+ * becomes an editable row addressed by the profile entry id (`compaction-acp`).
+ *
+ * Deliberately carries NO defaults of its own: `AcpSettingsSchema` above
+ * stays the single source of default values, and the explicit-value > preset >
+ * engine-default layering is the preset layer's job to fill. A default here
+ * would shadow a preset-filled base value in the live settings source.
+ */
+export const AcpPluginConfigSchema = z.object({
+  modelContextLimit: z.number().step(1).min(1).volatile(),
+  autoModelContextLimit: z.boolean().volatile(),
+  nudgeMinContextLimitPct: z.number().min(0).max(1).volatile(),
+  nudgeMaxContextLimitPct: z.number().min(0).max(1).volatile(),
+  nudgeEmergencyThresholdPct: z.number().min(0).max(1).volatile(),
+  autoNudge: z.boolean().volatile(),
 })
 
 /** What changed between two settings snapshots, and what the engine must do about it. */
@@ -215,6 +260,27 @@ export function parseSettingValue(raw: string): ParsedSettingValue {
   }
 }
 
+/**
+ * One row of the host settings service's `describe()` output, as this engine
+ * consumes it. Declared structurally — no named import from
+ * @deepseek-ai/dsh-settings — because the field set differs across seam lines
+ * (`revision` exists only on the SettingsForms lines) and the engine must
+ * compile against every line in its peer range. `ns` is `string | object`
+ * because some seam lines brand it with a compile-time marker; consumers
+ * compare through `String()`, never by identity.
+ */
+export interface AcpSettingsDescriptor {
+  readonly ns: string | object
+  readonly autoGenerate: boolean
+  readonly value: Record<string, unknown>
+  /** Present on the SettingsForms lines only; absent on the legacy line. */
+  readonly revision?: string | number
+  readonly base?: Record<string, unknown>
+  readonly user?: Record<string, unknown>
+  readonly applies?: 'live'
+  readonly secrets?: ReadonlyArray<readonly string[]>
+}
+
 /** Everything `/acp-prune config` needs from the engine. Fakes in tests implement this directly. */
 export interface SettingsCommandSurface {
   /** False in processes without a settings provider (plain npm-install compositions): the command degrades to advice instead of failing. */
@@ -222,11 +288,42 @@ export interface SettingsCommandSurface {
   /** Current effective values (works with or without a provider). */
   snapshot(): AcpSettings
   /** Our namespace's descriptor (layers + revision), or undefined while unregistered. */
-  describe(): SettingsDescriptor | undefined
+  describe(): AcpSettingsDescriptor | undefined
   /** Merge a patch into the user section and persist it. */
   update(patch: AcpSettingsInput): Promise<void>
   /** Replace the whole user section ({} resets everything to base/defaults). */
   replaceSection(section: Record<string, unknown>): Promise<void>
+}
+
+/**
+ * Structural view of the host settings service surface this engine uses.
+ * Declared structurally (no named import from @deepseek-ai/dsh-settings) so
+ * the engine compiles against every line in its peer range: the 0.1.5 line's
+ * type was `SettingsProvider`, dsh-settings ≥0.1.7 renamed the service to
+ * `SettingsForms` and removed `installSection` entirely (its forms project
+ * `.volatile()` Config fields instead). Which half actually runs is decided
+ * at RUNTIME by the capability probe in `AcpCompactionEngine` (issue #173),
+ * not by types.
+ */
+export interface AcpSettingsService {
+  describe(options?: unknown): AcpSettingsDescriptor[]
+  update(ns: string, patch: object, expectedRevision?: string | number): Promise<void>
+  replace(ns: string, section: object, expectedRevision?: string | number): Promise<void>
+}
+
+/** The ≤0.1.6 lines only: the legacy settings.yaml section seam. */
+export interface LegacySettingsService extends AcpSettingsService {
+  installSection(
+    owner: unknown,
+    ns: string,
+    schema: unknown,
+    entry: AcpSettingsInput,
+    hooks: {
+      setSource(current: () => AcpSettingsInput): void
+      onChange(): void
+      validate?(value: AcpSettingsInput): void
+    },
+  ): void
 }
 
 function requireService(getService: () => AcpSettingsService | undefined): AcpSettingsService {
@@ -239,32 +336,42 @@ function requireService(getService: () => AcpSettingsService | undefined): AcpSe
 
 /**
  * Build the command surface over a lazily-captured settings service. The
- * reference is undefined for the whole process life until the host registers
- * our section (on the 0.2.0 line that requires the engine's own `static
- * Config` schema); while it is, the surface reports unavailable and the
- * command degrades to advice.
+ * engine captures the service through a parallel `ctx.inject(['settings'])`,
+ * so the reference may legitimately be undefined for the whole process life
+ * (headless/plain compositions have no settings provider).
  */
 export function makeSettingsCommandSurface(
   getService: () => AcpSettingsService | undefined,
   getSnapshot: () => AcpSettings,
 ): SettingsCommandSurface {
+  // Optimistic concurrency (SettingsForms lines): every write passes the
+  // descriptor's last-seen revision, so two writers racing on the same entry
+  // get a SettingsConflictError instead of a silent overwrite. Refreshed
+  // right before each write (a successful write bumps the token); the legacy
+  // line has no revision field and ignores the extra argument at runtime.
+  let trackedRevision: string | number | undefined
+  const findDescriptor = (): AcpSettingsDescriptor | undefined => {
+    const service = getService()
+    if (service === undefined) return undefined
+    // `descriptor.ns` carries the seam's compile-time brand, which a plain
+    // literal never satisfies — compare through String() instead.
+    const descriptor = service.describe().find((row) => String(row.ns) === ACP_SETTINGS_NAMESPACE)
+    if (descriptor?.revision !== undefined) trackedRevision = descriptor.revision
+    return descriptor
+  }
   return {
     get available() {
       return getService() !== undefined
     },
     snapshot: getSnapshot,
-    describe() {
-      const service = getService()
-      if (service === undefined) return undefined
-      // `descriptor.ns` carries the seam's compile-time brand, which a plain
-      // literal never satisfies — compare through String() instead.
-      return service.describe().find((descriptor) => String(descriptor.ns) === ACP_SETTINGS_NAMESPACE)
-    },
+    describe: findDescriptor,
     async update(patch) {
-      await requireService(getService).update(ACP_SETTINGS_NAMESPACE, patch)
+      findDescriptor()
+      await requireService(getService).update(ACP_SETTINGS_NAMESPACE, patch, trackedRevision)
     },
     async replaceSection(section) {
-      await requireService(getService).replace(ACP_SETTINGS_NAMESPACE, section)
+      findDescriptor()
+      await requireService(getService).replace(ACP_SETTINGS_NAMESPACE, section, trackedRevision)
     },
   }
 }

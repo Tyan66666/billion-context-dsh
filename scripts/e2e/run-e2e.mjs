@@ -164,14 +164,8 @@ const outboundMessagesOf = (request) => {
   return Array.isArray(request.body?.messages) ? request.body.messages : []
 }
 const rawEnvelopeOf = (request) => {
-  // The 0.2.0 Messages wire serializes `system` AFTER the messages array, so a raw
-  // prefix slice can no longer isolate the non-message fields; compare the structured
-  // remainder instead (JSON.stringify keeps insertion order, so key order stays
-  // observable).
-  const body = request.body
-  if (!body || typeof body !== 'object' || Array.isArray(body)) return request.raw ?? ''
-  const { messages: _omitted, ...rest } = body
-  return JSON.stringify(rest)
+  const at = request.raw ? request.raw.indexOf('"messages"') : -1
+  return at < 0 ? request.raw ?? '' : request.raw.slice(0, at)
 }
 const cachePrefixChecks = (result) => {
   const list = []
@@ -180,26 +174,37 @@ const cachePrefixChecks = (result) => {
     return [['wire: at least two LLM request bodies captured', false, `requests=${requests.length}`]]
   }
 
-  // Envelope: every non-message field (model, stream, max_tokens, thinking,
-  // output_config, system, tools), key order included.
+  // Envelope: model / stream flags / key order / spacing, i.e. everything before the
+  // messages array. Comparing the RAW string is what makes key order observable.
   const envelopes = new Set(requests.map(rawEnvelopeOf))
   list.push(['wire: raw request envelope byte-stable (key order + spacing)', envelopes.size === 1, `${envelopes.size} distinct`])
 
   const schemas = new Set(requests.map((request) => JSON.stringify(request.body.tools ?? null)))
   list.push(['wire: tools array byte-stable across requests', schemas.size === 1, `${schemas.size} distinct schema(s)`])
 
-  // The largest stable cacheable prefix: on the 0.2.0 Messages wire that is the
-  // top-level `system` field (older OpenAI-style wires carried it as messages[0],
-  // which compaction rewrites by design, so fall back to it only when `system` is
-  // absent). Compare from the second request on: the engine injects its one-time
-  // ACP guidance section during the first turn's pre-step, so request 1 may
-  // legitimately precede that injection.
-  const leading = requests.slice(1).map((request) => {
-    const body = request.body ?? {}
-    return typeof body.system !== 'undefined' ? JSON.stringify(body.system) : JSON.stringify(outboundMessagesOf(request)[0] ?? null)
-  })
-  const leadingDistinct = new Set(leading).size
-  list.push(['wire: leading prefix (system field) byte-stable after request 1', leadingDistinct === 1, `${leadingDistinct} distinct`])
+  // The leading message is the largest cacheable prefix. Compare from the second request
+  // on: the engine injects its one-time ACP guidance section during the first turn's
+  // pre-step, so request 1 may legitimately precede that injection. Byte-stability
+  // only holds UNTIL the scenario's first durable surface rewrite — a landed compress
+  // splices its summary node ahead of older nodes, and an overflow recovery hides
+  // whole ranges — so compare only the requests sent before that rewrite (the rewrite
+  // request itself is still pre-rewrite: it is built before the tool result lands).
+  // On the Anthropic Messages wire the system prompt travels in a top-level field
+  // (already pinned by the raw-envelope check above), so the leading message is the
+  // first user message; the old OpenAI wire led the array with a stable system
+  // message that survived compaction, which is why this used to scan every request.
+  const rewriteIdx = Math.max(
+    requests.findIndex((request) => request.kind === 'tool'),
+    requests.findIndex((request) => request.kind === 'error'),
+  )
+  const leadWindow = requests.slice(1, rewriteIdx < 1 ? requests.length : rewriteIdx + 1)
+  if (leadWindow.length >= 2) {
+    const leading = leadWindow.map((request) => JSON.stringify(outboundMessagesOf(request)[0] ?? null))
+    const leadingDistinct = new Set(leading).size
+    list.push(['wire: leading message byte-stable until first surface rewrite', leadingDistinct === 1, `${leadingDistinct} distinct`])
+  } else {
+    list.push(['wire: leading message byte-stable until first surface rewrite', true, `no comparable requests before the rewrite (${leadWindow.length})`])
+  }
 
   // A scenario with no compaction is append-only by construction, so the previous
   // request's message list must be a byte-identical prefix of the next one — any

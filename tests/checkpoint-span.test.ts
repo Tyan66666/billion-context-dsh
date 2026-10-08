@@ -125,9 +125,9 @@ function kernelRefs(env: ToolEnvironment, session: Session): Record<string, stri
 function checkpointSeqs(session: Session): number[] {
   const seqs: number[] = []
   for (const event of session.snapshotEvents()) {
-    // ONE classifier for both host shapes (legacy plugin wrapper and the 0.2.0
-    // producer kind) — the engine's own predicate, never a local copy.
-    if (isCheckpointNode(event)) seqs.push(Number(event.seq))
+    // ONE shared classifier: the stored checkpoint source shape follows the installed
+    // dsh-compaction line ({kind:'plugin',plugin:'compact'} ≤0.1.6 vs {kind:'compact-checkpoint'} ≥0.1.7).
+    if (isCheckpointNode(event)) seqs.push(Number((event as { seq?: number }).seq))
   }
   return seqs
 }

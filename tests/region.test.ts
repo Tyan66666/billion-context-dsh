@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { Session } from '@deepseek-ai/dsh-session'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { AcpStateStore } from '../src/state.ts'
+import { checkpointCompactionIdOf, isCheckpointNode } from '../src/messages.ts'
 import {
   AlreadyCompressedRangeError,
   PRUNE_NOTE,
@@ -64,13 +65,13 @@ test('M5: runCompactionTransaction lands the four events and shadows the range',
   for (const seq of [1, 2, 3, 4]) assert.ok(!session.surface.nodes.includes(seq))
   assert.ok(session.surface.nodes.includes(seqs[2]!), 'the replacement node joins the surface')
 
-  // The summary node carries the checkpoint source — the 0.2.0 producer kind
-  // whose compaction id ties it to the compaction/summary event.
+  // The summary node carries the checkpoint source — shape follows the installed
+  // dsh-compaction line, so assert through the engine's ONE classifier instead of
+  // one line's literal, and tie it to this transaction's compaction id.
   const replaceEvent = session.snapshotEvents()[seqs[2]!]!
   assert.equal(replaceEvent.type, 'user/message')
-  const source = (replaceEvent.data as { source?: { kind?: string; compactionId?: string } }).source
-  assert.equal(source?.kind, 'compact-checkpoint')
-  assert.equal(source?.compactionId, compactionId)
+  assert.ok(isCheckpointNode(replaceEvent), 'the replacement node is a checkpoint')
+  assert.equal(checkpointCompactionIdOf(replaceEvent), compactionId)
 
   // Derived messages shrank: 6 messages → 2 surviving + 1 summary = 3.
   assert.equal(session.deriveMessages().length, 3)

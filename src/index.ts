@@ -55,18 +55,22 @@ import {
   stripOrphanedSurfaceToolMessages,
   type KernelRangeView,
 } from './region.ts'
-import { allLogMessages, eventsToCoreMessages, overflowMarkerSummary, surfaceEventsOf } from './messages.ts'
+import { allLogMessages, eventsToCoreMessages, overflowMarkerSummary, surfaceEventsOf, toolCallIdOfResultEvent } from './messages.ts'
 import { shadowedTokensViaMeter } from './host-tokens.ts'
 import { kernelConfigFor } from './config.ts'
 import {
+  ACP_SETTINGS_NAMESPACE,
+  AcpPluginConfigSchema,
   AcpSettingsSchema,
   describeSettingsChange,
   filterSettingsEntry,
+  liveSettingsFromRefs,
   makeSettingsCommandSurface,
   resolveAcpSettings,
   type AcpSettings,
   type AcpSettingsInput,
   type AcpSettingsService,
+  type LegacySettingsService,
   type SettingsCommandSurface,
 } from './settings.ts'
 import { PRESETS, PRESET_NAMES, isPresetName, resolvePreset, type NudgePreset, type PresetName } from './presets.ts'
@@ -128,16 +132,24 @@ export {
 export { eventsToCoreMessages, projectEvent, surfaceEventsOf, extractEventText } from './messages.ts'
 export {
   ACP_SETTINGS_NAMESPACE,
+  AcpPluginConfigSchema,
   AcpSettingsSchema,
   describeSettingsChange,
   filterSettingsEntry,
+  isVolatileRef,
+  liveSettingsFromRefs,
   makeSettingsCommandSurface,
   parseSettingValue,
   resolveAcpSettings,
   SETTINGS_KEYS,
   SETTING_DEFAULTS,
+  unwrapVolatile,
+  VOLATILE_WRITE,
   type AcpSettings,
+  type AcpSettingsDescriptor,
   type AcpSettingsInput,
+  type AcpSettingsService,
+  type LegacySettingsService,
   type SettingsChangeEffect,
   type SettingsCommandSurface,
   type SettingsKey,
@@ -361,6 +373,17 @@ interface OverflowRecoveryResult {
  * model-driven block compression without touching the agent loop.
  */
 export class AcpCompactionEngine extends CompactionEngine {
+  /**
+   * Static plugin config schema — cordis reads `plugin.Config` off the raw
+   * plugin value at fiber start and validates the composition row against it
+   * (`resolveConfig`). Class-shaped mounts carry this (the bundle/composition
+   * row path); function-shaped mounts skip validation and receive plain
+   * values. On dsh-settings ≥ 0.1.7 hosts this SAME schema is what SettingsForms
+   * builds its form from — the volatile fields are exactly what `/acp-prune
+   * config` exposes (see AcpPluginConfigSchema for why fields are volatile and
+   * default-free).
+   */
+  static readonly Config = AcpPluginConfigSchema
   /** The framework-agnostic ACP compression core, reused verbatim. */
   readonly kernel: CompressionCore
   /** Per-session kernel state. */
@@ -385,9 +408,11 @@ export class AcpCompactionEngine extends CompactionEngine {
   private readonly compressCallIdsToHide = new Set<string>()
   /** Per provider/model route the resolved window (probe failures cached too). */
   private readonly windowCache = new Map<string, AcpWindow>()
-  /** Live settings snapshot thunk (composition row as of this line; a registered settings section would swap it). */
+  /** Live settings snapshot thunk (composition → user settings layer); swapped when the settings provider attaches (installSection on ≤0.1.6 lines, volatile-ref re-read on the ≥0.1.7 forms line). */
   private readSettingsSource: () => AcpSettings = () => resolveAcpSettings({})
-  /** The settings service for /acp-prune config; undefined until the engine declares a static Config schema and the host registers the section. */
+  /** Hot-apply driver: re-reads the live source and runs the change diff; called once per agent step, a no-op unless something changed. */
+  private resyncSettings: () => void = () => {}
+  /** The settings service, captured lazily for /acp-prune config (undefined in provider-less processes). Structurally typed — both host lines' real services satisfy it. */
   private settingsService: AcpSettingsService | undefined
   /** /acp-prune config read/write surface. */
   readonly settingsCommand: SettingsCommandSurface
@@ -399,7 +424,11 @@ export class AcpCompactionEngine extends CompactionEngine {
   private readonly overflowSessions = new Map<Session, Agent>()
   constructor(ctx: Context, config: Partial<AcpConfig> = {}) {
     super(ctx)
-    this.config = resolveAcpConfig(config)
+    // Class-mounted compositions arrive with the six knobs wrapped in volatile
+    // refs (the loader resolves our static Config schema before construction);
+    // unwrap them so preset resolution, the threshold-order assertion and the
+    // config snapshot see plain values, not opaque objects.
+    this.config = resolveAcpConfig({ ...config, ...liveSettingsFromRefs(filterSettingsEntry(config)) })
     // Resolve + validate prompt templates BEFORE building env: a template typo
     // must fail engine construction, never silently leak into model context.
     this.prompts = resolvePrompts(config.prompts)
@@ -424,10 +453,13 @@ export class AcpCompactionEngine extends CompactionEngine {
     // The six settings-exposed knobs resolve as: schema default → composition
     // row subset (FILTERED — a raw row also carries prompts/coreOverrides/
     // countTokens, values that must never enter the settings layer) → the
-    // user's settings section. `current` is the live snapshot every consumer
-    // reads through `readSettingsSource`. On the 0.2.0 line no section is
-    // registered yet (see below), so the composition row IS the source for
-    // the whole process life — the same values, read through the same thunk.
+    // host's user layer (~/.dsh/settings.yaml section on the legacy line,
+    // profile entry config on the forms line). `current` is the live snapshot
+    // every consumer reads; `applySettings` lands an incoming change (initial
+    // call included) and runs the diff handler. The integration is an
+    // OPTIONAL-service consumer: with no settings provider (plain npm-install
+    // compositions) nothing registers and the engine behaves exactly as
+    // composed — the same values, read through the same thunk.
     // The BASE layer the seam registers is the composition row's own scalar
     // subset, taken from the RAW row — not from `this.config`, which already has
     // engine defaults merged in; using it would turn every uncomposed key into a
@@ -443,29 +475,134 @@ export class AcpCompactionEngine extends CompactionEngine {
     // engine default. `current` is the resolved snapshot reads start from; the
     // two differ only in which keys are PRESENT, never in the values they
     // resolve to.
+    // On hosts whose loader validates our static Config schema (class-mounted
+    // compositions), row values arrive wrapped in volatile refs — unwrap them
+    // for one-shot reads, and keep the RAW filtered entry so the forms path can
+    // re-read through those refs live (form writes commit into them in place).
     const compositionEntry = presetFilledSettingsEntry(config)
-    const current: AcpSettings = resolveAcpSettings(compositionEntry)
+    // Construction-time snapshot — what "behaves exactly as composed" means.
+    // Detach falls back to THIS, never to the mutable `current`: on the
+    // legacy line the provider's own dispose hook resets the source to the
+    // registered entry (which resolves to exactly these values), and on the
+    // forms line the service dies while the last-applied values may no longer
+    // be editable through any live surface — stranding them would be worse
+    // than reverting to the composition.
+    const initialCurrent: AcpSettings = resolveAcpSettings(liveSettingsFromRefs(compositionEntry))
+    let current: AcpSettings = initialCurrent
     this.readSettingsSource = () => current
     const engine = this
+    const applySettings = (): void => {
+      const next = this.readSettingsSource()
+      const prev = current
+      current = next
+      try {
+        engine.onSettingsChanged(prev, next)
+      } catch (error) {
+        // The watcher callback runs inside the settings commit loop; a sync
+        // throw must not escape into it (the loop logs and continues, but our
+        // diff handler owns its failures — warn and keep the last good).
+        this.ctx.logger.warn(`billion-context-dsh: applying settings change failed: ${String(error)}`)
+      }
+    }
+    this.resyncSettings = applySettings
     this.settingsCommand = makeSettingsCommandSurface(() => this.settingsService, () => current)
+    // Detach cleanup shared by both supported paths: cordis disposes the value
+    // an inject callback returns when the provider fiber unloads. Without it
+    // the engine keeps a dead provider handle (/acp-prune config would still
+    // report available and write into a disposed service). Reads fall back to
+    // the CONSTRUCTION-TIME snapshot, not the mutable `current`: on the legacy
+    // line the provider's own dispose hook resets the source to the registered
+    // entry (which resolves to exactly these values), and on the forms line
+    // freezing at whatever was last applied could strand values the operator
+    // can no longer edit through any live surface. Order-independent either way.
+    const detachSettings = (): void => {
+      this.settingsService = undefined
+      this.readSettingsSource = () => initialCurrent
+    }
     if (this.config.settingsEnabled !== false) {
-      // The 0.2.0 settings line registers sections from each plugin's OWN
-      // `static Config` schema (dsh-settings `SettingsForms`, ctx.settings);
-      // there is no consumer-side installSection anymore. This engine declares
-      // no static Config yet — authoring the full AcpConfig schema against
-      // cosmokit's validation strictness is a tracked follow-up — so there is
-      // nothing to register: the six knobs keep their composition values
-      // through the untouched readSettingsSource thunk, and /acp-prune config
-      // reports the section unavailable. Capturing ctx.settings without a
-      // schema would be worse: SettingsForms.write throws "No configurable
-      // plugin entry" for it, so the surface would report available and fail
-      // every write with that opaque error. One warn instead, so an edited
-      // profile patch does not look silently ignored.
-      this.ctx.logger.warn(
-        'billion-context-dsh: runtime settings are not registered on the 0.2.0 settings line yet '
-        + '(the engine declares no static Config schema for SettingsForms) — the six knobs keep their '
-        + 'composition values and /acp-prune config reports the section unavailable',
-      )
+      // Two supported host shapes, detected at runtime (issue #193): the
+      // ≤0.1.6 lines expose the legacy `installSection` section seam (the
+      // standalone `installSettingsSection` helper this was written against
+      // is gone — it is now a method on the provider); the ≥0.1.7 lines
+      // expose SettingsForms, which builds its form from our static Config
+      // schema and has no registration step at all. A settings-shaped
+      // service speaking neither degrades with one warn (issue #173).
+      ctx.inject(['settings'], (settingsCtx) => {
+        // The service handle is read structurally: the seam's Context
+        // augmentation differs per host line (and is absent whenever this
+        // package's types stop importing dsh-settings) — feature detection
+        // below only needs the runtime shape.
+        const face = (settingsCtx as unknown as { settings?: unknown }).settings
+        if (face === undefined || typeof face !== 'object') return undefined
+        const service = face as Record<string, unknown>
+        if (typeof service.installSection === 'function') {
+          // LEGACY LINE (dsh-settings ≤ 0.1.6): register the composition-row
+          // subset as the section's base layer; the provider pushes changes via
+          // onChange and swaps the source thunk. UNWRAPPED values go across the
+          // seam — volatile refs must never reach the provider's persistence
+          // (they stringify to {}).
+          const legacy = service as unknown as LegacySettingsService
+          legacy.installSection(ctx, ACP_SETTINGS_NAMESPACE, AcpSettingsSchema, liveSettingsFromRefs(compositionEntry), {
+            // The seam's source type follows the entry it registered, so `source`
+            // is a partial view of the settings; re-resolve it into a
+            // fully-defaulted snapshot so every reader sees the same shape the
+            // composition path produced.
+            setSource: (source) => {
+              this.readSettingsSource = () => resolveAcpSettings(source())
+            },
+            onChange: applySettings,
+          })
+          this.settingsService = legacy
+          return detachSettings
+        }
+        if (typeof service.describe === 'function' && typeof service.update === 'function' && typeof service.replace === 'function') {
+          // FORMS LINE (dsh-settings ≥ 0.1.7): there is no registration step —
+          // the profile entry IS the carrier (its id equals the bundle row's id),
+          // and the volatile fields of our static Config schema are exactly what
+          // its form exposes. Form writes commit into our fiber config's volatile
+          // refs IN PLACE between steps and emit no event we receive, so swap the
+          // thunk to re-read through the refs; agent/pre-step drives the diff.
+          // The host's methods read instance state through `this` — keep the
+          // original receiver (a cordis-injected face may be a proxy, and a
+          // bare reference would rebind `this` to this wrapper object).
+          this.settingsService = {
+            describe: (service.describe as AcpSettingsService['describe']).bind(service),
+            update: (service.update as AcpSettingsService['update']).bind(service),
+            replace: (service.replace as AcpSettingsService['replace']).bind(service),
+          }
+          this.readSettingsSource = () => resolveAcpSettings(liveSettingsFromRefs(compositionEntry))
+          // One-shot diagnostic: the forms line addresses settings by PROFILE
+          // ENTRY ID, and we address the bundle row's id (`compaction-acp`).
+          // If the operator renamed their own composition row, no descriptor
+          // exists for us — without this warn, /acp-prune config would report
+          // available while every write fails with an opaque entry error.
+          try {
+            const rows = (service.describe as AcpSettingsService['describe']).call(service)
+            if (!rows.some((row) => String(row.ns) === ACP_SETTINGS_NAMESPACE)) {
+              this.ctx.logger.warn(
+                'billion-context-dsh: SettingsForms is present but no profile entry named "compaction-acp" is visible — '
+                + 'the six knobs keep their composition values; /acp-prune config needs a composition row with that id '
+                + '(the bundle install provides it)',
+              )
+            }
+          } catch {
+            // A throwing describe() is a host defect, not ours to repair — the
+            // command surface surfaces it loudly on first use instead.
+          }
+          return detachSettings
+        }
+        // DEGRADE: a settings-shaped service speaking neither API (a future
+        // renamed line or a foreign implementation) — one warn, no capture:
+        // capturing a half-matching handle would make /acp-prune config report
+        // available and fail every write with opaque errors. Values keep
+        // flowing from the composition row through the untouched thunk.
+        this.ctx.logger.warn(
+          'billion-context-dsh: host settings service speaks neither installSection (dsh-settings <= 0.1.6) '
+          + 'nor SettingsForms describe/update/replace (>= 0.1.7) — the compaction-acp settings section is '
+          + 'unavailable; the six knobs keep their composition values',
+        )
+        return undefined
+      })
     }
 
     const env: ToolEnvironment = {
@@ -552,11 +689,10 @@ export class AcpCompactionEngine extends CompactionEngine {
         }
       }
       if (event.type !== 'tool/result') return
-      const message = event.data.message
-      // 0.2.0 line: the result payload IS the ToolResultMessage — its content
-      // blocks are plain text/image/file blocks and the call id is a
-      // MESSAGE-LEVEL field (source.callId carries the same value).
-      const callId = message.toolCallId ?? message.source.callId
+      // One shared extractor (rule 10): message-level field first, then the
+      // nested tool-result block, then source.callId — one implementation for
+      // call/result pairing everywhere, never a per-listener copy.
+      const callId = toolCallIdOfResultEvent(event)
       if (typeof callId !== 'string' || !this.compressCallIdsToHide.has(callId)) return
       this.compressCallIdsToHide.delete(callId)
       // session.append is NOT reentrant: calling it synchronously inside this
@@ -580,6 +716,10 @@ export class AcpCompactionEngine extends CompactionEngine {
       // in flight at pre-step (the previous step's tools all landed), so the
       // default empty in-flight set is safe.
       stripOrphanedSurfaceToolMessages(payload.agent.session)
+      // Hot-apply settings BEFORE any knob is read this step (issue #193): on
+      // the forms line, writes committed between steps land in our volatile
+      // refs with no event we receive — this re-read is what applies them.
+      engine.resyncSettings()
       if (!engine.readSettingsSource().autoNudge) return next()
       const decision = await next()
       if (decision.kind === 'reject') return decision
