@@ -1,4 +1,7 @@
 import { startFakeLlm } from './fake-llm.mjs'
+import { mkdtempSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 const ENGINE = new URL('../../dist/index.js', import.meta.url)
 const filler = (spec) => Array.from({ length: spec.count }, (_, i) =>
   `Note ${i}: the ${spec.topic} section documents behavior ${i * 7} of the durable surface model.`).join(' ')
@@ -97,7 +100,19 @@ const runScenario = async (scenario, hooks = {}) => {
   }
   await ctx.plugin(TokenMeter)
   await ctx.plugin(AcpEngine, { ...scenario.engine })
-  const agent = await ctx.agentLoop.create(SessionId(scenario.name), {
+  // Mount the REAL JSONL session-persistence backend so every event the engine
+  // writes passes through the released writer's encode + admission path DURING
+  // the run (issue #183 part 2): an admission-level bug (#163/#181 class —
+  // retired wrapper shapes, unadmitted rows) can no longer sail through a fully
+  // green in-memory suite. The agent-loop acquires each session's write handle
+  // itself once this service is present; nothing else in the composition moves.
+  // Fresh temp root per scenario run: a reused root would make the loop RESUME
+  // last run's stored session instead of creating a new one.
+  const JsonlPersistence = (await import('@deepseek-ai/dsh-session-persistence-jsonl')).default
+  const persistRoot = mkdtempSync(join(tmpdir(), 'e2e-sessions-'))
+  await ctx.plugin(JsonlPersistence, { root: persistRoot })
+  const sessionId = SessionId(scenario.name)
+  const agent = await ctx.agentLoop.create(sessionId, {
     provider: 'deepseek-official',
     model: 'deepseek-v4-flash'
   })
@@ -112,9 +127,18 @@ const runScenario = async (scenario, hooks = {}) => {
   if (hooks.afterTurn) await hooks.afterTurn({ index, ctx, agent })
   }
   const events = agent.session.snapshotEvents()
+  const surfaceNodes = agent.session.surface.nodes
   const requests = server.requests
-  await ctx.fiber.dispose()
-  await server.close()
-  return { events, requests, seqs: { ...seqs } }
+  try {
+    // Durability barrier over every active write handle: drains the backend's
+    // live-event batching window and rejects loudly if ANY row the engine wrote
+    // was refused by the writer — the #163/#181 wedge signature surfaces here as
+    // a scenario failure instead of a production restart.
+    await ctx.sessionPersistence.flush()
+  } finally {
+    await ctx.fiber.dispose()
+    await server.close()
+  }
+  return { events, surfaceNodes, requests, seqs: { ...seqs }, sessionId, persistRoot }
 }
 export { runScenario }
