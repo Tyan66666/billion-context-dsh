@@ -26,11 +26,17 @@ import { eventAtOf, sessionEventsOf } from './session-events.ts'
 // (0.2.0 line). Under tsgo (typescript 7), augmenting the '/message'
 // subpath instead splits the MessageSourceMap symbol, so the host
 // packages' root-spelled augmentations stop merging into it and the
-// checkpoint write fails typecheck with TS2322.
+// checkpoint write fails typecheck with TS2322. The root spelling is also
+// what the pre-0.2.0 lines need (measured green on the 0.1.5-rc.2 baseline
+// too), so it is the one spelling that serves every admitted line.
 declare module '@deepseek-ai/dsh-llm' {
   interface MessageSourceMap {
     acpNudge: { kind: 'plugin:acp-nudge' }
     acpPrune: { kind: 'plugin:billion-context-dsh' }
+    // V4 checkpoint producer kind (issue #181): emitted by checkpointSourceFor
+    // when the resolved dsh-compaction copy predates the host's v4 writer and
+    // its wrapper-shaped compactCheckpointSource() output is normalized.
+    compactCheckpoint: { kind: 'compact-checkpoint'; compactionId: string; sourceCommandId?: string }
   }
 }
 

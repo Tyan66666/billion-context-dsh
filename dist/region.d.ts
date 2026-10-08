@@ -11,6 +11,7 @@
  * @module billion-context-dsh/region
  */
 import type { Session, SessionEvent, SessionEventMap } from '@deepseek-ai/dsh-session';
+import { CompactionId } from '@deepseek-ai/dsh-compaction';
 import { type ContentBlock } from '@deepseek-ai/dsh-llm';
 import { type AcpBlockLedgerPayload } from './block-ledger.ts';
 /** One durable ACP block as rebuilt from the session log. */
@@ -102,6 +103,17 @@ export interface ResolvedSurfaceRange {
 export declare function resolveSurfaceRange(session: Session, start: number, end: number): ResolvedSurfaceRange;
 /** The surface seqs shadowed by the inclusive positional span. */
 export declare function shadowedSeqsOf(session: Session, start: number, end: number): number[];
+/**
+ * True iff `declared` equals the CURRENT surface slice between `start` and
+ * `end` positionally — both edges on the surface, in order, element-wise equal.
+ * This mirrors exactly the invariant the released readers enforce at load time
+ * on every `compaction/summary` / `compaction/prune` event (`shadowedSeqs` must
+ * name an exact current surface span); writing an event that violates it makes
+ * the whole session log unloadable forever (issue #201). Unlike
+ * {@link shadowedSeqsOf} (which silently degrades for read-only probes), this
+ * is the strict gate for WRITES.
+ */
+export declare function isExactSurfaceSpan(session: Session, start: number, end: number, declared: readonly number[]): boolean;
 export interface CompactionTransactionInput {
     readonly start: number;
     readonly end: number;
@@ -148,6 +160,31 @@ export declare function verifiedReadingsOf(event: SessionEvent): string[];
  */
 export declare function prefixSummaryBlocks(blocks: readonly ContentBlock[]): ContentBlock[];
 /**
+ * Checkpoint source for the durable summary node, normalized for V4 writers.
+ *
+ * The copy of @deepseek-ai/dsh-compaction this engine resolves to may predate
+ * the host persisting the session: the plugin's peer range floors at the
+ * 0.1.5 line, whose compactCheckpointSource() still emits the retired V3
+ * wrapper shape { kind: 'plugin', plugin: 'compact' }. A DSH ≥0.1.7 v4
+ * persistence writer rejects that shape in producer-kind admission ("format
+ * v4 message requires a producer-owned source kind") and the WHOLE write batch
+ * wedges in memory — every later event piles behind the poison row until
+ * restart (issue #181; #165 fixed our own writers but not this host-supplied
+ * one). Normalize exactly that legacy shape when the session is persisted at
+ * format v4 — header.version decides which writer encodes the row, not which
+ * package resolved — and pass everything else through verbatim: older hosts
+ * still speak the wrapper, and newer dsh-compaction copies already emit the
+ * producer kind.
+ *
+ * Removal gate: delete once the peer floor moves past the last
+ * wrapper-emitting dsh-compaction line (or upstream retires the shape there).
+ */
+export declare function checkpointSourceFor(session: Pick<Session, 'header'>, compactionId: CompactionId): Readonly<{
+    compactionId: CompactionId;
+    sourceCommandId?: import("@deepseek-ai/dsh-commands").CommandId;
+    kind: "compact-checkpoint";
+}> | import("@deepseek-ai/dsh-compaction").CompactionCheckpointSource;
+/**
  * Run one durable compression transaction. Throws on invalid state; on success
  * the four events are in the log and the surface has one summary node.
  */
@@ -186,9 +223,11 @@ export type MediaPriceOf = (seq: number) => number;
  * every hidden span becomes a user message. Callers with meaningful text pass
  * it (compress call/result hiding keeps the tool outcome visible to the
  * model); callers without get the fixed prune note. The originals remain in
- * the append-only log.
+ * the append-only log. Exported for the issue #201 regression tests — not part
+ * of the public API (index.ts re-exports only).
  */
 export declare const PRUNE_NOTE = "(removed by context management)";
+export declare function hideSurfaceSeqs(session: Session, seqs: readonly number[], text?: string, priceEvent?: (event: SessionEvent) => number): void;
 /**
  * Hide one successful `compress` tool's call/result pair after its tool/result
  * has been logged. The durable compaction summary is inserted BEFORE the
