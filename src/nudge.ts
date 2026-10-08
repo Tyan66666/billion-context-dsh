@@ -431,7 +431,28 @@ function adaptKernelNudgeToSeq(
   // notice intact — it is a better prompt than an empty table.
   const seqTable = rangeTable(session, kernelView, prompts, mediaPriceOf)
   if (seqTable !== '') out = replaceRangesStr(out, seqTable)
+  out = insertContentFormNote(out)
   return out
+}
+
+/**
+ * The kernel's batch tip (0.0.101) advertises TWO content forms — the array
+ * form and a plain string ("most robust through lossy gateways"). This tool's
+ * schema takes the array form only: our ref dialect is surface seqs, and
+ * `content` must be `[{ startSeq, endSeq, summary }]`. Rather than rewrite the
+ * kernel's copy (rule 9: the kernel owns the prompt), the engine states the
+ * difference in ONE line, placed BEFORE the tip so the tip stays the last
+ * thing the model reads. Without it a model that follows the tip gets a schema
+ * rejection it has to re-learn from mid-batch.
+ */
+const CONTENT_FORM_NOTE =
+  'Note: this tool takes the array form only — compress({ content: [{ startSeq, endSeq, summary }] }) with the surface seqs above; a plain-string content is rejected.'
+
+/** Insert the array-form note right before the kernel's closing tip (no tip → text unchanged). */
+function insertContentFormNote(text: string): string {
+  const tipAt = text.lastIndexOf('\n\n\u{1F4A1} ')
+  if (tipAt === -1) return text
+  return text.slice(0, tipAt) + '\n\n' + CONTENT_FORM_NOTE + text.slice(tipAt)
 }
 
 /** Replace the kernel rangesStr segment (`Compressible ranges (N, oldest first):…`) with our seq table. */
@@ -562,8 +583,10 @@ function renderNudgeFromTemplates(
     parts.push(rangeTable(session, kernelView, prompts, mediaPriceOf))
   }
 
-  // Batch-compress tip (from kernel's nudge-text.ts style).
-  if (prompts.nudge.tip !== '') parts.push('', prompts.nudge.tip)
+  // Batch-compress tip (from kernel's nudge-text.ts style). The array-form
+  // note rides with it on this path too — a host that overrides only the tip
+  // must not lose the tool-contract line (same hole B6 closed for guidance).
+  if (prompts.nudge.tip !== '') parts.push('', CONTENT_FORM_NOTE, '', prompts.nudge.tip)
 
   // B6：模板路径同样摘掉哲学/规则段——否则宿主只要覆盖任一 nudge 槽位（如只改 tip），
   // 整份 6 KB 指引就会重新贴回来（独立复核 2026-09-08 发现的软缺口）。

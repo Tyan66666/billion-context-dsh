@@ -7,7 +7,7 @@
 
 import type { CommandDefinition } from '@deepseek-ai/dsh-commands'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import { guardedRowsInSpan, protectedRowRejectionNote, resolveEffectiveWindow, type ToolEnvironment } from './tools.ts'
+import { guardedRowsInSpan, liveCarrierRejectionNote, protectedRowRejectionNote, resolveEffectiveWindow, type ToolEnvironment } from './tools.ts'
 import { resolveTokenCount } from './nudge.ts'
 import { kernelConfigFor } from './config.ts'
 import { SettingsConflictError } from '@deepseek-ai/dsh-settings'
@@ -27,6 +27,7 @@ import {
   rebuildBlockLedger,
   resolveSurfaceRange,
   runCompactionTransaction,
+  liveCheckpointCarriersInSpan,
   shadowedSeqsOf,
   sliceDecompressPage,
   DEFAULT_DECOMPRESS_PAGE,
@@ -148,6 +149,16 @@ function compressText(env: ToolEnvironment, agent: Agent, args: string[]): strin
   const instructionHits = guardedRowsInSpan(guardedSurfaceSeqsOf(session), shadowed)
   if (instructionHits.length > 0) {
     return protectedRowRejectionNote(start, end, instructionHits, shadowed, session)
+  }
+  // Same hard reject as the compress tool: this is a plain T1 range transaction,
+  // so it must not fold the checkpoint carrier of a still-active block (the
+  // kernel keeps such a carrier visible; the one-op replace below would hide it
+  // anyway). Explicit human intent does not override the arithmetic — distillation
+  // is the compress tool's block-ref path, and the edge check above already
+  // refuses a range whose EDGE is a summary node.
+  const carriers = liveCheckpointCarriersInSpan(session, shadowed)
+  if (carriers.length > 0) {
+    return `/acp-prune compress:${liveCarrierRejectionNote(start, end, carriers)}`
   }
   // Price the reclaimed tokens in the HOST's token vocabulary (rule 12):
   // prefer the live meter's per-node prices, fall back to the exact mirror.

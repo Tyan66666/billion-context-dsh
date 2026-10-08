@@ -112,8 +112,8 @@ test('M4/prompts 2: default normal nudge — efficiency note + tip, guidance mov
   assert.ok(!text.includes('KEEP VERBATIM'), 'KEEP VERBATIM 不在 nudge（B6）')
   // No "suggestion, not a requirement"
   assert.ok(!text.includes('suggestion, not a requirement'), 'no "suggestion, not a requirement"')
-  // Tip at end
-  assert.ok(text.endsWith('💡 Compress all ranges in one call (pass multiple content entries: `content: [{...}, {...}]`).'), 'tip at end')
+  // Tip at end (kernel 0.0.101 copy: the batch fold is ONE call, array OR plain-string form)
+  assert.ok(text.endsWith('💡 If you compress, fold the ranges you keep in ONE call — pass multiple content entries (`content: [{...}, {...}]`) or ONE plain string holding every range, each block starting with its \'mNNNNN–mNNNNN topic\' header line (most robust through lossy gateways). Ranges the task still needs can wait — they reappear in later nudges.'), 'tip at end')
 })
 
 test('M4/prompts 2b: default nudge renders through the kernel renderNudgeText path (seq table replaces ref table)', () => {
@@ -125,7 +125,7 @@ test('M4/prompts 2b: default nudge renders through the kernel renderNudgeText pa
   // Kernel frame + tip verbatim；B6 起哲学/规则段被摘掉（改住系统提示）
   assert.ok(text.startsWith('This is an efficiency nudge to compress early and keep context lean — not an overflow warning.'), 'kernel EFFICIENCY_NOTE frame')
   assert.ok(!text.includes('HOW TO COMPRESS'), 'B6：规则段不在 nudge')
-  assert.ok(text.endsWith('💡 Compress all ranges in one call (pass multiple content entries: `content: [{...}, {...}]`).'), 'kernel batch tip at end')
+  assert.ok(text.endsWith('💡 If you compress, fold the ranges you keep in ONE call — pass multiple content entries (`content: [{...}, {...}]`) or ONE plain string holding every range, each block starting with its \'mNNNNN–mNNNNN topic\' header line (most robust through lossy gateways). Ranges the task still needs can wait — they reappear in later nudges.'), 'kernel batch tip at end')
   // Ref-ID rangesStr replaced by the surface-seq table. The title KEEPS the
   // kernel header format ("N, oldest first") with the seq dialect appended —
   // the kernel mN range rows are what must be gone.
@@ -136,6 +136,30 @@ test('M4/prompts 2b: default nudge renders through the kernel renderNudgeText pa
   // No usage statement; the only mNNNNN tokens are inside kernel's own
   // HOW_TO_COMPRESS_RULES example text (m00420 key anchors), not a leak.
   assert.ok(!text.includes('Context usage is at'), 'no usage statement')
+})
+
+test('M4/prompts 2c: nudge states the array-only content form before the tip (0.0.101 tip advertises a plain string)', () => {
+  // The kernel's 0.0.101 batch tip offers BOTH the array form and a plain
+  // string. Our `compress` schema takes the array form only, so the engine
+  // appends one line saying so. Pinned against REAL rendered output (literal
+  // substrings, not the constant we inject), on BOTH prompt paths, and the
+  // kernel tip must stay the closing line.
+  const session = buildTextSession(12)
+  const kernelPath = buildNudgeText(fakeDecision(50, false), false, session, wholeSurfaceRangeView(session))
+  assert.ok(kernelPath.includes('this tool takes the array form only'), 'kernel path carries the array-form note')
+  assert.ok(kernelPath.includes('compress({ content: [{ startSeq, endSeq, summary }] })'), 'the note spells out the accepted shape')
+  assert.ok(
+    kernelPath.indexOf('this tool takes the array form only') < kernelPath.indexOf('💡 If you compress'),
+    'the note sits before the tip',
+  )
+  assert.ok(kernelPath.endsWith('later nudges.'), 'the kernel tip still closes the nudge')
+
+  const templatePath = buildNudgeText(
+    fakeDecision(50, false), false, session, wholeSurfaceRangeView(session),
+    resolvePrompts({ nudge: { tip: '自定义尾注' } }),
+  )
+  assert.ok(templatePath.includes('this tool takes the array form only'), 'template path carries the note too')
+  assert.ok(templatePath.endsWith('自定义尾注'), 'host tip still closes the nudge')
 })
 
 test('M4/prompts 3: default emergency nudge — ⚠️ frame + HOW_TO_COMPRESS_RULES + seq example', () => {

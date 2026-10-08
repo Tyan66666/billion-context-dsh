@@ -7,7 +7,7 @@
  * chars/4 counter while every model-visible face (nudge breakdown, range table,
  * acp_status) prices with the CJK-aware `defaultCountTokens` — which would
  * misprice CJK-heavy sessions by up to 4×. On v0.2.26 with the pinned
- * acp-kernel@0.0.63 the suspicion does NOT hold: `createCore` resolves
+ * acp-kernel@0.0.63 and @0.0.101 the suspicion does NOT hold: `createCore` resolves
  * `ports.countTokens ?? defaultCountTokens` (verified in the bundled source),
  * so the empty ports object src/index.ts builds when unconfigured already lands
  * on the CJK-aware counter, and the bundle's other flat-4 fallbacks
@@ -131,23 +131,42 @@ test('the CJK fixture clears the kernel min-benefit gate under shipped defaults;
   // The user-visible consequence of the counter choice: at 78% usage the
   // pressure path arms the OVER-LIMIT nudge only when the pending compressible
   // tokens clear minPressureBenefit (max(5000, 1% of window)). The CJK-aware
-  // counter clears it with margin (measured ≈2.5× on this fixture); flat
-  // chars/4 underprices the same content below the floor and the nudge is
+  // counter clears it (measured 6460 vs a 5000 floor = 1.29× on this fixture);
+  // flat chars/4 underprices the same content below the floor and the nudge is
   // suppressed — a CJK-heavy session would go un-nudged.
+  //
+  // The margin assertion pins 1.25×, not the 2× it used to: the same fixture now
+  // measures 6460 pending T1 tokens against the 5000-token floor = 1.29× on
+  // 0.0.101 (it measured ≈2.5× on 0.0.63). This is NOT a tokenizer or an
+  // accounting change — the counter is byte-identical across the two pins (100
+  // CJK chars = 100 tokens on both, see the test above). It is the kernel's
+  // RANGE MERGE: 0.0.101 batches candidate ranges by array-index gaps and DROPS
+  // every batch below `minCompressRange`, and that floor is counted in CHARS
+  // while the tables above are counted in tokens — a CJK-heavy group clears the
+  // token floor while still sitting under the char floor, so ranges disappear
+  // (characterization-locked in `tests/kernel-range-source.test.ts`, including
+  // the control case that proves the gate is char-based; the real fix belongs
+  // upstream). 1.25× still proves the fixture is not marginal and fails loudly
+  // if a future kernel drops pending T1 further.
   const cjk = probeWith({}, 'CJK-aware')
   assert.equal(cjk.shouldInject, true, `expected an OVER-LIMIT T1 nudge, got: ${cjk.reason}`)
   assert.equal(cjk.tier, 1, 'the pressure nudge targets tier-1 compression')
   assert.match(cjk.reason, /OVER-LIMIT/, 'the nudge fires through the over-limit pressure path')
   assert.ok(
-    cjk.pendingT1 >= 2 * cjk.minPressureBenefit,
+    cjk.pendingT1 >= 1.25 * cjk.minPressureBenefit,
     `pending T1 (${cjk.pendingT1}) must clear the min-benefit floor (${cjk.minPressureBenefit}) with margin`,
   )
 
   const flatFour = probeWith({ countTokens: (text: string) => Math.ceil(text.length / 4) }, 'flat chars/4')
   assert.equal(flatFour.shouldInject, false, 'flat chars/4 pricing must receive no nudge on this fixture')
-  assert.match(
-    flatFour.reason,
-    /min benefit/,
-    `suppression must come from the min-benefit gate itself, got: ${flatFour.reason}`,
+  // 0.0.101 moved a second pricing gate ahead of the min-benefit check: ranges
+  // priced below the kernel's per-range minimum (`minCompressRange`) leave no
+  // EFFECTIVE range, so suppression is reported as "no tier has effective
+  // compressible content". Both messages are pricing gates — the fixture's
+  // point is that flat chars/4 cannot buy a nudge here, whatever the kernel
+  // names the gate.
+  assert.ok(
+    /min benefit|no tier has effective compressible content/.test(flatFour.reason),
+    `suppression must come from a pricing gate (min benefit OR no effective range), got: ${flatFour.reason}`,
   )
 })

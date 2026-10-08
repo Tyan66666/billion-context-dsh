@@ -30,8 +30,10 @@ import {
   rebuildBlockLedger,
   resolveSurfaceRange,
   runCompactionTransaction,
+  liveCheckpointCarriersInSpan,
   shadowedSeqsOf,
   stripOrphanedSurfaceToolMessages,
+  summarySeqOfKernelBlock,
   openToolCallIds,
   sliceDecompressPage,
   surfaceSummary,
@@ -143,14 +145,14 @@ export const compressParameters = {
           required: true,
           oneOf: [
             { type: 'integer' as const, description: 'First surface seq of the range.' },
-            { type: 'string' as const, description: 'Seq as text; a trailing #callId fragment is ignored.' },
+            { type: 'string' as const, description: 'Seq as text; a trailing #callId fragment is ignored. A drilldown mN ref ("m00306") or a kernel block id ("b1", as acp_status lists) is also accepted — a block id resolves to that block\'s checkpoint seq, which makes the fold a tier 2/3 distillation.' },
           ],
         },
         endSeq: {
           required: true,
           oneOf: [
             { type: 'integer' as const, description: 'Inclusive last surface seq of the range.' },
-            { type: 'string' as const, description: 'Seq as text; a trailing #callId fragment is ignored.' },
+            { type: 'string' as const, description: 'Seq as text; a trailing #callId fragment is ignored. Also accepts a drilldown mN ref or a kernel block id ("b3") — for a multi-block condense name the LAST block id (tier 3).' },
           ],
         },
         summary: { type: 'string' as const, required: true, description: 'Complete technical summary replacing the range; keep paths, decisions, values verbatim. Minimum 50 characters.' },
@@ -186,16 +188,27 @@ function parseSeq(value: number | string): number {
 
 /**
  * Match a drilldown mN ref: "m00306" / "m306" (kernel `refToIndex` semantics,
- * `m0*(\d{1,5})`), tolerating a trailing `#callId` fragment (symmetric with
+ * `m0*(\d{1,7})`), tolerating a trailing `#callId` fragment (symmetric with
  * `parseSeq`'s `#` handling). Returns the ref index, or null for non-mN input.
+ *
+ * The width AND the bound mirror the kernel's `REF_PATTERN` / `MAX_INDEX`
+ * (0.0.101: `\d{1,7}` and `9999999`; through 0.0.63 both were 5 digits /
+ * `99999`). They must be re-checked on every kernel bump (AGENTS.md §4b): a
+ * session numbers refs upward and never reuses one, so once it outgrows the
+ * old width the kernel keeps handing out `m100000`+ — and a host parser capped
+ * at 5 digits rejects acp_status's OWN rows as "not a ref", in exactly the long
+ * sessions a ref-width bump exists to rescue. `tests/tools.test.ts` round-trips
+ * the kernel's `indexToRef` boundaries, so a future widening turns that test
+ * red instead of degrading silently.
  */
-const MN_RE = /^m0*(\d{1,5})(?:#.*)?$/i
+const MN_RE = /^m0*(\d{1,7})(?:#.*)?$/i
 
-function mnRefIndex(value: string): number | null {
+/** Exported so the ref-width contract test can pin it without a 100K-message fixture. */
+export function mnRefIndex(value: string): number | null {
   const match = MN_RE.exec(value.trim())
   if (match === null) return null
   const index = Number(match[1])
-  return index >= 1 && index <= 99999 ? index : null
+  return index >= 1 && index <= 9999999 ? index : null
 }
 
 /**
@@ -205,7 +218,18 @@ function mnRefIndex(value: string): number | null {
  *    turn's `messageRefs.byRef` (CoreMessage.id = seq or "seq#callId" → split
  *    on "#"). Unknown mN (never assigned on the current surface) fails with
  *    guidance; a valid mN whose span was already compressed falls through to
- *    the existing recover-stale / already-compressed semantics (rule 7).
+ *    the existing recover-stale / already-compressed semantics (rule 7);
+ *  - a kernel block ref ("b1") — the id `acp_status` prints per active block and
+ *    `decompress` already accepts — resolved to that block's checkpoint seq
+ *    (`summarySeqOfKernelBlock`). Naming the checkpoint node is what makes the
+ *    fold a tier 2/3 distillation: the resolver then sees the edge ON the
+ *    carrier, `blockRefForSummarySeq` hands the kernel the block ref back, and
+ *    `liveCheckpointCarriersInSpan`'s guard stands down (that guard exists to
+ *    refuse a PLAIN seq range swallowing a live carrier). Before this, the
+ *    reject note's own advice — "distill it with the block ids" — led to
+ *    `invalid seq "b1"`, i.e. the tool told the model to make a call no parser
+ *    accepted. A block id that is not an ACTIVE block (superseded, or never
+ *    existed) fails with guidance.
  * `byRef` MUST come from `turn.state.messageRefs` (after `processTurn`), not
  * the persisted store state: acp_status's turn is never persisted, so mN refs
  * shown in a drilldown (including refs for messages that arrived since the
@@ -213,8 +237,18 @@ function mnRefIndex(value: string): number | null {
  * against the stored state would report a false "unknown mN" and dead-loop
  * the model between acp_status and compress.
  */
-function parseBoundary(value: number | string, byRef: Record<string, string>): number {
-  const text = String(value)
+function parseBoundary(value: number | string, byRef: Record<string, string>, session: Session): number {
+  const text = String(value).trim()
+  if (/^b\d+$/.test(text)) {
+    const seq = summarySeqOfKernelBlock(session, text)
+    if (seq === null) {
+      throw new Error(
+        `billion-context-dsh: block "${text}" is not an active block — run acp_status for the live block ids `
+        + '(a block-id boundary distills that block, tier 2/3)',
+      )
+    }
+    return seq
+  }
   const index = mnRefIndex(text)
   if (index === null) return parseSeq(value)
   // Normalize to the kernel's padded key ("m00306") — byRef holds exact keys.
@@ -356,6 +390,26 @@ function validateContentItems(content: NonNullable<CompressArgs['content']>): vo
 export function guardedRowsInSpan(guarded: ReadonlySet<number>, shadowed: readonly number[]): number[] {
   const inSpan = new Set(shadowed)
   return [...guarded].filter((seq) => inSpan.has(seq)).sort((a, b) => a - b)
+}
+
+/**
+ * Advisory note for a plain range that would fold a LIVE block's checkpoint
+ * carrier (see `liveCheckpointCarriersInSpan`). Names the block ids the model
+ * can use instead — a block-ref boundary is the call that legitimately folds
+ * carriers (tier 2/3 distillation).
+ */
+export function liveCarrierRejectionNote(
+  start: number,
+  end: number,
+  carriers: readonly { seq: number; kernelBlockId: string }[],
+): string {
+  const list = carriers.map((carrier) => `seq ${carrier.seq} (${carrier.kernelBlockId})`).join(', ')
+  const first = carriers[0]!
+  // Name the LAST carrier as the end edge too: a valid multi-carrier span is a
+  // tier-3 condense, and suggesting `b1..b1` would silently distill only the
+  // first parent.
+  const last = carriers[carriers.length - 1]!
+  return `  seqs ${start}..${end} rejected — checkpoint ${list} carries the visible summary of a still-active block, and a plain seq range never supersedes one. Distill it with the block ids instead (compress({ content: [{ startSeq: "${first.kernelBlockId}", endSeq: "${last.kernelBlockId}", summary }] })), or cut the span around those seqs.`
 }
 
 export function protectedRowRejectionNote(
@@ -579,8 +633,8 @@ async function handleCompress(env: ToolEnvironment, args: CompressArgs, exec: To
   const duplicateRangeNotes: string[] = []
   const guardedSeqs = guardedSurfaceSeqsOf(session)
   for (const range of args.content!) {
-    const startSeq = parseBoundary(range.startSeq, byRef)
-    const endSeq = parseBoundary(range.endSeq, byRef)
+    const startSeq = parseBoundary(range.startSeq, byRef, session)
+    const endSeq = parseBoundary(range.endSeq, byRef, session)
     let resolved: ResolvedSurfaceRange
     try {
       // Balance edges FIRST: the requested edges may sit mid-pair or on nodes
@@ -634,6 +688,22 @@ async function handleCompress(env: ToolEnvironment, args: CompressArgs, exec: To
         `billion-context-dsh: seq ${resolved.start}..${resolved.end} has no assigned ref — `
         + 'the range must be on the current surface (run acp_status for the live seq list)',
       )
+    }
+    // A plain (message-ref) range must not fold a LIVE block's checkpoint
+    // carrier. The kernel keeps that carrier visible — our projection marks it
+    // via `summaryOfBlockId`, upstream #335 — but this host transaction replaces
+    // the WHOLE span in one `surfaceOp`, so the carrier would leave the surface
+    // anyway: the block's summary would vanish while the kernel still counts the
+    // block as active. Block-ref boundaries (bN..bM) are the call that SHOULD
+    // fold carriers (tier 2/3), so the reject fires only when NEITHER edge is a
+    // block ref — the same rule the kernel applies (`resolveBoundaries` reports
+    // boundary kind `block` as soon as one edge is a block ref).
+    if (startBlockRef == null && endBlockRef == null) {
+      const carriers = liveCheckpointCarriersInSpan(session, shadowedSpan)
+      if (carriers.length > 0) {
+        rejectedNotes.push(liveCarrierRejectionNote(resolved.start, resolved.end, carriers))
+        continue
+      }
     }
     const rangeKey = `${startRef}::${endRef}`
     if (seenRangeKeys.has(rangeKey)) {
