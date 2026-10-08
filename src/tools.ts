@@ -26,6 +26,7 @@ import {
   compactionIdsOfKernelBlocks,
   expandShadowedSeqs,
   guardedSurfaceSeqsOf,
+  isExactSurfaceSpan,
   rebuildBlockLedger,
   resolveSurfaceRange,
   runCompactionTransaction,
@@ -513,6 +514,13 @@ async function handleCompress(env: ToolEnvironment, args: CompressArgs, exec: To
   // events, and every accepted range lands in ONE applyCompression call at the
   // end of the loop — so the set cannot go stale mid-batch.
   const rejectedNotes: string[] = []
+  // Range keys (`startRef::endRef`) already claimed by an accepted range in
+  // THIS call: several requested ranges can resolve to ONE balanced span
+  // (single tool results expand outward to the enclosing pair), and feeding
+  // the same span twice makes the kernel stamp a block per request while only
+  // one durable transaction can ever land for it (issue #201).
+  const seenRangeKeys = new Set<string>()
+  const duplicateRangeNotes: string[] = []
   const guardedSeqs = guardedSurfaceSeqsOf(session)
   for (const range of args.content!) {
     const startSeq = parseBoundary(range.startSeq, byRef)
@@ -570,6 +578,17 @@ async function handleCompress(env: ToolEnvironment, args: CompressArgs, exec: To
         + 'the range must be on the current surface (run acp_status for the live seq list)',
       )
     }
+    const rangeKey = `${startRef}::${endRef}`
+    if (seenRangeKeys.has(rangeKey)) {
+      // An earlier range in this call already owns this exact span: its summary
+      // lands for the whole span, and a second block here could never get its
+      // own durable transaction (the span leaves the surface after the first).
+      duplicateRangeNotes.push(
+        `  seqs ${range.startSeq}..${range.endSeq} resolve to the same span as an earlier range in this call (${resolved.start}..${resolved.end}) — skipped`,
+      )
+      continue
+    }
+    seenRangeKeys.add(rangeKey)
     ranges.push({
       ...resolved,
       startSeq,
@@ -585,11 +604,14 @@ async function handleCompress(env: ToolEnvironment, args: CompressArgs, exec: To
     })
   }
 
-  // Nothing to do: every requested range was already compressed or rejected.
+  // Nothing to do: every requested range was already compressed, rejected, or
+  // a duplicate of an earlier range in the same call.
   if (ranges.length === 0) {
-    const text = ['Compressed 0 block(s), ~0 tokens reclaimed.', ...alreadyCompressedNotes, ...rejectedNotes]
+    const text = ['Compressed 0 block(s), ~0 tokens reclaimed.', ...alreadyCompressedNotes, ...duplicateRangeNotes, ...rejectedNotes]
     if (alreadyCompressedNotes.length > 0) {
       text.push('  (all requested ranges were already compressed — decompress a block to recover its originals)')
+    } else if (duplicateRangeNotes.length > 0 && rejectedNotes.length === 0) {
+      text.push('  (nothing compressed — every range resolved to a span an earlier range in this call already covers)')
     } else if (rejectedNotes.length > 0) {
       text.push('  (nothing compressed — every range covered a current injected instruction row; see the rejections above)')
     }
@@ -663,6 +685,18 @@ async function handleCompress(env: ToolEnvironment, args: CompressArgs, exec: To
     // The edges were already balanced above; shadow exactly that span.
     const { start, end } = range
     const shadowed = shadowedSeqsOf(session, start, end)
+    // Last line of defense before the durable write: if an earlier landed
+    // transaction in this batch removed this span from the surface (the kernel
+    // can stamp one block per requested range even when several share refs),
+    // skip instead of transacting — a summary whose shadowedSeqs no longer
+    // name an exact current surface span bricks the session log on next load
+    // (issue #201). runCompactionTransaction re-validates and would throw;
+    // skipping keeps the rest of the batch landing.
+    if (!isExactSurfaceSpan(session, start, end, shadowed)) {
+      skippedRanges += 1
+      lines.push(`  skipped seqs ${start}..${end}: already shadowed by an earlier range in this call`)
+      continue
+    }
     // Price the reclaimed tokens in the HOST's token vocabulary (rule 12):
     // prefer the live meter's per-node prices, fall back to the exact mirror.
     // NEVER defaultCountTokens — that overdraws the meter on CJK (issue #54).
@@ -716,12 +750,13 @@ async function handleCompress(env: ToolEnvironment, args: CompressArgs, exec: To
   }
 
   const summaryLine = `Compressed ${applied.result.blocksCreated} block(s), ~${applied.result.tokensCompressed} tokens reclaimed.`
-  const totalSkipped = skippedRanges + alreadyCompressedNotes.length + rejectedNotes.length
+  const totalSkipped = skippedRanges + alreadyCompressedNotes.length + duplicateRangeNotes.length + rejectedNotes.length
   const failedLines = applied.result.errors.map((error) => `  ${error}`)
   const warningLines = [
     ...freeWarnings.map((warning) => `  ${warning}`),
     ...failedLines,
     ...alreadyCompressedNotes,
+    ...duplicateRangeNotes,
     ...rejectedNotes,
     ...lines,
   ]

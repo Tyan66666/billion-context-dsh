@@ -378,6 +378,31 @@ export function shadowedSeqsOf(session: Session, start: number, end: number): nu
   return nodes.slice(startIdx, endIdx + 1)
 }
 
+/**
+ * True iff `declared` equals the CURRENT surface slice between `start` and
+ * `end` positionally — both edges on the surface, in order, element-wise equal.
+ * This mirrors exactly the invariant the released readers enforce at load time
+ * on every `compaction/summary` / `compaction/prune` event (`shadowedSeqs` must
+ * name an exact current surface span); writing an event that violates it makes
+ * the whole session log unloadable forever (issue #201). Unlike
+ * {@link shadowedSeqsOf} (which silently degrades for read-only probes), this
+ * is the strict gate for WRITES.
+ */
+export function isExactSurfaceSpan(
+  session: Session,
+  start: number,
+  end: number,
+  declared: readonly number[],
+): boolean {
+  if (start > end || declared.length === 0) return false
+  const nodes = session.surface.nodes
+  const startIdx = nodes.indexOf(start as SurfaceSeq)
+  const endIdx = nodes.indexOf(end as SurfaceSeq)
+  if (startIdx < 0 || endIdx < startIdx) return false
+  const slice = nodes.slice(startIdx, endIdx + 1)
+  return slice.length === declared.length && slice.every((seq, index) => Number(seq) === declared[index])
+}
+
 export interface CompactionTransactionInput {
   readonly start: number
   readonly end: number
@@ -503,6 +528,20 @@ export function runCompactionTransaction(
       + `edge seq ${failedEdge} is not in this session's log. `
       + 'Surface seqs are sparse message nodes (only user/message, assistant/message, '
       + 'tool/result events); consult acp_status for the current surface range',
+    )
+  }
+  // The log-presence check above passes for edges an EARLIER transaction already
+  // shadowed (the append-only log keeps them forever), so it cannot stop a
+  // duplicate/stale span. The readers' load-time invariant demands more: the
+  // declared shadowedSeqs must equal the CURRENT surface slice positionally.
+  // Enforce it here, before any durable event exists, so a stale span fails as
+  // a clean zero-write error instead of leaving a dead transaction that bricks
+  // the whole session log (issue #201).
+  if (!isExactSurfaceSpan(session, input.start, input.end, input.shadowedSeqs)) {
+    throw new Error(
+      `billion-context-dsh: seq ${input.start}..${input.end} is not an exact current surface span — `
+      + 'its edges are no longer on the surface or the declared shadowedSeqs do not match the live slice. '
+      + 'Nothing was written; consult acp_status for the current surface range',
     )
   }
 
@@ -747,11 +786,12 @@ function toolCallIdsOfEvent(event: SessionEvent): string[] {
  * every hidden span becomes a user message. Callers with meaningful text pass
  * it (compress call/result hiding keeps the tool outcome visible to the
  * model); callers without get the fixed prune note. The originals remain in
- * the append-only log.
+ * the append-only log. Exported for the issue #201 regression tests — not part
+ * of the public API (index.ts re-exports only).
  */
 export const PRUNE_NOTE = '(removed by context management)'
 
-function hideSurfaceSeqs(
+export function hideSurfaceSeqs(
   session: Session,
   seqs: readonly number[],
   text?: string,
@@ -760,6 +800,15 @@ function hideSurfaceSeqs(
   if (seqs.length === 0) return
   const start = seqs[0]!
   const end = seqs[seqs.length - 1]!
+  // Readers enforce the same exact-span invariant on compaction/prune as on
+  // compaction/summary, so a dangling prune bricks the log exactly like a dead
+  // transaction. Validate BEFORE the first append (issue #201).
+  if (!isExactSurfaceSpan(session, start, end, seqs)) {
+    throw new Error(
+      `billion-context-dsh: cannot prune seqs ${seqs.join(', ')} — they do not name an exact current surface span. `
+      + 'Nothing was written; consult acp_status for the current surface range',
+    )
+  }
   let shadowedTokenCount = 0
   for (const seq of seqs) {
     const event = eventAtOf(session, seq)

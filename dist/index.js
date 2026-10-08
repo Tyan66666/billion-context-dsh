@@ -4015,6 +4015,15 @@ function shadowedSeqsOf(session, start, end) {
   const endIdx = nodes.indexOf(end);
   return nodes.slice(startIdx, endIdx + 1);
 }
+function isExactSurfaceSpan(session, start, end, declared) {
+  if (start > end || declared.length === 0) return false;
+  const nodes = session.surface.nodes;
+  const startIdx = nodes.indexOf(start);
+  const endIdx = nodes.indexOf(end);
+  if (startIdx < 0 || endIdx < startIdx) return false;
+  const slice = nodes.slice(startIdx, endIdx + 1);
+  return slice.length === declared.length && slice.every((seq, index) => Number(seq) === declared[index]);
+}
 function readCompactionSummary(event) {
   return event.data;
 }
@@ -4039,6 +4048,11 @@ function runCompactionTransaction(session, input) {
     const failedEdge = eventAtOf(session, input.start) === void 0 ? input.start : input.end;
     throw new Error(
       `billion-context-dsh: seq ${input.start}..${input.end} not in the current surface \u2014 edge seq ${failedEdge} is not in this session's log. Surface seqs are sparse message nodes (only user/message, assistant/message, tool/result events); consult acp_status for the current surface range`
+    );
+  }
+  if (!isExactSurfaceSpan(session, input.start, input.end, input.shadowedSeqs)) {
+    throw new Error(
+      `billion-context-dsh: seq ${input.start}..${input.end} is not an exact current surface span \u2014 its edges are no longer on the surface or the declared shadowedSeqs do not match the live slice. Nothing was written; consult acp_status for the current surface range`
     );
   }
   try {
@@ -4164,6 +4178,11 @@ function hideSurfaceSeqs(session, seqs, text, priceEvent = hostPriceEvent) {
   if (seqs.length === 0) return;
   const start = seqs[0];
   const end = seqs[seqs.length - 1];
+  if (!isExactSurfaceSpan(session, start, end, seqs)) {
+    throw new Error(
+      `billion-context-dsh: cannot prune seqs ${seqs.join(", ")} \u2014 they do not name an exact current surface span. Nothing was written; consult acp_status for the current surface range`
+    );
+  }
   let shadowedTokenCount = 0;
   for (const seq of seqs) {
     const event = eventAtOf(session, seq);
@@ -5359,6 +5378,8 @@ async function handleCompress(env, args, exec) {
   const ranges = [];
   const alreadyCompressedNotes = [];
   const rejectedNotes = [];
+  const seenRangeKeys = /* @__PURE__ */ new Set();
+  const duplicateRangeNotes = [];
   const guardedSeqs = guardedSurfaceSeqsOf(session);
   for (const range of args.content) {
     const startSeq = parseBoundary2(range.startSeq, byRef);
@@ -5392,6 +5413,14 @@ async function handleCompress(env, args, exec) {
         `billion-context-dsh: seq ${resolved.start}..${resolved.end} has no assigned ref \u2014 the range must be on the current surface (run acp_status for the live seq list)`
       );
     }
+    const rangeKey2 = `${startRef}::${endRef}`;
+    if (seenRangeKeys.has(rangeKey2)) {
+      duplicateRangeNotes.push(
+        `  seqs ${range.startSeq}..${range.endSeq} resolve to the same span as an earlier range in this call (${resolved.start}..${resolved.end}) \u2014 skipped`
+      );
+      continue;
+    }
+    seenRangeKeys.add(rangeKey2);
     ranges.push({
       ...resolved,
       startSeq,
@@ -5405,9 +5434,11 @@ async function handleCompress(env, args, exec) {
     });
   }
   if (ranges.length === 0) {
-    const text = ["Compressed 0 block(s), ~0 tokens reclaimed.", ...alreadyCompressedNotes, ...rejectedNotes];
+    const text = ["Compressed 0 block(s), ~0 tokens reclaimed.", ...alreadyCompressedNotes, ...duplicateRangeNotes, ...rejectedNotes];
     if (alreadyCompressedNotes.length > 0) {
       text.push("  (all requested ranges were already compressed \u2014 decompress a block to recover its originals)");
+    } else if (duplicateRangeNotes.length > 0 && rejectedNotes.length === 0) {
+      text.push("  (nothing compressed \u2014 every range resolved to a span an earlier range in this call already covers)");
     } else if (rejectedNotes.length > 0) {
       text.push("  (nothing compressed \u2014 every range covered a current injected instruction row; see the rejections above)");
     }
@@ -5459,6 +5490,11 @@ async function handleCompress(env, args, exec) {
     }
     const { start, end } = range;
     const shadowed = shadowedSeqsOf(session, start, end);
+    if (!isExactSurfaceSpan(session, start, end, shadowed)) {
+      skippedRanges += 1;
+      lines.push(`  skipped seqs ${start}..${end}: already shadowed by an earlier range in this call`);
+      continue;
+    }
     const shadowedTokens = shadowedTokensViaMeter(session, shadowed, agent.ctx);
     const tier = block.tier === 2 || block.tier === 3 ? block.tier : 1;
     const parentBlockIds = compactionIdsOfKernelBlocks(session, block.directBlockIds);
@@ -5492,12 +5528,13 @@ async function handleCompress(env, args, exec) {
     );
   }
   const summaryLine = `Compressed ${applied.result.blocksCreated} block(s), ~${applied.result.tokensCompressed} tokens reclaimed.`;
-  const totalSkipped = skippedRanges + alreadyCompressedNotes.length + rejectedNotes.length;
+  const totalSkipped = skippedRanges + alreadyCompressedNotes.length + duplicateRangeNotes.length + rejectedNotes.length;
   const failedLines = applied.result.errors.map((error) => `  ${error}`);
   const warningLines = [
     ...freeWarnings.map((warning) => `  ${warning}`),
     ...failedLines,
     ...alreadyCompressedNotes,
+    ...duplicateRangeNotes,
     ...rejectedNotes,
     ...lines
   ];

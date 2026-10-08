@@ -102,6 +102,17 @@ export interface ResolvedSurfaceRange {
 export declare function resolveSurfaceRange(session: Session, start: number, end: number): ResolvedSurfaceRange;
 /** The surface seqs shadowed by the inclusive positional span. */
 export declare function shadowedSeqsOf(session: Session, start: number, end: number): number[];
+/**
+ * True iff `declared` equals the CURRENT surface slice between `start` and
+ * `end` positionally — both edges on the surface, in order, element-wise equal.
+ * This mirrors exactly the invariant the released readers enforce at load time
+ * on every `compaction/summary` / `compaction/prune` event (`shadowedSeqs` must
+ * name an exact current surface span); writing an event that violates it makes
+ * the whole session log unloadable forever (issue #201). Unlike
+ * {@link shadowedSeqsOf} (which silently degrades for read-only probes), this
+ * is the strict gate for WRITES.
+ */
+export declare function isExactSurfaceSpan(session: Session, start: number, end: number, declared: readonly number[]): boolean;
 export interface CompactionTransactionInput {
     readonly start: number;
     readonly end: number;
@@ -186,9 +197,11 @@ export type MediaPriceOf = (seq: number) => number;
  * every hidden span becomes a user message. Callers with meaningful text pass
  * it (compress call/result hiding keeps the tool outcome visible to the
  * model); callers without get the fixed prune note. The originals remain in
- * the append-only log.
+ * the append-only log. Exported for the issue #201 regression tests — not part
+ * of the public API (index.ts re-exports only).
  */
 export declare const PRUNE_NOTE = "(removed by context management)";
+export declare function hideSurfaceSeqs(session: Session, seqs: readonly number[], text?: string, priceEvent?: (event: SessionEvent) => number): void;
 /**
  * Hide one successful `compress` tool's call/result pair after its tool/result
  * has been logged. The durable compaction summary is inserted BEFORE the
