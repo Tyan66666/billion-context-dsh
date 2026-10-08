@@ -219,6 +219,7 @@ DSH 的每个模型请求都派生自其 append-only 会话日志（*surface*）
 
 - **摘要标源（模型自写摘要的框架行）**：每条压缩摘要在写入时前置 `[Model-written summary — not user words; re-verify any obligations before relying on them]`——同时写进持久化摘要事件与其 checkpoint 节点（同一份文本），投影路径对旧块幂等补框。目的：阻止模型把摘要里的义务句当成用户原话直接执行。
 - **瘦身 nudge**：压缩哲学/规则段不再随每次 nudge 重复（它们已在系统提示里）；nudge 正文只保留触发框架 + 上下文分解 + 范围表。模板路径（`config.prompts.nudge`）同样摘除这些段落。设计背景：[docs/injection-governance-design.md](docs/injection-governance-design.md)。
+- **未移植的上游能力 — `acp_rule`（永久规则层）**：上游 billion-context-pi 还有第五个模型工具 `acp_rule`（opt-in：`"rules": true`），用于在对话中途登记**能穿越压缩**的原则级提醒。本移植版未包含它：上游内核自 v0.0.80 起才提供规则 API（`addRule` / `removeRule` / `formatRulesForPrompt` 等），而本仓钉死 acp-kernel 0.0.63，没有可接的内核接口。移植计划见 [issue #189](https://github.com/Tyan66666/billion-context-dsh/issues/189)（文档兜底 → pin bump → 用内核 API 接第五工具）。过渡期变通：长期约定写入 AGENTS.md（注入行受屏障/pin 机制保护，天然穿越压缩），或经 `config.prompts.systemPrompt` 静态注入——两者都不支持会话中途登记/列举/撤销规则。
 
 ## 上游项目与致谢
 

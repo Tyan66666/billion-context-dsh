@@ -20,6 +20,7 @@ DSH 仓库里的 `packages/acp` 是 **Agent Client Protocol**（进程间自动�
   - `pi.on('session_start'/'session_shutdown')` — 生命周期。
   - `pi.on('before_agent_start')` — 注入 ACP 系统提示词。
 - 注册 4+ 工具：`compress`（模型写摘要替换范围）、`decompress`（把块恢复回上下文）、`search_context`（在压缩块内搜索）、`acp_status`（压缩统计）；外加 delegate 三件套（`acp_delegate`/`acp_delegate_wait`/`acp_delegate_cancel`）。
+- （补注，2026-10-04）上游另有 opt-in 的第五个模型工具 `acp_rule`（永久规则层：登记能穿越压缩的原则级提醒；上游内核 v0.0.80+ 才提供规则 API）——初版移植清单漏了此项，当前仍未移植，计划见 [issue #189](https://github.com/Tyan66666/billion-context-dsh/issues/189)。
 - 注册 `/acp-prune` slash 命令；自动更新检查；状态持久化到 `~/.pi/agent/sessions/*.acp.json` 旁车文件。
 - **acp-kernel 是纯内核**（"Framework-agnostic context-compression engine. Pure core: no host dependency"），tsup 构建时内联进 dist。这意味着压缩算法本身**可原样复用**，只需重写 Pi↔kernel 的适配层。
 
