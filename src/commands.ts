@@ -8,7 +8,7 @@
 import type { CommandDefinition } from '@deepseek-ai/dsh-commands'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { guardedRowsInSpan, liveCarrierRejectionNote, protectedRowRejectionNote, resolveEffectiveWindow, type ToolEnvironment } from './tools.ts'
-import { resolveTokenCount } from './nudge.ts'
+import { resolveNudgeTargets, resolveTokenCount } from './nudge.ts'
 import { kernelConfigFor } from './config.ts'
 import { SettingsConflictError } from '@deepseek-ai/dsh-settings'
 import {
@@ -93,6 +93,17 @@ async function statusText(env: ToolEnvironment, agent: Agent): Promise<string> {
   if (nudge !== undefined) {
     const label = nudge.shouldInject ? (nudge.tier !== null ? `ACTIVE [T${nudge.tier}]` : 'ACTIVE') : 'idle'
     lines.push(`  nudge: ${label} — ${nudge.reason}`)
+    if (nudge.shouldInject) {
+      // The SAME target gate buildNudge applies (issue #213): an ACTIVE label
+      // over a fragmented surface means "will not be injected" — say so, with
+      // the reason. Read-only probe: orphan stripping is off because pruning
+      // appends a durable event a diagnostic command must never write.
+      const targets = resolveNudgeTargets(nudge, session, {
+        ranges: nudge.compressibleRanges ?? [],
+        refs: turn.state.messageRefs,
+      }, undefined, { stripOrphans: false })
+      if (!targets.actionable) lines.push(`  (suppressed — no compressible target: ${targets.reason})`)
+    }
     if (!nudge.shouldInject) {
       const maxPct = config.nudge.maxContextLimitPct
       const toNudge = Math.max(0, Math.round(maxPct * limit - estimated))

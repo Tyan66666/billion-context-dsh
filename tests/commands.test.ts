@@ -12,6 +12,7 @@ import { Context } from '@deepseek-ai/cordis'
 import { createCore, type CompressionCore } from 'acp-kernel'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { Session } from '@deepseek-ai/dsh-session'
+import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { AcpStateStore } from '../src/state.ts'
 import { acpCommand } from '../src/commands.ts'
 import type { ToolEnvironment } from '../src/tools.ts'
@@ -95,6 +96,33 @@ test('M4: /acp-prune status reports ACTIVE nudge when usage crosses the nudge li
   assert.match(text, /\n  nudge: ACTIVE( \[T\d\])? — /, 'ACTIVE nudge line')
   // ACTIVE nudges do not carry a "next nudge" distance (already there).
   assert.ok(!text.includes('next nudge:'), 'no distance line while ACTIVE')
+})
+
+const BARRIER_BODY = 'Authentication uses JWT access tokens with 15 minute expiry and refresh tokens stored in Redis with 30 day TTL, implemented in src/auth/login.ts with sliding-window rate limiting at 10 requests per minute. '.repeat(30)
+
+function appendBarrierRow(session: Session, kind: string, label: string): void {
+  session.append('user/message', createUserMessage({
+    content: [{ type: 'text', text: `${BARRIER_BODY} [${label}]` }],
+    source: { kind },
+  }), { surfaceOp: 'append' })
+}
+
+test('M4: /acp-prune status annotates an ACTIVE nudge that has no legal target (issue #213)', async () => {
+  // Five long unaudited-kind barrier rows fragment the surface so that every
+  // kernel candidate dies in the host guards; the panel must say so instead of
+  // advertising an ACTIVE nudge the model cannot act on.
+  const env = makeEnv(14000)
+  const session = Session.create('frag-status')
+  appendTurn(session, 1)
+  for (let i = 0; i < 5; i += 1) appendBarrierRow(session, 'team-message', `barrier ${i}`)
+  appendUser(session, longText('q1', 0))
+  appendAssistant(session, longText('a1', 1), 1, 1)
+  appendUser(session, longText('q2', 2))
+  appendAssistant(session, longText('a2', 3), 1, 2)
+  const text = await runAcp(env, fakeAgent(session), 'status')
+
+  assert.match(text, /\n  nudge: ACTIVE( \[T\d\])? — /, 'ACTIVE nudge line')
+  assert.match(text, /\n  \(suppressed — no compressible target: usage \d+% .*0 of \d+ kernel range\(s\) survive the host guards/, 'the panel explains why no nudge will land')
 })
 
 test('M4: /acp-prune status lists compressed blocks from the ledger', async () => {

@@ -4,13 +4,15 @@ import { Context } from '@deepseek-ai/cordis'
 import { createCore, defaultCountTokens, type CompressionCore, type NudgeDecision } from 'acp-kernel'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
+import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { AcpStateStore } from '../src/state.ts'
-import { buildNudge, buildNudgeText, computeSurfaceBreakdown, rangeTable, resolveTokenCount, EMERGENCY_NUDGE_MAX_PER_TURN } from '../src/nudge.ts'
+import { buildNudge, buildNudgeText, computeSurfaceBreakdown, rangeTable, resolveNudgeTargets, resolveTokenCount, EMERGENCY_NUDGE_MAX_PER_TURN } from '../src/nudge.ts'
 import { makeTools, type ToolEnvironment } from '../src/tools.ts'
-import { rebuildBlockLedger, runCompactionTransaction } from '../src/region.ts'
+import { buildCompressibleSeqRanges, rebuildBlockLedger, runCompactionTransaction } from '../src/region.ts'
+import { kernelConfigFor } from '../src/config.ts'
 import { allLogMessages, eventsToCoreMessages, surfaceEventsOf } from '../src/messages.ts'
 import { Session } from '@deepseek-ai/dsh-session'
-import { appendToolCall, appendToolResult, appendTurn, appendUser, buildTextSession, longText, wholeSurfaceRangeView } from './helpers.ts'
+import { appendAssistant, appendToolCall, appendToolResult, appendTurn, appendUser, buildTextSession, longText, wholeSurfaceRangeView } from './helpers.ts'
 
 function fakeAgent(session: import('@deepseek-ai/dsh-session').Session): Agent {
   return {
@@ -379,4 +381,126 @@ test('M4: nudge contextBreakdown is wired to the surface (kernel path uses compu
   // No blocks → summaries is zero; text carries the alternating user/assistant plain text.
   assert.equal(bd.summaries, 0)
   assert.ok(bd.text > 0)
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Issue #213: a threshold-triggered nudge must not be injected when the host
+// guards leave it no legal target (fragmented surface), and the range table
+// must show the LARGEST spans first with the cut rows counted.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const BARRIER_BODY = 'Authentication uses JWT access tokens with 15 minute expiry and refresh tokens stored in Redis with 30 day TTL, implemented in src/auth/login.ts with sliding-window rate limiting at 10 requests per minute. '.repeat(30)
+
+/** An unaudited direct-kind row (agent-team goal / time-context / team-message lines): classified `instruction` = a barrier never offered for compression (rule 16). */
+function appendBarrierRow(session: Session, kind: string, label: string): void {
+  session.append('user/message', createUserMessage({
+    content: [{ type: 'text', text: `${BARRIER_BODY} [${label}]` }],
+    source: { kind },
+  }), { surfaceOp: 'append' })
+}
+
+function fragmentedSession(): Session {
+  // Five long barrier rows followed by four real messages: every real node sits
+  // in the protected tail / last-real-user-turn set, so NO span survives the
+  // host guards while the kernel — which sees barriers as plain user text —
+  // still offers candidates and crosses the over-limit line (~85% of 14000).
+  const session = Session.create('frag')
+  appendTurn(session, 1)
+  for (let i = 0; i < 5; i += 1) appendBarrierRow(session, 'team-message', `barrier ${i}`)
+  appendUser(session, longText('q1', 0))
+  appendAssistant(session, longText('a1', 1), 1, 1)
+  appendUser(session, longText('q2', 2))
+  appendAssistant(session, longText('a2', 3), 1, 2)
+  return session
+}
+
+test('M4: a threshold-triggered nudge is skipped when no legal target survives the host guards (issue #213)', () => {
+  const LIMIT = 14000
+  const session = fragmentedSession()
+
+  // Mechanism pin on a throwaway store: the kernel WANTS a nudge and offers
+  // candidate spans (it cannot see the host barriers); the guards eat them all.
+  const probeEnv = makeEnv(LIMIT)
+  const probeState = probeEnv.store.stateFor(session)
+  const probeTurn = probeEnv.kernel.processTurn({
+    messages: allLogMessages(session),
+    state: probeState,
+    config: kernelConfigFor(probeEnv),
+    tokenCount: eventsToCoreMessages(surfaceEventsOf(session)).reduce((sum, m) => sum + defaultCountTokens(m.text ?? ''), 0),
+  })
+  assert.equal(probeTurn.nudge?.shouldInject, true, 'the kernel fires at this pressure')
+  assert.ok((probeTurn.nudge?.compressibleRanges?.length ?? 0) >= 1, 'the kernel offers candidate spans')
+  assert.equal(
+    buildCompressibleSeqRanges(session, { ranges: probeTurn.nudge!.compressibleRanges ?? [], refs: probeState.messageRefs }, { stripOrphans: false }).length,
+    0,
+    'every candidate dies in the host guards',
+  )
+
+  // Gate behavior on a fresh store: suppressed, reason reported, budgets untouched.
+  const env = makeEnv(LIMIT)
+  const lastNudgeTurn = new Map<string, number>()
+  const emergencyNudges = new Map<string, { turn: number; count: number }>()
+  const reasons: string[] = []
+  const outcome = buildNudge(fakeAgent(session), env, lastNudgeTurn, emergencyNudges, undefined, (reason) => reasons.push(reason))
+  assert.equal(outcome, null, 'no nudge lands when the table would be empty')
+  assert.equal(reasons.length, 1, 'the host callback fired once with the reason')
+  assert.match(reasons[0]!, /0 of \d+ kernel range\(s\) survive the host guards/)
+  assert.equal(lastNudgeTurn.get(session.id), undefined, 'the suppression does not consume the per-turn slot')
+  assert.equal(emergencyNudges.has(session.id), false, 'and not the per-turn emergency budget either')
+
+  // A target that appears later in the SAME turn must still be offered — the
+  // skipped slot was not spent by the suppression.
+  appendUser(session, longText('q3', 10))
+  appendAssistant(session, longText('a3', 11), 1, 3)
+  appendUser(session, longText('q4', 12))
+  appendAssistant(session, longText('a4', 13), 1, 4)
+  const second = buildNudge(fakeAgent(session), env, lastNudgeTurn, emergencyNudges, undefined, (reason) => reasons.push(reason))
+  assert.ok(second !== null, 'once real content leaves the protected tail the nudge lands in the same turn')
+  assert.equal(reasons.length, 1, 'no second suppression after a target exists')
+  const text = second!.message.content.map((block) => (block as { text?: string }).text ?? '').join('')
+  assert.match(text, /seq 6\.\.8/, 'the newly-compressible run is offered')
+})
+
+test('M4: the range table shows the LARGEST spans first and counts the hidden rows (issue #213)', () => {
+  // Nine work chunks separated by barrier rows; chunk 5 is 4x bigger. Chunks
+  // 8/9 die in the protected tail + last-real-user-turn guard, leaving seven
+  // offered ranges — six fit the table, one must be counted, not dropped.
+  const session = Session.create('selection')
+  appendTurn(session, 1)
+  for (let chunk = 1; chunk <= 9; chunk += 1) {
+    const size = chunk === 5 ? 4 : 2
+    for (let k = 0; k < size; k += 1) {
+      if (k % 2 === 0) appendUser(session, longText(`c${chunk}`, k))
+      else appendAssistant(session, longText(`c${chunk}`, k), 1, chunk * 10 + k)
+    }
+    if (chunk < 9) appendBarrierRow(session, 'goal', `goal ${chunk}`)
+  }
+
+  const table = rangeTable(session, wholeSurfaceRangeView(session))
+  assert.match(table, /Compressible ranges \(7, largest first; exact surface seqs — usable as-is\):/, 'title counts ALL offered ranges, not just the shown ones')
+  const rows = table.split('\n').filter((line) => /^  - seq \d+\.\.\d+ — \d+ messages, ~\d+ tokens/.test(line))
+  assert.equal(rows.length, 6, 'at most RANGE_TABLE_MAX_ROWS rows are shown')
+  const tokensOf = (line: string): number => Number(line.match(/~(\d+) tokens/)![1])
+  for (let i = 1; i < rows.length; i += 1) {
+    assert.ok(tokensOf(rows[i - 1]!) >= tokensOf(rows[i]!), `row ${i} (${rows[i - 1]!}) is not larger than row ${i - 1} (${rows[i]!})`)
+  }
+  assert.match(rows[0]!, /seq 13\.\.16/, 'the 4x-bigger chunk leads even though it is not the oldest')
+  assert.match(table, /1 more range\(s\) not shown \(~\d+ tokens\)/, 'the cut rows are counted, never silent')
+})
+
+test('M4: a tier nudge whose checkpoint seqs are gone is skipped, not injected (issue #213)', () => {
+  const session = buildTextSession(12)
+  const decision: NudgeDecision = {
+    shouldInject: true,
+    reason: 'tier-2 distillation recommended',
+    compressibleRanges: [],
+    tierTargetBlocks: [{ blockId: 'bX' } as never],
+    contextUsage: 0.9,
+    tier: 2,
+    breakdown: { usage: 0.9, growth: 0, growthReference: 0, effectiveThreshold: 0, nudgeGrowthTokens: 50000, growthFloor: 20000, hasPendingNudge: 0, overLimit: 1, emergencyOverride: 0, pendingT1: 0, pendingT2: 4750, pendingT3: 0 },
+  }
+  const targets = resolveNudgeTargets(decision, session, wholeSurfaceRangeView(session))
+  assert.equal(targets.kind, 'tier')
+  assert.equal(targets.actionable, false, 'a block without a resolvable checkpoint seq names no legal target')
+  assert.match(targets.reason!, /no resolvable checkpoint seq/)
 })
