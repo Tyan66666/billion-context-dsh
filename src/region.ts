@@ -27,10 +27,12 @@ import {
   attachmentsOfEvent,
   mediaBlocksOfEvent,
   extractText,
+  injectionChannelOf,
   isAgentInstructionsRow,
   isCheckpointNode,
   isRealUserTurn,
   isSkillCatalogRow,
+  STALE_FOLDABLE_HOST_CHANNELS,
   toolCallIdOfResultEvent,
   toolCallsOf,
   withSummaryFramePrefix,
@@ -1118,6 +1120,96 @@ export function newestSkillCatalogSeqOf(session: Session): number | null {
 }
 
 /**
+ * The supersession groups a VISIBLE instruction row belongs to (issue #215),
+ * or null when its channel has no supersession notion at all — every copy of
+ * such a channel stays a barrier, the conservative default:
+ *
+ * - 'agent-instructions': one group per `source.changes[].scope` (the same
+ *   file identity newestInstructionSeqsOf uses). A scope-less row cannot be
+ *   re-injected — the host's presence gate needs a scope to know which file
+ *   went missing (issue #71 review S3) — so it returns an EMPTY group list,
+ *   read as "unconditionally stale" below.
+ * - 'skill-catalog': ONE group; each catalog supersedes all earlier ones
+ *   (issue #185).
+ * - goal / time-context / team-message (`STALE_FOLDABLE_HOST_CHANNELS`): one
+ *   group per channel name.
+ * - everything else (compact-basic, unknown plugin/kind names): null.
+ */
+function instructionGroupKeysOf(event: SessionEvent, channel: string): string[] | null {
+  switch (channel) {
+    case 'agent-instructions': {
+      const source = (event.data as { source?: { changes?: Array<{ scope?: unknown }> } }).source
+      const changes = Array.isArray(source?.changes) ? source.changes : []
+      return changes
+        .map((change) => (typeof change?.scope === 'string' ? change.scope : ''))
+        .filter((scope) => scope.length > 0)
+    }
+    case 'skill-catalog':
+      return ['skill-catalog']
+    default:
+      return STALE_FOLDABLE_HOST_CHANNELS.has(channel) ? [channel] : null
+  }
+}
+
+/**
+ * Split the surface-visible instruction rows into stale copies and current
+ * copies (issue #215). A row is STALE when its channel is supersession-based
+ * and a NEWER visible copy of at least one of its groups exists; CURRENT when
+ * it is the newest visible copy of every group it belongs to. Rows whose
+ * channel has no supersession notion (compact-basic, unknown channels) appear
+ * in NEITHER set — they stay barriers forever, as before.
+ *
+ * "Newest" is measured on the SURFACE, not the log: shadowed copies are gone
+ * from the model's point of view, so the newest visible row is the one the
+ * host's presence gate would see — and the one that must keep the protection.
+ */
+function partitionInstructionRows(session: Session): { stale: Set<number>; current: Set<number> } {
+  const rows: { seq: number; groups: string[] | null }[] = []
+  for (const seq of session.surface.nodes) {
+    const event = eventAtOf(session, seq)
+    if (event === undefined || classifySurfaceEvent(event) !== 'instruction') continue
+    // classifySurfaceEvent === 'instruction' implies injectionChannelOf !== null.
+    rows.push({ seq, groups: instructionGroupKeysOf(event, injectionChannelOf(event) ?? '') })
+  }
+  const newestByGroup = new Map<string, number>()
+  for (const row of rows) {
+    if (row.groups === null || row.groups.length === 0) continue
+    for (const group of row.groups) {
+      const prev = newestByGroup.get(group)
+      if (prev === undefined || row.seq > prev) newestByGroup.set(group, row.seq)
+    }
+  }
+  const stale = new Set<number>()
+  const current = new Set<number>()
+  for (const row of rows) {
+    if (row.groups === null) continue
+    if (row.groups.length === 0) {
+      stale.add(row.seq)
+      continue
+    }
+    // Newest for ANY of its groups makes the row current: a multi-scope row
+    // (one injection carrying several files) must stay whole.
+    if (row.groups.some((group) => newestByGroup.get(group) === row.seq)) current.add(row.seq)
+    else stale.add(row.seq)
+  }
+  return { stale, current }
+}
+
+/**
+ * Surface-visible instruction rows that are STALE copies of a superseded
+ * channel state (issue #215): older AGENTS.md scope copies, superseded skill
+ * catalogs, old goal / time-context / team-message snapshots. Folding them
+ * reclaims tokens without provoking a re-injection — the newest visible copy
+ * of each group stays a barrier, so the host's presence gate sees a current
+ * copy. This is what lifts them out of the range table's blanket instruction
+ * barrier (compressibleSegmentsOf); the /acp-prune status context map counts
+ * them too. Current copies and non-supersession channels are NOT in this set.
+ */
+export function staleFoldableHostRowSeqs(session: Session): ReadonlySet<number> {
+  return partitionInstructionRows(session).stale
+}
+
+/**
  * Surface seqs NO caller may compress: the CURRENT (newest) injected
  * agent-instructions row of every scope (restricted to rows still visible on
  * the surface — one definition of "current" — `newestInstructionSeqsOf`) PLUS
@@ -1144,14 +1236,13 @@ export function newestSkillCatalogSeqOf(session: Session): number | null {
  */
 export function guardedSurfaceSeqsOf(session: Session): Set<number> {
   const guarded = new Set<number>()
-  const newestInstructions = newestInstructionSeqsOf(session)
-  const newestCatalog = newestSkillCatalogSeqOf(session)
-  for (const seq of session.surface.nodes) {
-    const event = eventAtOf(session, seq)
-    if (event === undefined) continue
-    if (isAgentInstructionsRow(event) && newestInstructions.has(seq)) guarded.add(seq)
-    else if (newestCatalog !== null && seq === newestCatalog) guarded.add(seq)
-  }
+  // issue #215: the CURRENT (newest visible) copy of every supersession-based
+  // instruction channel joins the guard — agent-instructions per scope and the
+  // skill catalog as before, plus the newest goal / time-context / team-message
+  // row: folding any current copy has no legitimate outcome (the host owns its
+  // lifecycle), same arithmetic as the AGENTS.md guard. STALE copies are NOT
+  // guarded — removing them while the newest stays visible is the cleanup.
+  for (const seq of partitionInstructionRows(session).current) guarded.add(seq)
   for (let index = session.surface.nodes.length - 1; index >= 0; index -= 1) {
     const seq = session.surface.nodes[index]!
     const event = eventAtOf(session, seq)
@@ -1204,7 +1295,11 @@ function seqOfKernelRef(refs: KernelRangeView['refs'], ref: string): number | nu
  *   folding it reclaims nothing (rule 16);
  * - the newest skill-catalog row: the host never re-sends a folded catalog
  *   (resend keyed on the digest), so the visible copy must stay on the
- *   surface (issue #185).
+ *   surface (issue #185);
+ * - the newest visible goal / time-context / team-message row: the host owns
+ *   the lifecycle of these control channels, so the current copy must stay on
+ *   the surface even though STALE copies of the same channel are foldable
+ *   (issue #215).
  */
 function protectedSurfaceSeqs(session: Session, preserve: number): Set<number> {
   const nodes = session.surface.nodes
@@ -1233,6 +1328,15 @@ function protectedSurfaceSeqs(session: Session, preserve: number): Set<number> {
   // out of every offered range even if its shape recognition regresses.
   const newestCatalog = newestSkillCatalogSeqOf(session)
   if (newestCatalog !== null) protectedSeqs.add(newestCatalog)
+  // Belt-and-braces alongside the classifier barrier (issue #215): the newest
+  // visible goal / time-context / team-message row stays out of every offered
+  // range even if its shape recognition regresses — stale copies of those
+  // channels are foldable, but never the current one.
+  for (const seq of partitionInstructionRows(session).current) {
+    const event = eventAtOf(session, seq)
+    const channel = event === undefined ? null : injectionChannelOf(event)
+    if (channel !== null && STALE_FOLDABLE_HOST_CHANNELS.has(channel)) protectedSeqs.add(seq)
+  }
   return protectedSeqs
 }
 
@@ -1263,6 +1367,7 @@ function compressibleSegmentsOf(
   fromIndex: number,
   toIndex: number,
   protectedSeqs: ReadonlySet<number>,
+  staleFoldable: ReadonlySet<number>,
   mediaPriceOf?: MediaPriceOf,
 ): CompressibleSegment[] {
   const nodes = session.surface.nodes
@@ -1281,18 +1386,22 @@ function compressibleSegmentsOf(
       || protectedSeqs.has(seq)
       || isCheckpointNode(event)
       || isSystemNode(event)
-      // Host policy rows (AGENTS.md injections in both shapes, skill catalogs,
-      // unknown plugin rows — `classifySurfaceEvent` 'instruction') are
-      // barriers. Compressing the CURRENT copy of an instruction file makes the
-      // host re-inject it on its next step — the tokens come straight back, and
-      // a model that keeps compressing them loops forever (live-measured: 20 of
-      // 43 compressions in a long session re-triggered an injection within 7
-      // events; observed again live in session-8c15904e, seq 8 absorbed by a
-      // compress → host re-injected at seq 53191). Stale copies stay barriers
-      // here too; the system-side GC that removes them lands separately
-      // (instruction hygiene PR2). Engine-authored metadata rows (nudge echo,
-      // compress-pair stub) intentionally fall through and stay foldable.
-      || classifySurfaceEvent(event) === 'instruction'
+      // Host policy rows (`classifySurfaceEvent` 'instruction') are barriers,
+      // with ONE exception (issue #215): a STALE copy of a superseded channel
+      // state (older AGENTS.md scope copies, superseded skill catalogs, old
+      // goal / time-context / team-message snapshots) folds like ordinary
+      // content — its group's newest visible copy remains a barrier, so the
+      // host's presence gate sees a current copy and re-injection never fires.
+      // Current copies, compact-basic rows and unknown channels stay barriers
+      // exactly as before: compressing the CURRENT copy of an instruction file
+      // makes the host re-inject it on its next step — the tokens come straight
+      // back, and a model that keeps compressing them loops forever
+      // (live-measured: 20 of 43 compressions in a long session re-triggered an
+      // injection within 7 events; observed again live in session-8c15904e, seq
+      // 8 absorbed by a compress → host re-injected at seq 53191).
+      // Engine-authored metadata rows (nudge echo, compress-pair stub)
+      // intentionally fall through and stay foldable.
+      || (classifySurfaceEvent(event) === 'instruction' && !staleFoldable.has(seq))
     ) {
       flush()
       continue
@@ -1377,6 +1486,10 @@ export function buildCompressibleSeqRanges(
   const indexOfSeq = new Map<number, number>()
   for (let index = 0; index < nodes.length; index += 1) indexOfSeq.set(nodes[index]!, index)
   const protectedSeqs = protectedSurfaceSeqs(session, opts.preserveRecent ?? 5)
+  // issue #215: stale copies of superseded instruction channels join normal
+  // segments instead of fragmenting them. Recomputed after the orphan strip
+  // above so the set measures the surface that will actually be compressed.
+  const staleFoldable = staleFoldableHostRowSeqs(session)
   const out: SeqCompressibleRange[] = []
   for (const range of kernelView.ranges) {
     const startSeq = seqOfKernelRef(kernelView.refs, range.startRef)
@@ -1391,6 +1504,7 @@ export function buildCompressibleSeqRanges(
       Math.min(from, to),
       Math.max(from, to),
       protectedSeqs,
+      staleFoldable,
       opts.mediaPriceOf,
     )
     for (const segment of segments) {
