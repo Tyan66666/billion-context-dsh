@@ -15,18 +15,25 @@
  *    `edgeRefForSeq` therefore never walks forward into a later checkpoint.
  *
  * 2. (CONTRACT since the acp-kernel 0.0.101 pin) A PLAIN range whose span
- *    crosses a live block's checkpoint carrier is REJECTED, and every carrier is
- *    marked for the kernel. The kernel recognizes a host-carried summary through
- *    `CoreMessage.summaryOfBlockId` (upstream #335, fixed by acp-kernel #338): for
- *    a plain message-ref range it keeps such a carrier visible and reports the
- *    exclusion in its warning list, while block-ref boundaries (bN..bM, tier 2/3)
- *    still fold it. Our projection attaches that marker
- *    (`kernelBlockIdByCompactionId` → `projectEvent`), and because the host
- *    transaction replaces the whole span in ONE `surfaceOp` — which would hide
- *    the carrier the kernel just kept — the compress path (and
- *    `/acp-prune compress`) refuses the span and hands back the block-id call
- *    instead. Before the pin the crossed checkpoint was folded silently: the
- *    superseded block's summary left the visible surface with no signal.
+ *    crosses a live block's checkpoint carrier is never folded as a plain
+ *    message, and every carrier is marked for the kernel. The kernel recognizes
+ *    a host-carried summary through `CoreMessage.summaryOfBlockId` (upstream
+ *    #335, fixed by acp-kernel #338): for a plain message-ref range it keeps
+ *    such a carrier visible and reports the exclusion in its warning list, while
+ *    block-ref boundaries (bN..bM, tier 2/3) still fold it. Our projection
+ *    attaches that marker (`kernelBlockIdByCompactionId` → `projectEvent`), and
+ *    because the host transaction replaces the whole span in ONE `surfaceOp` —
+ *    which would hide the carrier the kernel just kept — the compress path (and
+ *    `/acp-prune compress`) never lets a plain fold take the carrier. Before the
+ *    pin the crossed checkpoint was folded silently: the superseded block's
+ *    summary left the visible surface with no signal.
+ *
+ *    HOW that happens is the `carrierSpans` policy (issue #214): 'split'
+ *    (default) compresses the side-spans around each carrier separately with
+ *    the model's own summary — carriers stay visible; 'reject' is the original
+ *    hard reject. The split behavior is pinned in tests/carrier-split.test.ts;
+ *    the two reject-contract tests below therefore run under an EXPLICIT
+ *    `carrierSpans: 'reject'`.
  */
 import assert from 'node:assert/strict'
 import test from 'node:test'
@@ -217,7 +224,9 @@ test('cross-checkpoint span: no range edge ever takes a checkpoint ref the model
 })
 
 test('cross-checkpoint span: a PLAIN range that crosses a live checkpoint carrier is rejected', async () => {
-  const env = makeEnv()
+  // Explicit 'reject' policy: since issue #214 the default is 'split' (pinned in
+  // tests/carrier-split.test.ts); this test keeps the reject contract alive.
+  const env = { ...makeEnv(), carrierSpans: 'reject' as const }
   const session = crossCheckpointFixture('checkpoint-plain-range')
   const compress = tool(env, 'compress')
   const exec = execStub(session, 'call-checkpoint-plain')
@@ -311,7 +320,8 @@ test('cross-checkpoint span: an unknown block id boundary fails with guidance, n
 })
 
 test('cross-checkpoint span: the carrier guard holds while the checkpoint is inside the protection window too', async () => {
-  const env = makeEnv()
+  // Explicit 'reject' policy — see the sibling test above for why.
+  const env = { ...makeEnv(), carrierSpans: 'reject' as const }
   const session = crossCheckpointFixture('checkpoint-protected')
   const compress = tool(env, 'compress')
 
