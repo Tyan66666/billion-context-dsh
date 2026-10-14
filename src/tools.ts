@@ -770,7 +770,9 @@ async function handleCompress(env: ToolEnvironment, args: CompressArgs, exec: To
           }
           const sliceKey = `${sliceStartRef}::${sliceEndRef}`
           if (seenRangeKeys.has(sliceKey)) {
-            failedCarrierSlices += 1
+            // Counted once, here — the note lands in duplicateRangeNotes, which
+            // the footer total already sums (incrementing failedCarrierSlices
+            // too would double-count this skip).
             duplicateRangeNotes.push(
               `  side span ${slice.start}..${slice.end} resolve to the same span as an earlier range in this call — skipped`,
             )
