@@ -71,7 +71,7 @@ Carrier boundaries: seq 15 (b1) — a plain span crossing one is split around it
 
 ## 5. 验证
 
-- `tests/carrier-split.test.ts`（8 例）：split 默认（2 侧块 + carrier 可见 + 结果点名保留 seq）、双 carrier（3 侧块）、显式 reject（0 块 + 可执行两侧切片文案）、guard 优先于 split、同批去重（跨界 span + 显式子 span）、`/acp-prune compress` 两策略、`acp_status` 边界行两策略、`resolveAcpConfig` 校验（默认/回环/显式 undefined/未知值抛错）。
+- `tests/carrier-split.test.ts`（8 例）：split 默认（2 侧块 + carrier 可见 + 结果点名保留 seq）、双 carrier（相邻 carrier 共享一次 flush，2 侧块）、显式 reject（0 块 + 可执行两侧切片文案）、guard 优先于 split、同批去重（跨界 span + 显式子 span）、`/acp-prune compress` 两策略、`acp_status` 边界行两策略、`resolveAcpConfig` 校验（默认/回环/显式 undefined/未知值抛错）。
 - `tests/checkpoint-span.test.ts`：两条 reject 契约测试改为显式 `carrierSpans: 'reject'`（契约本身不变：resolver 永不交出 checkpoint ref、carrier 存活且带块 id）。
 - issue #214 的实测数据（12 拒 / 2 原样重试）作为动机锚点。
 
