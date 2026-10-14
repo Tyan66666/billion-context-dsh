@@ -148,20 +148,22 @@ test('PR1: the range table splits at instruction rows — no offered range conta
   assert.ok(covers(4), 'the post-barrier segment is still offered')
 })
 
-test('PR1: the barrier (not the newest-row pin) excludes NON-newest instruction rows', () => {
+test('#215: STALE copies of superseded channels are offered; CURRENT copies stay barred', () => {
   const session = Session.create('barrier-nonnewest')
   appendTurn(session, 1)
   appendUser(session, longText('q0', 0))            // seq 1
   appendAssistant(session, longText('a0', 1), 1, 1) // seq 2
-  // A copy that a later row supersedes: the newest-row pin does NOT cover it,
-  // so only the instruction BARRIER keeps it out of the range table. Without a
-  // row like this the barrier has no killer — the pin alone already splits the
-  // surface, so a broken barrier would go unnoticed.
+  // A copy superseded by a later row of the SAME scope: issue #215 makes it
+  // foldable — the newest visible copy of the group stays a barrier, so
+  // folding reclaims tokens without provoking a re-injection. Under the old
+  // blanket barrier this row stayed out of the table forever and fragmented
+  // the surface around it (the bug); the newest-row pin alone does NOT cover
+  // it, so this fixture is the killer for the barrier change itself.
   const staleSeq = appendInstruction(session, '.\u0000AGENTS.md', 'v1')
   appendUser(session, longText('q1', 2))
   appendAssistant(session, longText('a1', 3), 1, 3)
-  // A policy row that is not an AGENTS.md row at all: never pinned either
-  // (`newestInstructionSeqsOf` only tracks agent-instructions rows).
+  // The newest (and only) skill catalog: its group's CURRENT copy, so it stays
+  // a barrier exactly like the newest AGENTS.md copy (issue #185).
   const catalogSeq = appendPluginRow(session, { kind: 'skill-catalog' })
   appendUser(session, longText('q2', 4))
   appendAssistant(session, longText('a2', 5), 1, 5)
@@ -169,15 +171,15 @@ test('PR1: the barrier (not the newest-row pin) excludes NON-newest instruction 
 
   const pinned = newestInstructionSeqsOf(session)
   assert.ok(pinned.has(newestSeq), 'the newest copy is pinned')
-  assert.ok(!pinned.has(staleSeq), 'the stale copy is NOT pinned — the barrier alone must exclude it')
-  assert.ok(!pinned.has(catalogSeq), 'a skill catalog is NOT pinned — the barrier alone must exclude it')
+  assert.ok(!pinned.has(staleSeq), 'the stale copy is NOT pinned — only the barrier change lets it fold')
+  assert.ok(!pinned.has(catalogSeq), 'a skill catalog is NOT pinned — the newest-copy guard keeps it out')
 
   const ranges = buildCompressibleSeqRanges(session, wholeSurfaceRangeView(session), { preserveRecent: 0 })
   const covers = (seq: number): boolean => ranges.some((range) => range.start <= seq && seq <= range.end)
-  assert.ok(!covers(staleSeq), `no offered range may contain the stale instruction row (seq ${staleSeq})`)
-  assert.ok(!covers(catalogSeq), `no offered range may contain the skill-catalog row (seq ${catalogSeq})`)
-  assert.ok(!covers(newestSeq), 'nor the newest copy (pinned as well as barred)')
-  assert.ok(ranges.length >= 2, `segments split at the instruction rows (got ${ranges.length})`)
+  assert.ok(covers(staleSeq), `an offered range folds ACROSS the stale instruction row (seq ${staleSeq}) — #215`)
+  assert.ok(!covers(catalogSeq), `no offered range covers the CURRENT skill-catalog row (seq ${catalogSeq})`)
+  assert.ok(!covers(newestSeq), 'nor the newest AGENTS.md copy (pinned as well as barred)')
+  assert.ok(ranges.length >= 2, `segments split at the current rows (got ${ranges.length})`)
   assert.ok(covers(1) && covers(2), 'the first real segment is still offered')
 })
 
