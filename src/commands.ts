@@ -22,6 +22,8 @@ import {
 import {
   blockIdOfKernelRef,
   blockRefForSummarySeq,
+  carrierSideBounds,
+  carrierSideSpans,
   expandShadowedSeqs,
   guardedSurfaceSeqsOf,
   rebuildBlockLedger,
@@ -150,15 +152,65 @@ function compressText(env: ToolEnvironment, agent: Agent, args: string[]): strin
   if (instructionHits.length > 0) {
     return protectedRowRejectionNote(start, end, instructionHits, shadowed, session)
   }
-  // Same hard reject as the compress tool: this is a plain T1 range transaction,
-  // so it must not fold the checkpoint carrier of a still-active block (the
-  // kernel keeps such a carrier visible; the one-op replace below would hide it
-  // anyway). Explicit human intent does not override the arithmetic — distillation
-  // is the compress tool's block-ref path, and the edge check above already
-  // refuses a range whose EDGE is a summary node.
+  // A plain T1 range transaction must not fold the checkpoint carrier of a
+  // still-active block (the kernel keeps such a carrier visible; the one-op
+  // replace would hide it anyway). Explicit human intent does not override that
+  // arithmetic — distillation is the compress tool's block-ref path, and the
+  // edge check above already refuses a range whose EDGE is a summary node.
+  // Policy (issue #214): 'split' (default) folds the side-spans around each
+  // carrier separately — shared path with the compress tool; 'reject' is the
+  // original hard reject.
   const carriers = liveCheckpointCarriersInSpan(session, shadowed)
   if (carriers.length > 0) {
-    return `/acp-prune compress:${liveCarrierRejectionNote(start, end, carriers)}`
+    if ((env.carrierSpans ?? 'split') === 'reject') {
+      return `/acp-prune compress:${liveCarrierRejectionNote(session, start, end, carriers)}`
+    }
+    const carrierList = carriers.map((carrier) => `seq ${carrier.seq} (${carrier.kernelBlockId})`).join(', ')
+    // Provenance follows the LIVE route (same reason as the single-span path).
+    const { provider, model } = routeFor(agent)
+    const landed: string[] = []
+    const failures: string[] = []
+    for (const side of carrierSideSpans(shadowed, carriers)) {
+      // Bounds are re-read from the CURRENT surface per side: an earlier side's
+      // transaction has already replaced its run by now.
+      const bounds = carrierSideBounds(session, side)
+      if (bounds === null) {
+        failures.push(`side span ${side.start}..${side.end}: no longer on the surface`)
+        continue
+      }
+      let resolvedSide: { start: number; end: number }
+      try {
+        resolvedSide = resolveSurfaceRange(session, side.start, side.end, { expandBounds: bounds })
+      } catch (error) {
+        failures.push(`side span ${side.start}..${side.end}: ${error instanceof Error ? error.message : String(error)}`)
+        continue
+      }
+      const sideShadowed = shadowedSeqsOf(session, resolvedSide.start, resolvedSide.end)
+      const sideTokens = shadowedTokensViaMeter(session, sideShadowed, agent.ctx)
+      const { compactionId } = runCompactionTransaction(session, {
+        start: resolvedSide.start,
+        end: resolvedSide.end,
+        shadowedSeqs: sideShadowed,
+        summary: [{ type: 'text', text: summary }],
+        shadowedTokenCount: sideTokens,
+        provider,
+        model,
+      })
+      landed.push(`block ${compactionId.slice(0, 8)} (seqs ${resolvedSide.start}..${resolvedSide.end})`)
+    }
+    const lines = failures.map((failure) => `  ${failure}`)
+    if (landed.length === 0) {
+      lines.push(
+        `/acp-prune compress: span ${start}..${end} crossed live checkpoint carrier(s) ${carrierList}, but no side-span was compressible`,
+        liveCarrierRejectionNote(session, start, end, carriers),
+      )
+      return lines.join('\n')
+    }
+    lines.push(
+      `Compressed ${landed.length} side-span(s) around live checkpoint carrier(s) ${carrierList}: ${landed.join(', ')}`,
+      'The carrier(s) stay visible — distill with the compress tool when ready.',
+    )
+    return lines.join('\n')
   }
   // Price the reclaimed tokens in the HOST's token vocabulary (rule 12):
   // prefer the live meter's per-node prices, fall back to the exact mirror.

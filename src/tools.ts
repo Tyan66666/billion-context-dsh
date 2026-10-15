@@ -23,6 +23,8 @@ import {
   blockIdOfKernelRef,
   blockRefForSummarySeq,
   blockRegistry,
+  carrierSideBounds,
+  carrierSideSpans,
   compactionIdsOfKernelBlocks,
   expandShadowedSeqs,
   guardedSurfaceSeqsOf,
@@ -39,6 +41,7 @@ import {
   surfaceSummary,
   DEFAULT_DECOMPRESS_PAGE,
   DEFAULT_DECOMPRESS_PAGE_CHARS,
+  type CarrierSpanPolicy,
   type ResolvedSurfaceRange,
 } from './region.ts'
 import { allLogMessages, attachmentsOfEvent, buildToolCallIndex, eventsToCoreMessages, extractEventText, isAgentInstructionsRow, isCheckpointNode, isRealUserTurn, isSkillCatalogRow, surfaceEventsOf, toolCallsOf } from './messages.ts'
@@ -53,6 +56,13 @@ export interface ToolEnvironment extends KernelConfigInput {
   readonly store: AcpStateStore
   /** Display-only: the named preset that produced the nudge thresholds above, if any (`/acp-prune status` names it). Never read by the kernel path. */
   readonly preset?: PresetName
+  /**
+   * Policy for plain compress spans crossing a live block's checkpoint carrier
+   * (issue #214): 'split' (default) folds the side-spans separately and keeps
+   * the carriers visible; 'reject' is the pre-#214 hard reject. The engine
+   * always supplies a resolved value; hand-built test envs may omit it.
+   */
+  readonly carrierSpans?: CarrierSpanPolicy
   /** Resolve the effective context window for an agent (optional: status falls back to modelContextLimit). */
   readonly windowFor?: (agent: Agent) => Promise<AcpWindow>
   /** Resolved prompt templates (optional: falls back to DEFAULT_RESOLVED). */
@@ -396,9 +406,12 @@ export function guardedRowsInSpan(guarded: ReadonlySet<number>, shadowed: readon
  * Advisory note for a plain range that would fold a LIVE block's checkpoint
  * carrier (see `liveCheckpointCarriersInSpan`). Names the block ids the model
  * can use instead — a block-ref boundary is the call that legitimately folds
- * carriers (tier 2/3 distillation).
+ * carriers (tier 2/3 distillation) — plus the EXACT compressible side spans,
+ * because the model follows whatever the range listings show: a vague "cut
+ * around those seqs" is what fed the verbatim-retry loop (issue #214).
  */
 export function liveCarrierRejectionNote(
+  session: Session,
   start: number,
   end: number,
   carriers: readonly { seq: number; kernelBlockId: string }[],
@@ -409,7 +422,15 @@ export function liveCarrierRejectionNote(
   // tier-3 condense, and suggesting `b1..b1` would silently distill only the
   // first parent.
   const last = carriers[carriers.length - 1]!
-  return `  seqs ${start}..${end} rejected — checkpoint ${list} carries the visible summary of a still-active block, and a plain seq range never supersedes one. Distill it with the block ids instead (compress({ content: [{ startSeq: "${first.kernelBlockId}", endSeq: "${last.kernelBlockId}", summary }] })), or cut the span around those seqs.`
+  // Cut-ready boundaries (same convention as protectedRowRejectionNote): the
+  // raw side runs are already balanced-or-expandable within their own run, so
+  // naming them is an executable suggestion, not a direction.
+  const shadowed = shadowedSeqsOf(session, start, end)
+  const sides = carrierSideSpans(shadowed, carriers).map((span) => `${span.start}..${span.end}`)
+  const sidesClause = sides.length > 0
+    ? `, or compress the sides separately (seq ${sides.join(' and ')}) as separate content entries, each with its own summary`
+    : ''
+  return `  seqs ${start}..${end} rejected — checkpoint ${list} carries the visible summary of a still-active block, and a plain seq range never supersedes one. Distill it with the block ids instead (compress({ content: [{ startSeq: "${first.kernelBlockId}", endSeq: "${last.kernelBlockId}", summary }] }))${sidesClause}.`
 }
 
 export function protectedRowRejectionNote(
@@ -631,6 +652,12 @@ async function handleCompress(env: ToolEnvironment, args: CompressArgs, exec: To
   // one durable transaction can ever land for it (issue #201).
   const seenRangeKeys = new Set<string>()
   const duplicateRangeNotes: string[] = []
+  // Carrier-split bookkeeping (issue #214): one line per split request naming
+  // which carriers stayed visible, plus one line per side-span that could not
+  // land; displayed with the other advisory notes, failures feed the footer
+  // count through failedCarrierSlices.
+  const carrierSplitNotes: string[] = []
+  let failedCarrierSlices = 0
   const guardedSeqs = guardedSurfaceSeqsOf(session)
   for (const range of args.content!) {
     const startSeq = parseBoundary(range.startSeq, byRef, session)
@@ -695,13 +722,93 @@ async function handleCompress(env: ToolEnvironment, args: CompressArgs, exec: To
     // the WHOLE span in one `surfaceOp`, so the carrier would leave the surface
     // anyway: the block's summary would vanish while the kernel still counts the
     // block as active. Block-ref boundaries (bN..bM) are the call that SHOULD
-    // fold carriers (tier 2/3), so the reject fires only when NEITHER edge is a
-    // block ref — the same rule the kernel applies (`resolveBoundaries` reports
-    // boundary kind `block` as soon as one edge is a block ref).
+    // fold carriers (tier 2/3), so this fires only when NEITHER edge is a block
+    // ref — the same rule the kernel applies (`resolveBoundaries` reports
+    // boundary kind `block` as soon as one edge is a block ref). Policy
+    // (issue #214): 'split' (default) compresses the side-spans around each
+    // carrier separately with the model's own summary — every carrier stays
+    // visible, so the invariant the reject protected holds by construction;
+    // 'reject' keeps the pre-#214 hard reject for operators who want it.
     if (startBlockRef == null && endBlockRef == null) {
       const carriers = liveCheckpointCarriersInSpan(session, shadowedSpan)
       if (carriers.length > 0) {
-        rejectedNotes.push(liveCarrierRejectionNote(resolved.start, resolved.end, carriers))
+        if ((env.carrierSpans ?? 'split') === 'reject') {
+          rejectedNotes.push(liveCarrierRejectionNote(session, resolved.start, resolved.end, carriers))
+          continue
+        }
+        const carrierList = carriers.map((carrier) => `seq ${carrier.seq} (${carrier.kernelBlockId})`).join(', ')
+        let landedSlices = 0
+        for (const side of carrierSideSpans(shadowedSpan, carriers)) {
+          const bounds = carrierSideBounds(session, side)
+          if (bounds === null) {
+            failedCarrierSlices += 1
+            carrierSplitNotes.push(`  side span ${side.start}..${side.end}: no longer on the surface — skipped`)
+            continue
+          }
+          let slice: ResolvedSurfaceRange
+          try {
+            slice = resolveSurfaceRange(session, side.start, side.end, {
+              expandBounds: bounds,
+            })
+          } catch (error) {
+            failedCarrierSlices += 1
+            if (error instanceof AlreadyCompressedRangeError) {
+              carrierSplitNotes.push(`  side span ${side.start}..${side.end}: already compressed — nothing to reclaim`)
+            } else {
+              carrierSplitNotes.push(`  side span ${side.start}..${side.end}: ${error instanceof Error ? error.message : String(error)}`)
+            }
+            continue
+          }
+          const sliceStartRef = blockRefForSummarySeq(session, slice.start)
+            ?? edgeRefForSeq(session, byRaw, slice.start, 'start', slice.end)
+          const sliceEndRef = blockRefForSummarySeq(session, slice.end)
+            ?? edgeRefForSeq(session, byRaw, slice.end, 'end', slice.start)
+          if (sliceStartRef === undefined || sliceEndRef === undefined) {
+            failedCarrierSlices += 1
+            carrierSplitNotes.push(`  side span ${slice.start}..${slice.end}: has no assigned ref — skipped`)
+            continue
+          }
+          const sliceKey = `${sliceStartRef}::${sliceEndRef}`
+          if (seenRangeKeys.has(sliceKey)) {
+            // Counted once, here — the note lands in duplicateRangeNotes, which
+            // the footer total already sums (incrementing failedCarrierSlices
+            // too would double-count this skip).
+            duplicateRangeNotes.push(
+              `  side span ${slice.start}..${slice.end} resolve to the same span as an earlier range in this call — skipped`,
+            )
+            continue
+          }
+          seenRangeKeys.add(sliceKey)
+          ranges.push({
+            ...slice,
+            // Attribute the adjusted-note to the SIDE, not the original request
+            // (the model asked for resolved.start..resolved.end; this entry is
+            // what actually lands).
+            startSeq: side.start,
+            endSeq: side.end,
+            startRef: sliceStartRef,
+            endRef: sliceEndRef,
+            ...(Array.isArray(range.verifiedReadings) && range.verifiedReadings.length > 0
+              ? { verifiedReadings: range.verifiedReadings.map(String) }
+              : {}),
+            summary: range.summary,
+            ...(range.topic ?? args.topic) === undefined ? {} : { topic: range.topic ?? args.topic },
+          })
+          landedSlices += 1
+        }
+        if (landedSlices === 0) {
+          // Nothing legal landed: fall back to the full rejection note (it
+          // names the distill path AND the exact sides) so the model has the
+          // same guidance as under the reject policy.
+          rejectedNotes.push(liveCarrierRejectionNote(session, resolved.start, resolved.end, carriers))
+          carrierSplitNotes.push(
+            `  seqs ${resolved.start}..${resolved.end} crossed live checkpoint carrier(s) ${carrierList}, but no side-span was compressible`,
+          )
+          continue
+        }
+        carrierSplitNotes.push(
+          `  seqs ${resolved.start}..${resolved.end} crossed live checkpoint carrier(s) ${carrierList} — compressed ${landedSlices} side-span(s) with the same summary; the carrier(s) stay visible (distill with the block ids when ready)`,
+        )
         continue
       }
     }
@@ -734,13 +841,13 @@ async function handleCompress(env: ToolEnvironment, args: CompressArgs, exec: To
   // Nothing to do: every requested range was already compressed, rejected, or
   // a duplicate of an earlier range in the same call.
   if (ranges.length === 0) {
-    const text = ['Compressed 0 block(s), ~0 tokens reclaimed.', ...alreadyCompressedNotes, ...duplicateRangeNotes, ...rejectedNotes]
+    const text = ['Compressed 0 block(s), ~0 tokens reclaimed.', ...alreadyCompressedNotes, ...duplicateRangeNotes, ...rejectedNotes, ...carrierSplitNotes]
     if (alreadyCompressedNotes.length > 0) {
       text.push('  (all requested ranges were already compressed — decompress a block to recover its originals)')
-    } else if (duplicateRangeNotes.length > 0 && rejectedNotes.length === 0) {
+    } else if (duplicateRangeNotes.length > 0 && rejectedNotes.length === 0 && carrierSplitNotes.length === 0) {
       text.push('  (nothing compressed — every range resolved to a span an earlier range in this call already covers)')
     } else if (rejectedNotes.length > 0) {
-      text.push('  (nothing compressed — every range covered a current guarded row, an injected policy row or the active user turn; see the rejections above)')
+      text.push('  (nothing compressed — every range covered a current guarded row, the active user turn, or a live checkpoint carrier; see the rejections above)')
     }
     return { text: text.join('\n') }
   }
@@ -877,7 +984,7 @@ async function handleCompress(env: ToolEnvironment, args: CompressArgs, exec: To
   }
 
   const summaryLine = `Compressed ${applied.result.blocksCreated} block(s), ~${applied.result.tokensCompressed} tokens reclaimed.`
-  const totalSkipped = skippedRanges + alreadyCompressedNotes.length + duplicateRangeNotes.length + rejectedNotes.length
+  const totalSkipped = skippedRanges + alreadyCompressedNotes.length + duplicateRangeNotes.length + rejectedNotes.length + failedCarrierSlices
   const failedLines = applied.result.errors.map((error) => `  ${error}`)
   const warningLines = [
     ...freeWarnings.map((warning) => `  ${warning}`),
@@ -885,6 +992,7 @@ async function handleCompress(env: ToolEnvironment, args: CompressArgs, exec: To
     ...alreadyCompressedNotes,
     ...duplicateRangeNotes,
     ...rejectedNotes,
+    ...carrierSplitNotes,
     ...lines,
   ]
   const footer = totalSkipped > 0
@@ -1188,6 +1296,21 @@ async function handleStatus(env: ToolEnvironment, rawArgs: StatusArgs, exec: Too
   // remains the model's compressible-seq locator for nudge-style ranges.
   if (args.scope === 'uncompressed') {
     lines.push('', 'Note: drilldown rows are kernel refs (mN) — feed them straight to compress (auto-mapped to the live surface seq); an unknown mN fails with guidance.')
+    // The ranges view merges across carrier gaps: checkpoint nodes are filtered
+    // out of the messages above (breakdown double-counting guard, rule 9), so a
+    // row can span a live checkpoint carrier the nudge table would never offer.
+    // Name the boundary and the policy so this listing and the compress gate
+    // agree in the model's view (issue #214). Append only — the report body
+    // stays kernel-owned text (rule 9).
+    const carriers = liveCheckpointCarriersInSpan(session, [...session.surface.nodes])
+    if (carriers.length > 0) {
+      const list = carriers.map((carrier) => `seq ${carrier.seq} (${carrier.kernelBlockId})`).join(', ')
+      lines.push(
+        (env.carrierSpans ?? 'split') === 'split'
+          ? `Carrier boundaries: ${list} — a plain span crossing one is split around it; the carrier stays visible.`
+          : `Carrier boundaries: ${list} — a plain span crossing one is rejected; cut around those seqs or distill with the block ids.`,
+      )
+    }
   }
   return { text: lines.join('\n') }
 }
