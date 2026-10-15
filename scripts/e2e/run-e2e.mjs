@@ -86,15 +86,17 @@ const nudgeTableChecks = (result) => {
   const table = nudgeTableOf(result.requests)
   if (!table) return [['nudge range table present', false, 'no nudge with a range table found']]
   const rows = table.split('\n').filter((line) => /seq \d+\.\.\d+/.test(line) && /\[tool \d+% \| text \d+%\]/.test(line))
-  const starts = rows.map((line) => {
-    const match = line.match(/seq (\d+)\.\./)
+  const tokens = rows.map((line) => {
+    const match = line.match(/~(\d+) tokens/)
     return match ? parseInt(match[1], 10) : -1
   })
-  const ascending = starts.length >= 1 && starts.every((value, i) => i === 0 || value >= starts[i - 1])
+  // issue #213: display order is largest-first (ties keep the oldest start), so
+  // the model sees the biggest reclaimable spans instead of the oldest crumbs.
+  const nonIncreasing = tokens.length >= 1 && tokens.every((value, i) => i === 0 || value <= tokens[i - 1])
   return [
-    ['nudge range table header (oldest first)', table.includes('Compressible ranges') && table.includes('oldest first'), ''],
+    ['nudge range table header (largest first)', table.includes('Compressible ranges') && table.includes('largest first'), ''],
     ['nudge range rows carry [tool X% | text Y%] share', rows.length >= 1, `rows=${rows.length}`],
-    ['nudge range rows oldest-first (ascending seq)', ascending, `starts=${starts.join(',')}`]
+    ['nudge range rows largest-first (non-increasing tokens)', nonIncreasing, `tokens=${tokens.join(',')}`]
   ]
 }
 const checksBasic = (result) => {

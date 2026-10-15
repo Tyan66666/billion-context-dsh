@@ -1367,12 +1367,15 @@ function compressibleSegmentsOf(
 export function buildCompressibleSeqRanges(
   session: Session,
   kernelView: KernelRangeView,
-  opts: { preserveRecent?: number; mediaPriceOf?: MediaPriceOf } = {},
+  opts: { preserveRecent?: number; mediaPriceOf?: MediaPriceOf; stripOrphans?: boolean } = {},
 ): SeqCompressibleRange[] {
   // Orphan tool messages corrupt the pairing balance cache and fragment every
   // large span. Prune them before mapping so the table reflects the surface
-  // that will actually be compressed (issue #18).
-  stripOrphanedSurfaceToolMessages(session)
+  // that will actually be compressed (issue #18). `stripOrphans: false` is for
+  // read-only probes (/acp-prune status): pruning appends a durable
+  // compaction/prune, which a diagnostic command must never do — the pre-step
+  // listener already runs it unconditionally on live sessions.
+  if (opts.stripOrphans !== false) stripOrphanedSurfaceToolMessages(session)
   const nodes = session.surface.nodes
   const indexOfSeq = new Map<number, number>()
   for (let index = 0; index < nodes.length; index += 1) indexOfSeq.set(nodes[index]!, index)
@@ -1410,11 +1413,25 @@ export function buildCompressibleSeqRanges(
       }
     }
   }
+  // The kernel can hand the SAME host span several times (different kernel
+  // ranges land on one host segment after a replacement) and can price a span
+  // at 0 tokens (an empty tool pair names no reclaimable content). Both become
+  // duplicate or useless rows in the table — dedupe by span and drop
+  // zero-token spans so {count} and the hidden-row line count real choices
+  // only (issue #213 follow-up, live-measured: 77% of nudges carried dup rows).
+  const seen = new Set<string>()
+  const unique = out.filter((range) => {
+    if (range.tokens <= 0) return false
+    const key = `${range.start}..${range.end}`
+    if (seen.has(key)) return false
+    seen.add(key)
+    return true
+  })
   // Oldest-first: the order is stable across turns (the oldest ranges do not
   // move as new messages land), so the model can consume ranges front-to-back
   // without re-ranking each nudge — matching the kernel's `oldest first` list
   // and the host's own front-to-back compression rhythm.
-  return out.sort((a, b) => a.start - b.start)
+  return unique.sort((a, b) => a.start - b.start)
 }
 
 /**

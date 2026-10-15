@@ -126,11 +126,11 @@ test('M4/prompts 2b: default nudge renders through the kernel renderNudgeText pa
   assert.ok(text.startsWith('This is an efficiency nudge to compress early and keep context lean — not an overflow warning.'), 'kernel EFFICIENCY_NOTE frame')
   assert.ok(!text.includes('HOW TO COMPRESS'), 'B6：规则段不在 nudge')
   assert.ok(text.endsWith('💡 If you compress, fold the ranges you keep in ONE call — pass multiple content entries (`content: [{...}, {...}]`) or ONE plain string holding every range, each block starting with its \'mNNNNN–mNNNNN topic\' header line (most robust through lossy gateways). Ranges the task still needs can wait — they reappear in later nudges.'), 'kernel batch tip at end')
-  // Ref-ID rangesStr replaced by the surface-seq table. The title KEEPS the
-  // kernel header format ("N, oldest first") with the seq dialect appended —
-  // the kernel mN range rows are what must be gone.
+  // Ref-ID rangesStr replaced by the surface-seq table. The title is OURS
+  // ("largest first" since issue #213) with the seq dialect appended — the
+  // kernel mN range rows are what must be gone.
   assert.ok(!text.includes('m00150'), 'kernel ref range sample gone')
-  assert.ok(text.includes('exact surface seqs — usable as-is'), 'seq-dialect title injected')
+  assert.ok(text.includes('Compressible ranges (1, largest first; exact surface seqs — usable as-is):'), 'seq-dialect title injected (largest-first since #213)')
   assert.ok(text.includes('seq 1..7'), 'surface-seq range table injected')
   assert.ok(text.includes('Surface: 12 nodes, seqs 1..12'), 'surface summary present')
   // No usage statement; the only mNNNNN tokens are inside kernel's own
@@ -185,7 +185,7 @@ test('M4/prompts 4: range table snapshot (with ranges) and zero-range early retu
   assert.equal(
     rangeTable(paged, wholeSurfaceRangeView(paged)),
     `\nSurface: 12 nodes, seqs 1..12
-Compressible ranges (1, oldest first; exact surface seqs — usable as-is):
+Compressible ranges (1, largest first; exact surface seqs — usable as-is):
   - seq 1..7 — 7 messages, ~7227 tokens [tool 0% | text 100%]
 Compress with: compress({ content: [{ startSeq, endSeq, summary }] }) — content is an array: batch multiple unrelated segments in one call, each entry its own block. Keep ranges disjoint.
 Snapshot taken at nudge time: the seqs go stale once the surface moves (a later compress shadows them), so re-run acp_status for fresh refs before compressing.

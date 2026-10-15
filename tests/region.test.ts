@@ -747,3 +747,24 @@ test('M5: deferCompressPairHide lands the hide on the microtask queue', async ()
   assert.ok(!after.some((message) => message.role === 'assistant' && message.content.some((block) => (block as { type?: string }).type === 'tool-call')), 'the pair is hidden after the microtask drains')
   assert.ok(after.some((message) => message.role === 'user' && message.content.some((block) => (block as { type?: string }).type === 'text' && (block as { text?: string }).text === 'ok')), 'the compress result text is preserved')
 })
+
+test('M5: kernel ranges that map to one host span collapse to a single row (issue #213 follow-up)', () => {
+  const session = buildTextSession(12)
+  const view = wholeSurfaceRangeView(session)
+  const once = buildCompressibleSeqRanges(session, view, { stripOrphans: false })
+  const twice = buildCompressibleSeqRanges(session, { ranges: [view.ranges[0]!, view.ranges[0]!], refs: view.refs }, { stripOrphans: false })
+  assert.equal(once.length, 1)
+  assert.deepEqual(twice, once, 'repeating a kernel range adds no duplicate row')
+})
+
+test('M5: zero-token spans are dropped from the compressible table (issue #213 follow-up)', () => {
+  const session = Session.create('zero')
+  appendTurn(session, 1)
+  appendToolCall(session, '', 'call1')
+  appendEmptyToolResult(session, 'call1')
+  assert.deepEqual(
+    buildCompressibleSeqRanges(session, wholeSurfaceRangeView(session), { preserveRecent: 0, stripOrphans: false }),
+    [],
+    'an empty tool pair prices at 0 tokens and names no reclaimable content',
+  )
+})

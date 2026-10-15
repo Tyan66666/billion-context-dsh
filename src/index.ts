@@ -50,12 +50,14 @@ import { DEFAULT_CONTEXT_WINDOW, probeModelWindow, projectedContextWindow, route
 import {
   buildCompressibleSeqRanges,
   deferCompressPairHide,
+  findOpenTurn,
   runCompactionTransaction,
   shadowedSeqsOf,
   stripOrphanedSurfaceToolMessages,
   type KernelRangeView,
 } from './region.ts'
 import { allLogMessages, eventsToCoreMessages, overflowMarkerSummary, surfaceEventsOf, toolCallIdOfResultEvent } from './messages.ts'
+import { sessionEventsOf } from './session-events.ts'
 import { shadowedTokensViaMeter } from './host-tokens.ts'
 import { kernelConfigFor } from './config.ts'
 import {
@@ -102,7 +104,16 @@ export {
 } from './prompts.ts'
 export { makeTools, type ToolEnvironment } from './tools.ts'
 export { acpCommand } from './commands.ts'
-export { buildNudge, resolveTokenCount, EMERGENCY_NUDGE_MAX_PER_TURN, type NudgeEnvironment, type NudgeOutcome } from './nudge.ts'
+export {
+  buildNudge,
+  resolveNudgeTargets,
+  resolveTokenCount,
+  EMERGENCY_NUDGE_MAX_PER_TURN,
+  RANGE_TABLE_MAX_ROWS,
+  type NudgeEnvironment,
+  type NudgeOutcome,
+  type NudgeTargets,
+} from './nudge.ts'
 export {
   DEFAULT_CONTEXT_WINDOW,
   detectContextWindow,
@@ -404,6 +415,8 @@ export class AcpCompactionEngine extends CompactionEngine {
   private readonly lastNudgeTurn = new LruMap<string, number>(DEFAULT_SESSION_CACHE_LIMIT)
   /** Per-session emergency-nudge injection budget for the current user turn (issue #108). */
   private readonly emergencyNudges = new Map<string, { turn: number; count: number }>()
+  /** Last user turn per session whose "no compressible target" warn was logged (issue #213): a fragmented surface stays over-limit for the whole turn, so the warn must not repeat on every step. */
+  private readonly nothingTargetLogged = new LruMap<string, number>(DEFAULT_SESSION_CACHE_LIMIT)
   /** Successful compress call ids awaiting their tool/result so the pair can be hidden. */
   private readonly compressCallIdsToHide = new Set<string>()
   /** Per provider/model route the resolved window (probe failures cached too). */
@@ -736,6 +749,16 @@ export class AcpCompactionEngine extends CompactionEngine {
           ctx.logger.warn(
             `billion-context-dsh: emergency nudge suppressed — per-turn budget of ${EMERGENCY_NUDGE_MAX_PER_TURN} spent (session ${payload.agent.session.id}); pressure is still above the emergency threshold`,
           )
+        },
+        (reason) => {
+          // No legal target this step (issue #213). buildNudge fires this on
+          // EVERY such pre-step and a fragmented surface stays over-limit for
+          // the whole turn — warn once per user turn, not once per step.
+          const sessionId = payload.agent.session.id
+          const turnNumber = findOpenTurn(sessionEventsOf(payload.agent.session)) ?? 0
+          if (this.nothingTargetLogged.get(sessionId) === turnNumber) return
+          this.nothingTargetLogged.set(sessionId, turnNumber)
+          ctx.logger.warn(`billion-context-dsh: nudge suppressed — no compressible target (session ${sessionId}): ${reason}`)
         },
       )
       if (outcome === null) return decision
