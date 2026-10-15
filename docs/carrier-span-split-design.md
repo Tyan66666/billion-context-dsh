@@ -78,3 +78,4 @@ Carrier boundaries: seq 15 (b1) — a plain span crossing one is split around it
 ## 6. 残留
 
 - **上游**：acp-kernel 的 ranges 视图若能在 carrier 标记处断开（#335 同家族），listing 就彻底一致了——跟踪在 #214 线程内（同一症状家族，不另开 issue）。即使落地，split 默认仍然正确：模型自命名跨度的可能性永远存在，门禁的宽容处理是长期形态。
+- **surface 反序形态**（`reversed range X..Y`，#214 线程的独立复现报告）：checkpoint 拼接到更旧残差之前后，数字序 ≠ surface 序；这类 span 在 `resolveSurfaceRange` 内、carrier 门禁之前抛出。本 PR 已把该错误从裸死胡同升级为可执行指引（说明拼接原因 + 两个出口：按 acp_status 的 mN 行重新取名、或把 checkpoint 两侧分别作为独立 content entry 折叠）；更深的处置（把这类 span 直接路由进 split 机制）留待 owner 决策。

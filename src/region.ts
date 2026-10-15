@@ -279,7 +279,10 @@ export function resolveSurfaceRange(
 ): ResolvedSurfaceRange {
   const nodes = session.surface.nodes
   if (start > end) {
-    throw new Error(`billion-context-dsh: reversed range ${start}..${end}`)
+    throw new Error(
+      `billion-context-dsh: reversed range ${start}..${end} — start seq must come before end seq; `
+      + 'swap the two edges, or re-read acp_status for the current surface range',
+    )
   }
   let requestedStartIdx = nodes.indexOf(start as SurfaceSeq)
   let requestedEndIdx = nodes.indexOf(end as SurfaceSeq)
@@ -312,12 +315,25 @@ export function resolveSurfaceRange(
     }
   }
   if (requestedStartIdx > requestedEndIdx) {
-    throw new Error(`billion-context-dsh: reversed range ${start}..${end}`)
+    // The live production shape behind a report like 'reversed range 7773..7951'
+    // (issue #214): compressed checkpoints splice AHEAD of older residual nodes,
+    // so a numerically-ordered span can be out of order on the surface. A bare
+    // error here was a dead end — the model retried from the same stale listing;
+    // name the cause and both exits instead.
+    throw new Error(
+      `billion-context-dsh: reversed range ${start}..${end} — both seqs are live but sit out of order on the `
+      + 'current surface: compressed checkpoints splice ahead of older content, so numeric order no longer '
+      + 'matches surface order. Re-read acp_status (its mN rows are in surface order) and name the span from '
+      + 'there, or compress each side of the spliced checkpoint as a separate content entry',
+    )
   }
   // Belt-and-braces: the surface can be locally out of order after surface
   // replacements, so index order alone does not guarantee value order.
   if (start > end) {
-    throw new Error(`billion-context-dsh: reversed range ${start}..${end}`)
+    throw new Error(
+      `billion-context-dsh: reversed range ${start}..${end} — the recovered remainder is itself out of order `
+      + 'on the current surface; consult acp_status for the current surface range',
+    )
   }
   // A boundary must be BOTH tool-pairing-balanced AND anchorable: the cut must
   // map onto kernel refs that name the shadowed span (bare-`${seq}` id, a
