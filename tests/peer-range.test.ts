@@ -42,9 +42,14 @@ import semver from 'semver'
 // house rule (no unverified line) is unchanged, only the verified set grew.
 //
 // 0.2.1 LINE — the ceiling moved again from `<0.2.1-0` to `<0.2.2-0` after the
-// whole 0.2.1 band was verified against a 0.2.1-rc.2 devDeps baseline
-// (`tsc --noEmit` clean, full 415-test unit suite green on the new line, e2e
-// harness green). The 0.2.1 line keeps the replace-op dialect and every
+// whole 0.2.1 band was verified against the 0.2.1-rc.2 host packages in a local
+// run (`tsc --noEmit` clean against the 0.2.1 d.ts, 415-test unit suite green,
+// e2e harness green on all six scenarios, including the real-JSONL durability
+// assertions). The committed devDependencies baseline stays at 0.2.0-rc.2: the
+// 0.2.1 line is published, but `@deepseek-ai/dsh-invariants` has no 0.2.1 build
+// on npm, so `npm ci` cannot resolve a full 0.2.1 dev tree (the verification run
+// used pnpm for that reason; a later bump can flip the baseline once it ships).
+// The 0.2.1 line keeps the replace-op dialect and every
 // read-side shape the 0.2.0 line introduced (V4 producer kinds,
 // message-level toolCallId, `compact-checkpoint` sources), so the seam floor
 // is unchanged; the exact-version peers on the same release train were
