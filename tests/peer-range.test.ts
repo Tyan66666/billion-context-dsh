@@ -139,6 +139,52 @@ for (const peerName of seamPeers) {
 }
 
 
+// ISSUE #219 — eleven more peers ride on the same release train (format codec,
+// persistence, brand, timeout, protocol, utils) but were pinned to the single
+// verified line (`0.2.0-rc.2` exact). Admitting the 0.2.1 line widened them to
+// `>=0.2.0-rc.2 <0.2.2-0` so BOTH verified lines stay installable while the next
+// line stays rejected. Their floor is higher than the seam floor because only
+// those two lines are verified for them — a host on 0.1.x cannot run this
+// release regardless of the seam band.
+const trainPeers = [
+	'@deepseek-ai/dsh-brand',
+	'@deepseek-ai/dsh-session-format',
+	'@deepseek-ai/dsh-session-format-catalog',
+	'@deepseek-ai/dsh-session-format-v1-to-v2',
+	'@deepseek-ai/dsh-session-format-v2-to-v3',
+	'@deepseek-ai/dsh-session-persistence',
+	'@deepseek-ai/dsh-session-persistence-jsonl',
+	'@deepseek-ai/dsh-timeout',
+	'@deepseek-ai/dsh-typert-protocol',
+	'@deepseek-ai/dsh-util-crypto',
+	'@deepseek-ai/dsh-util-values',
+]
+
+for (const peerName of trainPeers) {
+	const peerRange = pkg.peerDependencies[peerName]
+	assert.equal(typeof peerRange, 'string', `${peerName} must be declared as a peer (release-train package)`)
+
+	test(`${peerName}: peer range accepts both verified release-train lines`, () => {
+		for (const v of ['0.2.0-rc.2', '0.2.0-rc.99', '0.2.0', '0.2.1-alpha.1', '0.2.1-rc.1', '0.2.1-rc.2', '0.2.1']) {
+			assert.equal(
+				semver.satisfies(v, peerRange, { includePrerelease: true }),
+				true,
+				`${v} must satisfy ${peerRange}`,
+			)
+		}
+	})
+
+	test(`${peerName}: peer range keeps rejecting older and next-line versions`, () => {
+		for (const v of ['0.1.7', '0.2.0-rc.1', '0.2.2-0', '0.2.2-rc.1', '0.2.2', '0.3.0']) {
+			assert.equal(
+				semver.satisfies(v, peerRange, { includePrerelease: true }),
+				false,
+				`${v} must NOT satisfy ${peerRange}`,
+			)
+		}
+	})
+}
+
 test('every runtime VALUE-imported seam package is declared as a peer', () => {
 	// dist/index.js must never carry a VALUE import of a @deepseek-ai seam
 	// package that is NOT a peer — in a non-hoisted / stale-nested install that
