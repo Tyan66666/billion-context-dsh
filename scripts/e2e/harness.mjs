@@ -117,13 +117,21 @@ const runScenario = async (scenario, hooks = {}) => {
     apply: jsonlModule.apply,
     Config: jsonlModule.Config
   }
-  const persistRoot = mkdtempSync(join(tmpdir(), 'e2e-sessions-'))
+  const persistRoot = hooks.persistRoot ?? mkdtempSync(join(tmpdir(), 'e2e-sessions-'))
   await ctx.plugin(JsonlPersistence, { root: persistRoot })
-  const sessionId = SessionId(scenario.name)
-  const agent = await ctx.agentLoop.create(sessionId, {
-    provider: 'deepseek-official',
-    model: 'deepseek-v4-flash'
-  })
+  const sessionId = SessionId(scenario.sessionId ?? scenario.name)
+  const agentOptions = { provider: 'deepseek-official', model: 'deepseek-v4-flash' }
+  // hooks.resume: load an EXISTING persisted session instead of minting a new
+  // one — used to replay a real production conversation through the engine.
+  // resume() returns an AgentHandle ({ agent, dispose }); create() returns the
+  // agent itself, so unwrap to one shape for the rest of the run.
+  const agent = hooks.resume
+    ? (await ctx.agentLoop.resume(ctx, { resumeSessionId: sessionId, agentOptions })).agent
+    : await ctx.agentLoop.create(sessionId, agentOptions)
+  // A resumed session (hooks.persistRoot pointing at an existing log) already
+  // carries history, so seed the ref table BEFORE the first followup — the
+  // fake LLM renders {{U1}}/{{A1}} while answering that turn.
+  updateSeqs(agent.session.snapshotEvents(), seqs)
   for (const [index, turn] of expand(scenario.userTurns).entries()) {
   await agent.followup(createUserMessage({
     content: [{ type: 'text', text: turn }],
