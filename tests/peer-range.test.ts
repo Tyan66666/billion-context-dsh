@@ -41,6 +41,17 @@ import semver from 'semver'
 // so the NEXT line stays rejected until it is verified deliberately — the
 // house rule (no unverified line) is unchanged, only the verified set grew.
 //
+// 0.2.1 LINE — the ceiling moved again from `<0.2.1-0` to `<0.2.2-0` after the
+// whole 0.2.1 band was verified against a 0.2.1-rc.2 devDeps baseline
+// (`tsc --noEmit` clean, full 415-test unit suite green on the new line, e2e
+// harness green). The 0.2.1 line keeps the replace-op dialect and every
+// read-side shape the 0.2.0 line introduced (V4 producer kinds,
+// message-level toolCallId, `compact-checkpoint` sources), so the seam floor
+// is unchanged; the exact-version peers on the same release train were
+// widened to `>=0.2.0-rc.2 <0.2.2-0` so both verified lines stay installable.
+// `0.2.2-0` sorts ahead of any `0.2.2-x` prerelease, so the next unverified
+// line stays rejected.
+//
 // The assertions below call semver.satisfies with `{ includePrerelease: true }`
 // — the EXACT option the host's pre-install gate uses (packages/boot/app-boot
 // plugin-compatibility.ts). Under plain satisfies() a mid-band prerelease such
@@ -77,17 +88,18 @@ for (const peerName of seamPeers) {
 	const peerRange = pkg.peerDependencies[peerName]
 	assert.equal(typeof peerRange, 'string', `${peerName} must be declared as a peer (runtime VALUE-import)`)
 
-	test(`${peerName}: peer range accepts the whole verified seam band (0.1.5 → 0.2.0)`, () => {
-		// Every published version from the 0.1.5 floor through the 0.2.0
+	test(`${peerName}: peer range accepts the whole verified seam band (0.1.5 → 0.2.1)`, () => {
+		// Every published version from the 0.1.5 floor through the 0.2.1
 		// ceiling installs — including the live desktop builds from issue #136
-		// (0.1.5-alpha.2) and the issue #190 reporter's host (0.2.0-rc.2).
-		// Future same-line rCs stay in range, so new releases on an admitted
-		// line never break installs.
+		// (0.1.5-alpha.2), the issue #190 reporter's host (0.2.0-rc.2), and the
+		// 0.2.1 line this band was widened for. Future same-line rCs stay in
+		// range, so new releases on an admitted line never break installs.
 		for (const v of [
 			'0.1.5-alpha.1', '0.1.5-alpha.2', '0.1.5-rc.1', '0.1.5-rc.9', '0.1.5-rc.99', '0.1.5',
 			'0.1.6-alpha.1', '0.1.6-alpha.2', '0.1.6-rc.1', '0.1.6',
 			'0.1.7-alpha.1', '0.1.7-alpha.2', '0.1.7-rc.1', '0.1.7-rc.2', '0.1.7',
 			'0.2.0-rc.1', '0.2.0-rc.2', '0.2.0-rc.99', '0.2.0',
+			'0.2.1-alpha.1', '0.2.1-alpha.5', '0.2.1-rc.1', '0.2.1-rc.2', '0.2.1-rc.99', '0.2.1',
 		]) {
 			assert.equal(
 				semver.satisfies(v, peerRange, { includePrerelease: true }),
@@ -109,9 +121,9 @@ for (const peerName of seamPeers) {
 				`${v} must NOT satisfy ${peerRange}`,
 			)
 		}
-		// Next line and beyond: 0.2.1+ (any prerelease or final) and 0.3.x are
+		// Next line and beyond: 0.2.2+ (any prerelease or final) and 0.3.x are
 		// deliberate, later decisions — never silently allowed (house rule).
-		for (const v of ['0.2.1-0', '0.2.1-rc.1', '0.2.1', '0.2.2', '0.3.0-rc.1', '0.3.0']) {
+		for (const v of ['0.2.2-0', '0.2.2-rc.1', '0.2.2', '0.3.0-rc.1', '0.3.0']) {
 			assert.equal(
 				semver.satisfies(v, peerRange, { includePrerelease: true }),
 				false,
