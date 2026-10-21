@@ -386,7 +386,7 @@ private onSettingsChanged(prev: AcpSettings, next: AcpSettings): void {
     为什么不能再写 0.1.0 线的双元组 clause：现在调用的是 provider 方法
     `SettingsProvider.installSection`，它只存在于 0.1.5 线；0.1.0/0.1.1 线只有自由函数
     `installSettingsSection`，装上也无法工作。显式区间当时钉死整条 0.1.5 线（全部 0.1.5 预发布
-    加最终 0.1.5），`0.1.6-0` 上界挡住未验证的下一线（house rule：不默许未验证的版本线；后续 #190 验证 0.1.6/0.1.7/0.2.0 线后将上界放宽至 `<0.2.1-0`）。
+    加最终 0.1.5），`0.1.6-0` 上界挡住未验证的下一线（house rule：不默许未验证的版本线；后续 #190 验证 0.1.6/0.1.7/0.2.0 线后将上界放宽至 `<0.2.1-0`，#223 验证 0.2.1 线后再放宽至 `<0.2.2-0`）。
   - `"@deepseek-ai/schemastery": "^3.18.1"` —— 普通语义化版本，与宿主包一致，无 tuple 问题。
 - devDependencies 新增两者：`dsh-settings` 与宿主接缝 devDep 统一钉在 `0.1.5-rc.2`，
   `schemastery` 钉在 `3.18.1`（稳定测试基线规则）。

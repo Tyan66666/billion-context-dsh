@@ -56,15 +56,20 @@ import { Context } from '@deepseek-ai/cordis'
 // Deliberately dynamic: a static import would fail at link time on Node < 22.15
 // (the codec's own static node:zlib zstd import) and kill every test in this
 // file, including the one below that never touches the persistence stack.
-let JsonlSessionPersistence: typeof import('@deepseek-ai/dsh-session-persistence-jsonl').default | undefined
+// The 0.2.1 seam line ships the JSONL backend as a cordis PLUGIN (named
+// exports `name`/`apply`; the internal class registers itself as the
+// `sessionPersistence` service on mount). The module namespace IS the plugin;
+// the 0.2.0 default-export class no longer exists (issue #223 baseline move).
+let jsonlPlugin: typeof import('@deepseek-ai/dsh-session-persistence-jsonl') | undefined
 try {
-  JsonlSessionPersistence = (await import('@deepseek-ai/dsh-session-persistence-jsonl')).default
+  const mod = await import('@deepseek-ai/dsh-session-persistence-jsonl')
+  if (typeof mod.apply === 'function') jsonlPlugin = mod
 } catch {
   // Older Node without node:zlib zstd — round-trip tests skip with a reason.
 }
 const persistenceSkipReason =
-  JsonlSessionPersistence === undefined
-    ? 'released JSONL codec needs node:zlib zstd (Node >= 22.15); running on an older Node'
+  jsonlPlugin === undefined
+    ? 'released JSONL persistence plugin did not load (needs node:zlib zstd, Node >= 22.15)'
     : false
 import { Session, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { createAssistantMessage, createToolResultMessage, createUserMessage } from '@deepseek-ai/dsh-llm'
@@ -236,25 +241,34 @@ function buildEngineLog(): Session {
  * rejects any row at append or read time.
  */
 async function persistAndReadBack(rows: readonly SessionEvent[], id: string): Promise<readonly SessionEvent[]> {
-  const Store = JsonlSessionPersistence
-  assert.ok(Store !== undefined, 'persistence codec must have loaded to run the round-trip')
+  assert.ok(jsonlPlugin !== undefined, 'persistence codec must have loaded to run the round-trip')
   const root = mkdtempSync(join(tmpdir(), 'durable-admission-'))
   try {
-    const store = new Store(new Context(), { root })
-    const handle = await store.create({
-      version: CURRENT_SESSION_FORMAT_VERSION,
-      id,
-      cwd: root,
-      createdAt: Date.now(),
-      isSeeded: false,
-      delegationDepth: 0,
-    })
+    const ctx = new Context()
     try {
-      await handle.append([...rows])
-      await handle.flush()
-      return (await handle.read(0)).events
+      // Mount through the released plugin entry — the same wiring the host
+      // uses — so the net audits encode + admission as shipped, not a
+      // hand-instantiated internal class (issue #223 baseline move).
+      await ctx.plugin(jsonlPlugin, { root })
+      const store = ctx.reflect.get('sessionPersistence')
+      assert.ok(store, 'sessionPersistence service must be attached after mounting the plugin')
+      const handle = await store.create({
+        version: CURRENT_SESSION_FORMAT_VERSION,
+        id,
+        cwd: root,
+        createdAt: Date.now(),
+        isSeeded: false,
+        delegationDepth: 0,
+      })
+      try {
+        await handle.append([...rows])
+        await handle.flush()
+        return (await handle.read(0)).events
+      } finally {
+        await handle.close()
+      }
     } finally {
-      await handle.close()
+      await ctx.fiber.dispose()
     }
   } finally {
     rmSync(root, { recursive: true, force: true })

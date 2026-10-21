@@ -1,7 +1,10 @@
 import { runScenario } from './harness.mjs'
 import { readFileSync, readdirSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
-import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
+// The 0.2.1 seam line ships the JSONL backend as a cordis plugin (named
+// exports; no default-export class), so import the namespace and mount it —
+// see scripts/e2e/harness.mjs (issue #223 baseline move).
+import * as JsonlPersistencePlugin from '@deepseek-ai/dsh-session-persistence-jsonl'
 import { Context } from '@deepseek-ai/cordis'
 import { foldSurface } from '@deepseek-ai/dsh-session'
 const scenarioNames = ['basic-compress', 'nudge-rhythm', 'compress-then-decompress', 'acp-status', 'overflow-recovery', 'jsonl-compress']
@@ -253,12 +256,20 @@ const sessionFilesOf = (root) => {
 // as we can get without spinning up a second agent loop. open(id, 'read') takes no
 // write claim, so it coexists with the harness's (now disposed) writer.
 const storedEventsOf = async (result) => {
-  const store = new JsonlSessionPersistence(new Context(), { root: result.persistRoot })
-  const reader = await store.open(result.sessionId, 'read')
+  // Mount through the released plugin entry on a fresh context — same wiring
+  // as the harness, so the decode path audits the shipped backend.
+  const ctx = new Context()
   try {
-    return (await reader.read(0)).events
+    await ctx.plugin(JsonlPersistencePlugin, { root: result.persistRoot })
+    const store = ctx.reflect.get('sessionPersistence')
+    const reader = await store.open(result.sessionId, 'read')
+    try {
+      return (await reader.read(0)).events
+    } finally {
+      await reader.close()
+    }
   } finally {
-    await reader.close()
+    await ctx.fiber.dispose()
   }
 }
 // The retired V3 wrapper shape ({ kind: 'plugin', plugin: '<name>' }) is refused by

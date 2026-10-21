@@ -71,13 +71,13 @@ Restart `dsh` afterwards (bundle layers are composed at startup), open a new ses
 > **DSH version compatibility.** The package declares all five runtime seam
 > packages (`dsh-compaction` / `dsh-session` / `dsh-llm` / `dsh-tools` /
 > `dsh-settings`) as peer
-> dependencies, sharing the range `>=0.1.5-alpha.1 <0.2.1-0` — every verified line: the `0.1.5` floor plus the verified `0.1.6` / `0.1.7` / `0.2.0` lines (every prerelease plus each line's final release). From the `0.1.5` line
+> dependencies, sharing the range `>=0.1.5-alpha.1 <0.2.2-0` — every verified line: the `0.1.5` floor plus the verified `0.1.6` / `0.1.7` / `0.2.0` / `0.2.1` lines (every prerelease plus each line's final release). From the `0.1.5` line
 > on, the session's replace operation was renamed from `{ op, start, end }` to
 > `{ op, startSeq, endSeq }` and is validated strictly (exactly those three
 > keys), so the engine emits the new shape only: on older DSH hosts (< 0.1.5)
 > every `compress` call is rejected at runtime (issue #136), which is why the
 > old lines are out of contract — upgrade DSH before installing this release.
-> The explicit bounds (instead of a caret) are deliberate: the `0.2.1-0` ceiling keeps the next unverified line rejected (house rule; the former `0.1.6-0` ceiling was widened after per-line verification in #190). The `0.2.0` line also changed two read-side shapes — a tool result's call id moved to the message level, and the host writes `developer/message` tool-registry rows — and the engine reads all of them, so one build serves the whole range (issue #192). Declaring all five seam packages
+> The explicit bounds (instead of a caret) are deliberate: the `0.2.2-0` ceiling keeps the next unverified line rejected (house rule; the former `0.1.6-0` ceiling was widened after per-line verification in #190, then again for the verified `0.2.1` line in #223). The `0.2.0` line changed two read-side shapes — a tool result's call id moved to the message level, and the host writes `developer/message` tool-registry rows — and the `0.2.1` line added three session event types (`job/registered` / `job/settled` / `working-directory/change`) that unaudited kinds treat as barriers by default; the engine reads all of it, so one build serves the whole range (issue #192/#223). Declaring all five seam packages
 > as peers (not just `dsh-compaction`) ensures that, even under pnpm's
 > hoisted/linked layout, installations resolve them to the **host's own** copy
 > rather than a stale nested copy inconsistent with the host.
