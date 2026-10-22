@@ -627,7 +627,7 @@ v2 状态：R1–R5 已由评审核验关闭，遗留两个实现期验证门（
  （`AcpPluginConfigSchema`，各标 `.volatile()`、不设默认）进入表单；热应用 = env getter live 读
  ref（提交即下次读取可见）+ 每步 `resyncSettings()` 重解快照并触发 diff 诊断；命令面零改动。
  契约对已发布 tarball 核实：0.1.7-rc.2 与 0.2.0-rc.2 的 lib 字节相同，一次核实覆盖两条线。
- 新增 §4.9；peer 区间沿用 PR #191 的 `>=0.1.5-alpha.1 <0.2.1-0`（devDep 基线 0.2.0-rc.2）。
+ 新增 §4.9；peer 区间沿用 PR #191 的 `>=0.1.5-alpha.1 <0.2.1-0`（devDep 基线 0.2.0-rc.2；#226 后放宽至 `<0.2.2-0`，基线 0.2.1-rc.2——dsh-settings lib 在该线字节不变，本设计契约不受影响）。
  回归测试：tests/settings.test.ts forms 五用例（schema 契约 / 热应用 / config 往返 / 陈旧 revision /
  倒挂告警），standalone 25、全量 386、e2e 五场景全绿。
 - **v4（issue #173，能力探测）**：dsh-settings 0.1.7 全线移除 `installSection`

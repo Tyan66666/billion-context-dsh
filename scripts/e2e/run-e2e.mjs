@@ -1,7 +1,7 @@
 import { runScenario } from './harness.mjs'
 import { readFileSync, readdirSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
-import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
+import * as JsonlPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 import { Context } from '@deepseek-ai/cordis'
 import { foldSurface } from '@deepseek-ai/dsh-session'
 const scenarioNames = ['basic-compress', 'nudge-rhythm', 'compress-then-decompress', 'acp-status', 'overflow-recovery', 'jsonl-compress']
@@ -249,12 +249,13 @@ const sessionFilesOf = (root) => {
   walk(root)
   return found
 }
-// A FRESH backend instance over the same root — as close to "restart and reload"
+// A FRESH backend MOUNT over the same root — as close to "restart and reload"
 // as we can get without spinning up a second agent loop. open(id, 'read') takes no
 // write claim, so it coexists with the harness's (now disposed) writer.
 const storedEventsOf = async (result) => {
-  const store = new JsonlSessionPersistence(new Context(), { root: result.persistRoot })
-  const reader = await store.open(result.sessionId, 'read')
+  const ctx = new Context()
+  await ctx.plugin({ name: JsonlPersistence.name, apply: JsonlPersistence.apply }, { root: result.persistRoot })
+  const reader = await ctx.sessionPersistence.open(result.sessionId, 'read')
   try {
     return (await reader.read(0)).events
   } finally {

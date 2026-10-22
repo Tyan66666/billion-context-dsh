@@ -36,10 +36,22 @@ import semver from 'semver'
 // live audits of read-side shapes (V4 source kinds #163/#169,
 // compact-checkpoint #168, SettingsForms probe #173). The replace-op dialect
 // is unchanged across the whole band (pinned by tests/surfaceop-dialect.test.ts
-// against real sessions of whichever line is installed). `0.2.1-0` still sorts
-// ahead of any `0.2.1-x` prerelease (numeric ids precede alphanumeric ones),
-// so the NEXT line stays rejected until it is verified deliberately — the
-// house rule (no unverified line) is unchanged, only the verified set grew.
+// against real sessions of whichever line is installed).
+//
+// ISSUE #226 — the ceiling moved from `<0.2.1-0` to `<0.2.2-0`. DSH 0.2.1-rc.x
+// hosts rejected the plugin at install time because the old ceiling excluded
+// the whole 0.2.1 line. The 0.2.1-rc.2 seam line is now verified against the
+// published tarballs (docs/dsh-porting-verification.md): the replace surfaceOp
+// validator is byte-identical, dsh-settings ships a byte-identical lib, the
+// token-meter node shape and the DeepSeek adapter registration contract are
+// unchanged, and the only breaking change touching us is the JSONL persistence
+// backend switching from a standalone class to a cordis plugin (harness/test
+// adaptation only — no engine runtime path). The line's new ignorable event
+// types (job/registered, job/settled, working-directory/change) land as
+// barriers via the classifier's unaudited-kind default (rule 16), no engine
+// change. `0.2.2-0` still sorts ahead of any `0.2.2-x` prerelease, so the NEXT
+// line stays rejected until it is verified deliberately — the house rule (no
+// unverified line) is unchanged, only the verified set grew.
 //
 // The assertions below call semver.satisfies with `{ includePrerelease: true }`
 // — the EXACT option the host's pre-install gate uses (packages/boot/app-boot
@@ -77,17 +89,19 @@ for (const peerName of seamPeers) {
 	const peerRange = pkg.peerDependencies[peerName]
 	assert.equal(typeof peerRange, 'string', `${peerName} must be declared as a peer (runtime VALUE-import)`)
 
-	test(`${peerName}: peer range accepts the whole verified seam band (0.1.5 → 0.2.0)`, () => {
-		// Every published version from the 0.1.5 floor through the 0.2.0
+	test(`${peerName}: peer range accepts the whole verified seam band (0.1.5 → 0.2.1)`, () => {
+		// Every published version from the 0.1.5 floor through the 0.2.1
 		// ceiling installs — including the live desktop builds from issue #136
-		// (0.1.5-alpha.2) and the issue #190 reporter's host (0.2.0-rc.2).
-		// Future same-line rCs stay in range, so new releases on an admitted
-		// line never break installs.
+		// (0.1.5-alpha.2), the issue #190 reporter's host (0.2.0-rc.2) and the
+		// issue #226 reporter's host (0.2.1-rc.2). Future same-line rCs stay in
+		// range, so new releases on an admitted line never break installs.
 		for (const v of [
 			'0.1.5-alpha.1', '0.1.5-alpha.2', '0.1.5-rc.1', '0.1.5-rc.9', '0.1.5-rc.99', '0.1.5',
 			'0.1.6-alpha.1', '0.1.6-alpha.2', '0.1.6-rc.1', '0.1.6',
 			'0.1.7-alpha.1', '0.1.7-alpha.2', '0.1.7-rc.1', '0.1.7-rc.2', '0.1.7',
 			'0.2.0-rc.1', '0.2.0-rc.2', '0.2.0-rc.99', '0.2.0',
+			'0.2.1-alpha.1', '0.2.1-alpha.2', '0.2.1-alpha.3', '0.2.1-alpha.4', '0.2.1-alpha.5',
+			'0.2.1-rc.1', '0.2.1-rc.2', '0.2.1-rc.99', '0.2.1',
 		]) {
 			assert.equal(
 				semver.satisfies(v, peerRange, { includePrerelease: true }),
@@ -109,9 +123,9 @@ for (const peerName of seamPeers) {
 				`${v} must NOT satisfy ${peerRange}`,
 			)
 		}
-		// Next line and beyond: 0.2.1+ (any prerelease or final) and 0.3.x are
+		// Next line and beyond: 0.2.2+ (any prerelease or final) and 0.3.x are
 		// deliberate, later decisions — never silently allowed (house rule).
-		for (const v of ['0.2.1-0', '0.2.1-rc.1', '0.2.1', '0.2.2', '0.3.0-rc.1', '0.3.0']) {
+		for (const v of ['0.2.2-0', '0.2.2-rc.1', '0.2.2', '0.3.0-rc.1', '0.3.0']) {
 			assert.equal(
 				semver.satisfies(v, peerRange, { includePrerelease: true }),
 				false,

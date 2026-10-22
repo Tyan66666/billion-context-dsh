@@ -107,10 +107,12 @@ const runScenario = async (scenario, hooks = {}) => {
   // green in-memory suite. The agent-loop acquires each session's write handle
   // itself once this service is present; nothing else in the composition moves.
   // Fresh temp root per scenario run: a reused root would make the loop RESUME
-  // last run's stored session instead of creating a new one.
-  const JsonlPersistence = (await import('@deepseek-ai/dsh-session-persistence-jsonl')).default
+  // last run's stored session instead of creating a new one. On the 0.2.1 line
+  // the backend ships as a cordis plugin ({ name, apply }) that registers itself
+  // as ctx.sessionPersistence — no more standalone class to instantiate.
+  const JsonlPersistence = await import('@deepseek-ai/dsh-session-persistence-jsonl')
   const persistRoot = mkdtempSync(join(tmpdir(), 'e2e-sessions-'))
-  await ctx.plugin(JsonlPersistence, { root: persistRoot })
+  await ctx.plugin({ name: JsonlPersistence.name, apply: JsonlPersistence.apply }, { root: persistRoot })
   const sessionId = SessionId(scenario.name)
   const agent = await ctx.agentLoop.create(sessionId, {
     provider: 'deepseek-official',

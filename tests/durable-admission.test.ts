@@ -55,15 +55,17 @@ import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 // Deliberately dynamic: a static import would fail at link time on Node < 22.15
 // (the codec's own static node:zlib zstd import) and kill every test in this
-// file, including the one below that never touches the persistence stack.
-let JsonlSessionPersistence: typeof import('@deepseek-ai/dsh-session-persistence-jsonl').default | undefined
+// file, including the one below that never touches the persistence stack. On the
+// 0.2.1 line the backend ships as a cordis plugin ({ name, apply }) instead of a
+// standalone class, so we keep the whole module namespace.
+let JsonlPersistence: typeof import('@deepseek-ai/dsh-session-persistence-jsonl') | undefined
 try {
-  JsonlSessionPersistence = (await import('@deepseek-ai/dsh-session-persistence-jsonl')).default
+  JsonlPersistence = await import('@deepseek-ai/dsh-session-persistence-jsonl')
 } catch {
   // Older Node without node:zlib zstd — round-trip tests skip with a reason.
 }
 const persistenceSkipReason =
-  JsonlSessionPersistence === undefined
+  JsonlPersistence === undefined
     ? 'released JSONL codec needs node:zlib zstd (Node >= 22.15); running on an older Node'
     : false
 import { Session, type SessionEvent } from '@deepseek-ai/dsh-session'
@@ -236,11 +238,13 @@ function buildEngineLog(): Session {
  * rejects any row at append or read time.
  */
 async function persistAndReadBack(rows: readonly SessionEvent[], id: string): Promise<readonly SessionEvent[]> {
-  const Store = JsonlSessionPersistence
-  assert.ok(Store !== undefined, 'persistence codec must have loaded to run the round-trip')
+  const mod = JsonlPersistence
+  assert.ok(mod !== undefined, 'persistence codec must have loaded to run the round-trip')
   const root = mkdtempSync(join(tmpdir(), 'durable-admission-'))
   try {
-    const store = new Store(new Context(), { root })
+    const ctx = new Context()
+    await ctx.plugin({ name: mod.name, apply: mod.apply }, { root })
+    const store = ctx.sessionPersistence
     const handle = await store.create({
       version: CURRENT_SESSION_FORMAT_VERSION,
       id,
