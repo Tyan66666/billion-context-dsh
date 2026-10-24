@@ -2,6 +2,10 @@
 
 [English](./README.en.md) | [中文](./README.md)
 
+> **🛑 This project is no longer maintained**
+> No further updates, bug fixes, or new features. For the same capability, use **[ranxianglei/billion-context](https://github.com/ranxianglei/billion-context)** — the unified upstream version, which natively supports the DeepSeek Harness (one implementation covers pi / OpenCode / Claude Code and 20+ other hosts).
+> Previously published versions remain installable, but are unsupported.
+
 > **⚠️ Beta notice — not for production use**
 > This project (**v0.2.27**) is a work-in-progress beta. The [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) itself is also in **public beta**. **Do not use either in engineering / production environments** — expect breaking changes and rough edges.
 
