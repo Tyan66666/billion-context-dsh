@@ -1,7 +1,7 @@
 {
 	"name": "billion-context-dsh",
 	"version": "0.2.27",
-	"description": "Active Context Pruning (ACP) for the DeepSeek Harness — model-driven context management as a CompactionEngine backend.",
+	"description": "Unmaintained — use ranxianglei/billion-context instead. Active Context Pruning (ACP) for the DeepSeek Harness — model-driven context management as a CompactionEngine backend.",
 	"keywords": [
 		"deepseek",
 		"harness",

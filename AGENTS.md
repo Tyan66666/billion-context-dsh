@@ -1,5 +1,8 @@
 # billion-context-dsh — Development Specification
 
+> **🛑 UNMAINTAINED — do not start new feature work.**
+> The owner has stopped maintaining this repository. It is superseded by **[ranxianglei/billion-context](https://github.com/ranxianglei/billion-context)**, the unified upstream version with native DeepSeek Harness support (one implementation covering pi / OpenCode / Claude Code and 20+ other hosts). Fixes belong upstream, in that repo — not here. This document is kept as the record of how the DSH port works, and as reference for anyone reading or installing a published version (they remain installable but unsupported).
+
 > **This document is the highest-priority specification. All developers (including AI Agents) MUST comply.**
 
 ## 1. Project Overview
