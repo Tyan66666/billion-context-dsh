@@ -108,7 +108,11 @@ const runScenario = async (scenario, hooks = {}) => {
   // itself once this service is present; nothing else in the composition moves.
   // Fresh temp root per scenario run: a reused root would make the loop RESUME
   // last run's stored session instead of creating a new one.
-  const JsonlPersistence = (await import('@deepseek-ai/dsh-session-persistence-jsonl')).default
+  // The 0.2.1 seam line ships the JSONL backend as a cordis PLUGIN (named
+  // exports `name`/`apply`; the class is internal and registers itself as the
+  // `sessionPersistence` service), so the module namespace IS the plugin —
+  // the 0.2.0 default-export class is gone (issue #223 baseline move).
+  const JsonlPersistence = await import('@deepseek-ai/dsh-session-persistence-jsonl')
   const persistRoot = mkdtempSync(join(tmpdir(), 'e2e-sessions-'))
   await ctx.plugin(JsonlPersistence, { root: persistRoot })
   const sessionId = SessionId(scenario.name)

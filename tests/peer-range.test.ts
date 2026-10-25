@@ -36,10 +36,30 @@ import semver from 'semver'
 // live audits of read-side shapes (V4 source kinds #163/#169,
 // compact-checkpoint #168, SettingsForms probe #173). The replace-op dialect
 // is unchanged across the whole band (pinned by tests/surfaceop-dialect.test.ts
-// against real sessions of whichever line is installed). `0.2.1-0` still sorts
-// ahead of any `0.2.1-x` prerelease (numeric ids precede alphanumeric ones),
-// so the NEXT line stays rejected until it is verified deliberately — the
-// house rule (no unverified line) is unchanged, only the verified set grew.
+// against real sessions of whichever line is installed).
+//
+// ISSUE #223 — the ceiling moved from `<0.2.1-0` to `<0.2.2-0`. DSH published
+// the 0.2.1 line (0.2.1-alpha.1..5, rc.1, rc.2) and hub installs on it were
+// rejected outright (the auto-filed report in the issue). The 0.2.1-rc.2 seam
+// line is verified end-to-end here (typecheck + full suite + e2e harness run
+// against the 0.2.1-rc.2 devDeps baseline; contract points diffed against the
+// published 0.2.0-rc.2 tarballs — replace-op validator, checkpoint marker,
+// settings service byte-identical, token-meter node shape, persistence
+// admission predicate, dsh-tools export surface). Two findings shaped the fix:
+// (a) the host gate (dsh-app-boot `unmetRequirements`) evaluates EVERY
+// `@deepseek-ai/dsh*` peer against the SINGLE running runtime version — not
+// the host's per-package versions — so an exact pin like `"0.2.0-rc.2"` only
+// ever admits ONE line: since issue #184's exact pins landed, v0.2.27 was
+// effectively installable ONLY on hosts at exactly 0.2.0-rc.2, silently
+// contradicting the documented 0.1.5→0.2.0 band. All lockstep dsh-* peers are
+// therefore expressed as the SAME explicit interval as the five value-imported
+// seams (the uniform-band assertion below keeps them there); (b) three new
+// session event types ride the 0.2.1 line (job/registered, job/settled,
+// working-directory/change) — they hit the engine's conservative barrier
+// default (rule 16) and need no code change. `0.2.2-0` sorts ahead of any
+// `0.2.2-x` prerelease (numeric ids precede alphanumeric ones), so the NEXT
+// line stays rejected until it is verified deliberately — the house rule (no
+// unverified line) is unchanged, only the verified set grew.
 //
 // The assertions below call semver.satisfies with `{ includePrerelease: true }`
 // — the EXACT option the host's pre-install gate uses (packages/boot/app-boot
@@ -77,17 +97,18 @@ for (const peerName of seamPeers) {
 	const peerRange = pkg.peerDependencies[peerName]
 	assert.equal(typeof peerRange, 'string', `${peerName} must be declared as a peer (runtime VALUE-import)`)
 
-	test(`${peerName}: peer range accepts the whole verified seam band (0.1.5 → 0.2.0)`, () => {
-		// Every published version from the 0.1.5 floor through the 0.2.0
+	test(`${peerName}: peer range accepts the whole verified seam band (0.1.5 → 0.2.1)`, () => {
+		// Every published version from the 0.1.5 floor through the 0.2.1
 		// ceiling installs — including the live desktop builds from issue #136
-		// (0.1.5-alpha.2) and the issue #190 reporter's host (0.2.0-rc.2).
-		// Future same-line rCs stay in range, so new releases on an admitted
-		// line never break installs.
+		// (0.1.5-alpha.2), the issue #190 reporter's host (0.2.0-rc.2) and the
+		// issue #223 reporter's host (0.2.1-rc.2). Future same-line rCs stay in
+		// range, so new releases on an admitted line never break installs.
 		for (const v of [
 			'0.1.5-alpha.1', '0.1.5-alpha.2', '0.1.5-rc.1', '0.1.5-rc.9', '0.1.5-rc.99', '0.1.5',
 			'0.1.6-alpha.1', '0.1.6-alpha.2', '0.1.6-rc.1', '0.1.6',
 			'0.1.7-alpha.1', '0.1.7-alpha.2', '0.1.7-rc.1', '0.1.7-rc.2', '0.1.7',
 			'0.2.0-rc.1', '0.2.0-rc.2', '0.2.0-rc.99', '0.2.0',
+			'0.2.1-alpha.1', '0.2.1-alpha.5', '0.2.1-rc.1', '0.2.1-rc.2', '0.2.1-rc.99', '0.2.1',
 		]) {
 			assert.equal(
 				semver.satisfies(v, peerRange, { includePrerelease: true }),
@@ -109,9 +130,9 @@ for (const peerName of seamPeers) {
 				`${v} must NOT satisfy ${peerRange}`,
 			)
 		}
-		// Next line and beyond: 0.2.1+ (any prerelease or final) and 0.3.x are
+		// Next line and beyond: 0.2.2+ (any prerelease or final) and 0.3.x are
 		// deliberate, later decisions — never silently allowed (house rule).
-		for (const v of ['0.2.1-0', '0.2.1-rc.1', '0.2.1', '0.2.2', '0.3.0-rc.1', '0.3.0']) {
+		for (const v of ['0.2.2-0', '0.2.2-alpha.1', '0.2.2-rc.1', '0.2.2', '0.3.0-rc.1', '0.3.0']) {
 			assert.equal(
 				semver.satisfies(v, peerRange, { includePrerelease: true }),
 				false,
@@ -130,4 +151,20 @@ test('every runtime VALUE-imported seam package is declared as a peer', () => {
 	for (const name of seamPeers) {
 		assert.equal(typeof pkg.peerDependencies[name], 'string', `${name} must be a peer (runtime VALUE-import)`)
 	}
+})
+
+test('every @deepseek-ai/dsh* peer shares ONE explicit interval (no exact pins)', () => {
+	// The host pre-install gate evaluates EVERY dsh* peer against the single
+	// running runtime version (dsh-app-boot unmetRequirements), so an exact pin
+	// like "0.2.0-rc.2" admits exactly one host line — issue #184's exact pins
+	// silently shrank the installable set to one version while the docs kept
+	// advertising the whole band. All lockstep dsh-* packages move together
+	// with DSH releases, so they all share the same explicit interval as the
+	// five value-imported seams; any future line admission changes them in one
+	// place and this test stays green only if all of them moved together.
+	const dshPeers = Object.entries(pkg.peerDependencies)
+		.filter(([name]) => name.startsWith('@deepseek-ai/dsh'))
+	const bands = new Set(dshPeers.map(([, range]) => range))
+	assert.ok(bands.size === 1, `all dsh* peers must share one range, found: ${[...bands].join(' | ')}`)
+	assert.equal(bands.has(pkg.peerDependencies[seamPeers[0]]), true)
 })
