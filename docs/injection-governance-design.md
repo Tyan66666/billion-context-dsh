@@ -1,6 +1,6 @@
 # 注入治理设计（injection governance design）
 
-> **状态**：已实现（PR #132，经维护者评审后收敛为 B1 + B3 + B6；B2 已移除；issue #185 追加 skill 目录保护，见 §5）。
+> **状态**：已实现（PR #132，经维护者评审后收敛为 B1 + B3 + B6；B2 已移除；issue #185 追加 skill 目录保护，见 §5；issue #215 追加过期注入行折叠，见 §6）。
 > **来源**：PR #132（TheTouYu）最初提交 B1–B6 六项注入治理改动；维护者评审（见 issue #132 楼层）确认三个阻断项与四个宿主行为问题后，本 PR 收敛为三项落地、一项移除。
 
 ## 0. 结论先行（TL;DR）
@@ -89,7 +89,32 @@ PR 原设计：`agent/pre-step` 时，若注入帧（agent-instructions / skill-
 
 回归测试：tests/skill-catalog.test.ts（全部形状识别、pinning、range 表 barrier、工具/人路径拒绝、stale 可压缩）；tests/instruction-barrier.test.ts 同步更新（guarded 集合含目录行；拒绝说明双通道措辞）。
 
-## 6. 验证
+## 6. 过期注入行折叠（issue #215）
+
+### 问题
+宿主每轮注入的控制行（goal / time-context / team-message——DSH ≥0.2.1 线的 direct kind；agent-instructions 与 skill 目录同样多副本累积）全部落入 `instruction` 分类、按**永久屏障**处理——每一条都把表面切成新段。实测 session-a41fb964-6365-4d87-a497-9542e690e525（2026-10-14）：surface 906 个节点里 **241 条是注入行**——goal 186 · time-context 20 · team-message 17 · agent-instructions 10。后果：
+
+1. 可压范围被切成大量低于内核合并门的小碎片 → nudge 范围表没有合法目标（issue #213 的直接成因）；
+2. 每轮 pre-step 都要带上这些行，代价随会话长度线性增长（与 issue #110 同方向）；
+3. 成因不可见：`/acp-prune status` 之前不暴露屏障行占比。
+
+### 方案（全部在本仓库内，只动读侧——识别与切段，不改任何持久化写入）
+1. **通道识别**（`injectionChannelOf` + `STALE_FOLDABLE_HOST_CHANNELS`，src/messages.ts）：每条 instruction 行映射到通道标签——goal / time-context / team-message（direct kind 或 plugin 名，两种命名空间都认）；agent-instructions / skill-catalog 用规范标签、与形状无关；compact-basic 与未知名报自身名字但**不进**可折叠集合。
+2. **stale/current 拆分**（`partitionInstructionRows` / `staleFoldableHostRowSeqs`，src/region.ts）：对可见 surface 行按替换组分组——agent-instructions 按 `source.changes[].scope`（无 scope 的遗留行宿主无法重注入，恒为 stale，S3）；skill 目录一个组；goal / time-context / team-message 各成通道。每组只留最新可见副本为 current，其余为 stale。
+3. **折叠**（`compressibleSegmentsOf`）：切段只在 CURRENT instruction 行发生——stale 行并入普通段、在范围表里像普通内容一样提供压缩（最新副本仍可见时删除它们不触发任何重注入——此前「stay compressible」语句一直承诺的算术，现在可执行了）。无替换概念的行（compact-basic、未知 plugin/kind 名）保持全量屏障——保守默认不变。
+4. **硬拒扩展**（`guardedSurfaceSeqsOf` + `protectedRowRejectionNote`，src/region.ts / src/tools.ts）：最新可见的 goal / time-context / team-message 行也进硬拒集合（压当前控制行没有收益——宿主让它保持常驻）；拒绝说明给独立原因（"newest copy of an injected control channel … compressing it reclaims nothing"），不再套用 AGENTS.md 的重注入故事。
+5. **context map**（`statusText`，src/commands.ts）：`/acp-prune status` 新增 context map 段——surface 节点数、注入行按通道计数（含 stale/current 拆分）、可压范围数与最大段 token。「谁把表面切碎了」对模型和人同时可见。
+
+### 行为变更（披露）
+- **旧**：任何注入行（任何通道的每一副本）都是 nudge 范围表的永久屏障，永不提供。
+- **新**：agent-instructions（被取代 scope 的旧副本）、skill 目录（被取代的旧目录）、goal / time-context / team-message（非最新的快照）的 stale 副本变为**在范围表里提供压缩**；每组最新可见副本仍是屏障，且进入硬拒集合。
+- **新增硬拒**：覆盖最新 goal / time-context / team-message 行的 span 被拒绝并点名（此前这些行不在拒集里——只是从不被 offer）。
+- **不变**：compact-basic 与未知 plugin/kind 名保持全量屏障；最新真实用户回合保护不变；所有持久化事件形状不变。
+- issue 建议 2（写入侧「新行替换旧行」落盘）属宿主侧改动，本仓库不做。
+
+回归测试：tests/stale-host-rows.test.ts（双命名空间通道识别、partition 语义、scope 分组、范围表跨 stale 折叠、工具路径拒绝/放行对照、拒绝措辞、status context map）；tests/instruction-barrier.test.ts 与 tests/kernel-range-source.test.ts 同步更新（旧副本由屏障改为 offered）。
+
+## 7. 验证
 
 - `npm run typecheck` ✓；`npm test` 273/273 ✓（含 tests/injection-governance.test.ts B1-1..4、tests/g5-governance.test.ts B3-1..4/B6-1..4 重写版、tools.test.ts M3 头行断言更新）；`npm run build` ✓；`npm run test:e2e` ✓（4 场景全 PASS）。
 - dist/ 不进 PR（dist-bot 合并后刷新；AGENTS.md §5）。

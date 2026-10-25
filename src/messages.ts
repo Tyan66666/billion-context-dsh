@@ -684,6 +684,46 @@ export function isSkillCatalogRow(event: SessionEvent): boolean {
   return extractText(contentBlocksOfEvent(event)).includes('<available_skills>')
 }
 
+/**
+ * Host control channels whose OLDER visible copies carry no value once a
+ * newer copy of the same group is on the surface (issue #215): per-turn state
+ * snapshots the host re-publishes — agent-team `goal`, `time-context`,
+ * inter-agent `team-message`. They arrive as direct kinds (or plugin names)
+ * the engine has never audited, so classifySurfaceEvent files them under
+ * 'instruction' by the conservative default; this set is what makes their
+ * STALE copies foldable while the newest copy of each group stays a barrier.
+ * Recognition matches BOTH namespaces (direct kind and plugin name, legacy
+ * wrapper + V4 producer kind) so a host rename keeps the channel's treatment
+ * across the 0.1.7-style rename map (issue #169). Live evidence for "no value
+ * in old copies": session-a41fb964 carried 186 goal / 20 time-context / 17
+ * team-message rows on a 906-node surface, all permanent barriers.
+ */
+export const STALE_FOLDABLE_HOST_CHANNELS: ReadonlySet<string> = new Set([
+  'goal',
+  'time-context',
+  'team-message',
+])
+
+/**
+ * Channel identity of an instruction-class row for staleness tracking
+ * (issue #215), or null when the row is not an instruction row at all.
+ * Canonical labels: 'agent-instructions' and 'skill-catalog' keep their
+ * established names regardless of shape; every other channel reports its
+ * direct kind or plugin name (whichever namespace it arrived in). Used by
+ * staleFoldableHostRowSeqs (src/region.ts) and the /acp-prune status context
+ * map (src/commands.ts) — one label feeds both, so the table and the panel
+ * can never disagree about who is who.
+ */
+export function injectionChannelOf(event: SessionEvent): string | null {
+  if (event.type !== 'user/message') return null
+  if (classifySurfaceEvent(event) !== 'instruction') return null
+  if (isAgentInstructionsRow(event)) return 'agent-instructions'
+  if (isSkillCatalogRow(event)) return 'skill-catalog'
+  const source = (event.data as { source?: { kind?: unknown; plugin?: unknown } }).source
+  const name = sourcePluginOf(source) ?? (typeof source?.kind === 'string' ? source.kind : undefined)
+  return typeof name === 'string' && name.length > 0 ? name : 'unknown'
+}
+
 export function classifySurfaceEvent(event: SessionEvent): SurfaceEventClass {
   // Compaction summary nodes first — they are user messages too.
   if (isCheckpointNode(event)) return 'checkpoint'

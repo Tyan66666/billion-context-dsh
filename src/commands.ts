@@ -22,6 +22,7 @@ import {
 import {
   blockIdOfKernelRef,
   blockRefForSummarySeq,
+  buildCompressibleSeqRanges,
   expandShadowedSeqs,
   guardedSurfaceSeqsOf,
   rebuildBlockLedger,
@@ -30,10 +31,13 @@ import {
   liveCheckpointCarriersInSpan,
   shadowedSeqsOf,
   sliceDecompressPage,
+  staleFoldableHostRowSeqs,
+  surfaceSummary,
   DEFAULT_DECOMPRESS_PAGE,
   DEFAULT_DECOMPRESS_PAGE_CHARS,
+  type KernelRangeView,
 } from './region.ts'
-import { allLogMessages, eventsToCoreMessages, extractEventText, surfaceEventsOf } from './messages.ts'
+import { allLogMessages, eventsToCoreMessages, extractEventText, injectionChannelOf, surfaceEventsOf } from './messages.ts'
 import { shadowedTokensViaMeter } from './host-tokens.ts'
 import { eventAtOf, sessionEventsOf } from './session-events.ts'
 import { defaultConfig } from 'acp-kernel'
@@ -98,6 +102,44 @@ async function statusText(env: ToolEnvironment, agent: Agent): Promise<string> {
       const toNudge = Math.max(0, Math.round(maxPct * limit - estimated))
       lines.push(`  next nudge: ~${toNudge.toLocaleString()} tokens to go (usage ${Math.round(nudge.contextUsage * 100)}% → ${Math.round(maxPct * 100)}% line)`)
     }
+  }
+  // ── context map (issue #215): who fragments the surface ──
+  // The compressible geometry comes from the SAME kernel view the nudge range
+  // table uses (the read-only clone above), so the panel reports exactly what
+  // the model is being offered — not a second, possibly divergent computation.
+  const nodes = session.surface.nodes
+  const staleRows = staleFoldableHostRowSeqs(session)
+  const injectedByChannel = new Map<string, { total: number; stale: number }>()
+  let injectedTotal = 0
+  for (const seq of nodes) {
+    const event = eventAtOf(session, seq)
+    if (event === undefined) continue
+    const channel = injectionChannelOf(event)
+    if (channel === null) continue
+    injectedTotal += 1
+    const entry = injectedByChannel.get(channel) ?? { total: 0, stale: 0 }
+    entry.total += 1
+    if (staleRows.has(seq)) entry.stale += 1
+    injectedByChannel.set(channel, entry)
+  }
+  lines.push('── context map ──')
+  lines.push(`  surface: ${nodes.length} node(s) (${surfaceSummary(session)})`)
+  if (injectedTotal === 0) {
+    lines.push('  injected rows: 0')
+  } else {
+    const parts = [...injectedByChannel.entries()]
+      .sort((a, b) => b[1].total - a[1].total)
+      .map(([channel, count]) => count.stale > 0 ? `${channel} ${count.total} (${count.stale} stale)` : `${channel} ${count.total}`)
+    lines.push(`  injected rows: ${injectedTotal} (${Math.round((injectedTotal / Math.max(1, nodes.length)) * 100)}% of surface) — ${parts.join(' · ')}`)
+  }
+  if (nudge !== undefined) {
+    const view: KernelRangeView = { ranges: nudge.compressibleRanges, refs: turn.state.messageRefs }
+    const ranges = buildCompressibleSeqRanges(session, view)
+    const rangeTokens = ranges.reduce((sum, range) => sum + range.tokens, 0)
+    const largest = ranges.reduce((max, range) => Math.max(max, range.tokens), 0)
+    lines.push(`  compressible: ${ranges.length} range(s), ~${rangeTokens.toLocaleString()} tokens (largest ${largest.toLocaleString()})`)
+  } else {
+    lines.push('  compressible: n/a (nudge disabled)')
   }
   // Show ALL blocks, not just the oldest 10: /acp-prune status is how the user
   // confirms recent work survived compression, and the block list is folded

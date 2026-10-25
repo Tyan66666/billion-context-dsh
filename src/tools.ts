@@ -32,6 +32,7 @@ import {
   runCompactionTransaction,
   liveCheckpointCarriersInSpan,
   shadowedSeqsOf,
+  staleFoldableHostRowSeqs,
   stripOrphanedSurfaceToolMessages,
   summarySeqOfKernelBlock,
   openToolCallIds,
@@ -41,7 +42,7 @@ import {
   DEFAULT_DECOMPRESS_PAGE_CHARS,
   type ResolvedSurfaceRange,
 } from './region.ts'
-import { allLogMessages, attachmentsOfEvent, buildToolCallIndex, eventsToCoreMessages, extractEventText, isAgentInstructionsRow, isCheckpointNode, isRealUserTurn, isSkillCatalogRow, surfaceEventsOf, toolCallsOf } from './messages.ts'
+import { allLogMessages, attachmentsOfEvent, buildToolCallIndex, eventsToCoreMessages, extractEventText, injectionChannelOf, isAgentInstructionsRow, isCheckpointNode, isRealUserTurn, isSkillCatalogRow, STALE_FOLDABLE_HOST_CHANNELS, surfaceEventsOf, toolCallsOf } from './messages.ts'
 import { shadowedTokensViaMeter } from './host-tokens.ts'
 import { eventAtOf, sessionEventsOf } from './session-events.ts'
 import { DEFAULT_RESOLVED, type ResolvedPrompts } from './prompts.ts'
@@ -436,21 +437,31 @@ export function protectedRowRejectionNote(
   // this note has always carried (pinned by tests).
   let hasInstructions = false
   let hasCatalog = false
+  let hasControlChannel = false
   let hasUserTurn = false
   if (session !== undefined) {
+    // issue #215: a control-channel hit (goal / time-context / team-message)
+    // counts only when it is the CURRENT copy — stale copies are never guarded,
+    // so a hit that classifies as one of those channels but sits in the stale
+    // set was reached through some other protection and gets that reason.
+    const staleRows = staleFoldableHostRowSeqs(session)
     for (const seq of hits) {
       const event = eventAtOf(session, seq)
       if (event === undefined) continue
       if (!hasInstructions && isAgentInstructionsRow(event)) hasInstructions = true
       if (!hasCatalog && isSkillCatalogRow(event)) hasCatalog = true
+      if (!hasControlChannel) {
+        const channel = injectionChannelOf(event)
+        if (channel !== null && STALE_FOLDABLE_HOST_CHANNELS.has(channel) && !staleRows.has(seq)) hasControlChannel = true
+      }
       if (!hasUserTurn && isRealUserTurn(event)) hasUserTurn = true
-      if (hasInstructions && hasCatalog && hasUserTurn) break
+      if (hasInstructions && hasCatalog && hasControlChannel && hasUserTurn) break
     }
   }
   const reasons: string[] = []
   if (session === undefined) {
     reasons.push('the host re-injects the newest AGENTS.md copy the moment it leaves the surface, so compressing it reclaims nothing')
-  } else if (!hasInstructions && !hasCatalog && !hasUserTurn) {
+  } else if (!hasInstructions && !hasCatalog && !hasControlChannel && !hasUserTurn) {
     // A session that identifies none of the hits must NOT claim an AGENTS.md
     // re-injection it cannot confirm: the rows stay guarded, the mechanism
     // stays unnamed.
@@ -459,12 +470,18 @@ export function protectedRowRejectionNote(
     // Per-channel WHY (issue #185): the guarded channels fail differently when
     // folded — AGENTS.md comes straight back (host presence gate); a skill
     // catalog never does (resend keyed on the catalog digest, not visibility);
-    // and the active user turn would vanish from the surface entirely.
+    // the current copy of a control channel (goal / time-context / team-message)
+    // is owned by the host's lifecycle and would come back or go missing mid-turn
+    // (issue #215); and the active user turn would vanish from the surface
+    // entirely.
     if (hasInstructions) {
       reasons.push('the host re-injects the newest AGENTS.md copy the moment it leaves the surface, so compressing it reclaims nothing')
     }
     if (hasCatalog) {
       reasons.push('a folded skill catalog is never re-sent — its resend gate is the catalog digest, which folding cannot change')
+    }
+    if (hasControlChannel) {
+      reasons.push('this is the newest copy of an injected control channel (goal / time-context / team-message) — the host keeps it live, so compressing it reclaims nothing')
     }
     if (hasUserTurn) {
       reasons.push('the active user message must stay live to preserve conversation intent')
@@ -474,7 +491,7 @@ export function protectedRowRejectionNote(
   // AGENTS.md re-injection story (or its stale-copy escape): neither applies to
   // a user message. `guardedSurfaceSeqsOf` may also protect the newest real user
   // turn alongside the policy rows, hence the two labels.
-  const userOnly = hasUserTurn && !hasInstructions && !hasCatalog
+  const userOnly = hasUserTurn && !hasInstructions && !hasCatalog && !hasControlChannel
   const rowLabel = hasUserTurn ? 'CURRENT guarded row(s)' : 'CURRENT injected instruction row(s)'
   const staleCopyTail = userOnly ? '' : ' (older/stale copies of the same channel are fine to compress)'
   return `  seqs ${start}..${end} rejected — the span covers ${hits.length} ${rowLabel} (seq ${preview}${more}); ${reasons.join('; ')} — ${recovery}${staleCopyTail}`
