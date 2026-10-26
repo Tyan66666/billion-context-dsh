@@ -99,7 +99,8 @@
 mN 修复完成后，按「与 pi 语义对齐」讨论追加两项范围表改进（用户决策：两者都改）：
 
 1. **tool/text 组成占比**：范围行带 `[tool {toolPct}% | text {textPct}%]`——`toolPct` 按**消息数占比**（kernel `isToolMessage` parity：`contentType === 'tool-call' | 'tool-result'`；事件层 = `event.type === 'tool/result'` 或 assistant 含 `tool-call` block）。给模型直接的压缩安全信号：tool 占比高 = 主要是工具输出 = 已消费候选（对应 rule 4 "压缩单个已消费 tool 输出是常态"）。
-2. **排序 size 降序 → oldest-first**：`buildCompressibleSeqRanges` 返回改为 `sort((a, b) => a.start - b.start)`。理由（用户提出，采纳）：范围表顺序跨 turn 稳定（最老段不随新消息移动），模型可按序消化无需每次重排（认知缓存命中），与 kernel `oldest first` 列表及宿主压缩节奏一致；size 降序每次排名随新消息抖动，还把模型引向"当前最大段"（往往是刚产生、还在用的输出）。
+2. **排序 size 降序 → oldest-first**：`buildCompressibleSeqRanges` 返回改为 `sort((a, b) => a.start - b.start)`。理由（用户提出，采纳）：范围表顺序跨 turn 稳定（最老段不随新消息移动），模型可按序消化无需每次重排（认知缓存命中），与 kernel `oldest first` 列表及宿主压缩节奏一致；size 降序每次排名随新消息抖动，还把模型引向"当前最大段"
+**[#213 更正]**：此决策后被推翻——live 长会话中 oldest-first 的前 6 行被几百 token 的碎片占满、124K token 的最大段不在可见表内，模型对着空目标反复重试空转；现改为 largest-first（同分取最旧）+ 隐藏行数计数（本段保留为历史决策记录）。
 3. **顺带修复 `slice(-0)` 陷阱**：`preserveRecent: 0` 时 `nodes.slice(-0) === slice(0)` 会保护全部节点——原"不保护"语义失效（region.test.ts 既有调用只 doesNotThrow 未暴露）。加 `if (preserve > 0)` 守卫。
 
 落点：`src/region.ts`（`SeqCompressibleRange.toolPct` + `isToolEvent` + 排序）、`src/nudge.ts`（renderTemplate 传 `toolPct`/`textPct`）、`src/prompts.ts`（rangeTable.line 模板加 `[tool {toolPct}% | text {textPct}%]`）、`tests/region.test.ts`（新增 toolPct 0/67 + oldest-first 断言）、`tests/prompts.test.ts`（快照 `[tool 0% | text 100%]`）。测试 112/112。

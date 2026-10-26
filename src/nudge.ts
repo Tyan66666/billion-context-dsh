@@ -114,6 +114,76 @@ function kernelRangeViewOf(nudge: NudgeDecision, state: CompressionState): Kerne
   return { ranges: nudge.compressibleRanges ?? [], refs: state.messageRefs }
 }
 
+/** Surface seqs of a tier nudge's target blocks (their checkpoint summary nodes), ascending. */
+export function tierSummarySeqs(nudge: NudgeDecision, session: import('@deepseek-ai/dsh-session').Session): number[] {
+  return (nudge.tierTargetBlocks ?? [])
+    .map((block) => summarySeqOfKernelBlock(session, block.blockId))
+    .filter((seq): seq is number => seq != null)
+    .sort((a, b) => a - b)
+}
+
+/**
+ * What one nudge can actually act on (issue #213):
+ *
+ * - T1 / normal / emergency nudges act on LIVE SURFACE RANGES — the kernel's
+ *   geometry with the host guards applied (`buildCompressibleSeqRanges`). When
+ *   injected/barrier rows fragment the surface (agent-team sessions: goal /
+ *   time-context / team-message rows are unaudited kinds → conservative
+ *   barriers, rule 16) every span can be eaten by the barriers, the protected
+ *   tail and the last-real-user-turn guard, leaving nothing offered.
+ * - Tier-2/3 nudges act on CHECKPOINT SEQS — the distillable blocks' summary
+ *   nodes. A block whose checkpoint is gone has no seq to name, so its distill
+ *   call cannot be built either.
+ *
+ * The kernel's `shouldInject` is a PRESSURE judgment only; it cannot see the
+ * host guards, so "threshold crossed" does not imply "an action exists". The
+ * engine assembles the nudge text, so the engine owns this gate (rule 3's
+ * division of labor) — no kernel change is needed.
+ */
+export interface NudgeTargets {
+  /** 'ranges' = compress the listed spans; 'tier' = distill the listed checkpoint seqs. */
+  readonly kind: 'ranges' | 'tier'
+  readonly ranges: readonly SeqCompressibleRange[]
+  readonly tierSeqs: readonly number[]
+  readonly actionable: boolean
+  /** Why not actionable (host log / /acp-prune status); null when actionable. */
+  readonly reason: string | null
+}
+
+export function resolveNudgeTargets(
+  nudge: NudgeDecision,
+  session: import('@deepseek-ai/dsh-session').Session,
+  kernelView: KernelRangeView,
+  mediaPriceOf?: MediaPriceOf,
+  opts: { stripOrphans?: boolean } = {},
+): NudgeTargets {
+  // Computed for BOTH kinds: the default kernel path renders the range table
+  // even under a tier nudge, so dropping it here would change that output.
+  const ranges = buildCompressibleSeqRanges(session, kernelView, {
+    ...(mediaPriceOf === undefined ? {} : { mediaPriceOf }),
+    ...opts,
+  })
+  if ((nudge.tier === 2 || nudge.tier === 3) && (nudge.tierTargetBlocks?.length ?? 0) > 0) {
+    const tierSeqs = tierSummarySeqs(nudge, session)
+    if (tierSeqs.length > 0) return { kind: 'tier', ranges, tierSeqs, actionable: true, reason: null }
+    return {
+      kind: 'tier',
+      ranges,
+      tierSeqs,
+      actionable: false,
+      reason: `${nudge.tierTargetBlocks!.length} tier-${nudge.tier === 2 ? 1 : 2} target block(s) have no resolvable checkpoint seq on the current surface`,
+    }
+  }
+  if (ranges.length > 0) return { kind: 'ranges', ranges, tierSeqs: [], actionable: true, reason: null }
+  return {
+    kind: 'ranges',
+    ranges,
+    tierSeqs: [],
+    actionable: false,
+    reason: `usage ${Math.round(nudge.contextUsage * 100)}% (kernel: ${nudge.reason}) but 0 of ${kernelView.ranges.length} kernel range(s) survive the host guards — the surface is fragmented by injected/barrier rows and the protected tail; the nudge would name no legal target`,
+  }
+}
+
 /**
  * Range-row suffix naming the image/file blocks a span carries, so the model
  * does not read "~0 tokens" as "nothing to reclaim" for a picture-heavy span
@@ -148,6 +218,9 @@ export function meterMediaPriceResolver(
   }
 }
 
+/** How many rows the nudge range table shows (issue #213: the rest are counted in the `more` line, never silent). */
+export const RANGE_TABLE_MAX_ROWS = 6
+
 /**
  * Render the compressible-range table as seq refs for the model.
  *
@@ -156,21 +229,39 @@ export function meterMediaPriceResolver(
  * This function used to self-compute them from the surface as a labeled
  * `UPSTREAM:` workaround for kernel ref-map drift; that drift is fixed upstream
  * (acp-kernel #207) and the workaround is gone (rule 11).
+ *
+ * Rows are picked LARGEST-FIRST (ties broken by oldest start), not oldest-first
+ * (issue #213): under pressure the model must see the biggest reclaimable span,
+ * and the old oldest-first top-6 filled the table with ~195-token fragments
+ * while a 124K-token span sat below the cut with no hint anything else existed.
+ * The title counts ALL available ranges; the `more` line reports the cut.
  */
 export function rangeTable(
   session: import('@deepseek-ai/dsh-session').Session,
   kernelView: KernelRangeView,
   prompts: ResolvedPrompts = DEFAULT_RESOLVED,
   mediaPriceOf?: MediaPriceOf,
+  precomputed?: readonly SeqCompressibleRange[],
 ): string {
-  const ranges = buildCompressibleSeqRanges(
+  const ranges = precomputed ?? buildCompressibleSeqRanges(
     session,
     kernelView,
     mediaPriceOf === undefined ? {} : { mediaPriceOf },
-  ).slice(0, 6)
+  )
+  return renderRangeTable(ranges, session, prompts)
+}
+
+function renderRangeTable(
+  ranges: readonly SeqCompressibleRange[],
+  session: import('@deepseek-ai/dsh-session').Session,
+  prompts: ResolvedPrompts,
+): string {
   // 零范围:整块省略(保留现状的提前返回与 nudge 尾部 '\n')。
   if (ranges.length === 0) return ''
-  const lines = ranges.map((range) =>
+  const ordered = [...ranges].sort((a, b) => b.tokens - a.tokens || a.start - b.start)
+  const shown = ordered.slice(0, RANGE_TABLE_MAX_ROWS)
+  const hidden = ordered.slice(RANGE_TABLE_MAX_ROWS)
+  const lines = shown.map((range) =>
     renderTemplate(prompts.rangeTable.line, {
       start: range.start,
       end: range.end,
@@ -181,12 +272,19 @@ export function rangeTable(
       media: mediaSuffixOf(range),
     }),
   )
+  const moreLines = hidden.length > 0
+    ? [renderTemplate(prompts.rangeTable.more, {
+        hiddenCount: hidden.length,
+        hiddenTokens: hidden.reduce((sum, range) => sum + range.tokens, 0),
+      })]
+    : []
   return [
     // 前导空串元素产生 nudge 中范围表前的唯一空行(§4:parts 层不再加分隔)。
     '',
     renderTemplate(prompts.rangeTable.header, { surface: surfaceSummary(session) }),
     renderTemplate(prompts.rangeTable.title, { count: ranges.length }),
     ...lines,
+    ...moreLines,
     prompts.rangeTable.footer,
   ].join('\n')
 }
@@ -267,16 +365,26 @@ export const EMERGENCY_NUDGE_MAX_PER_TURN = 3
 
 /**
  * Decide and build one nudge message for the agent's next pre-step. Returns
- * null when the kernel recommends no nudge or the per-turn budget is spent:
- * normal-pressure nudges fire at most once per user turn, and emergency nudges
- * are capped at {@link EMERGENCY_NUDGE_MAX_PER_TURN} per user turn so an
- * unrelieved ≥threshold pressure cannot re-inject a durable nudge on every
- * pre-step forever (issue #108). Also advances the in-memory kernel state (ref
+ * null when the kernel recommends no nudge, when there is NO ACTIONABLE TARGET
+ * (issue #213), or when the per-turn budget is spent: normal-pressure nudges
+ * fire at most once per user turn, and emergency nudges are capped at
+ * {@link EMERGENCY_NUDGE_MAX_PER_TURN} per user turn so an unrelieved
+ * ≥threshold pressure cannot re-inject a durable nudge on every pre-step
+ * forever (issue #108). Also advances the in-memory kernel state (ref
  * assignment) so the compress tool can resolve seq → mNNNNN refs.
+ *
+ * The target gate runs BEFORE any budget bookkeeping: a suppressed nudge must
+ * not consume the turn's slot, or a target that appears later in the same
+ * turn (a tool result lands outside the protected tail) would never be
+ * offered until the next turn.
  *
  * `onEmergencyCapHit` (optional) fires when the kernel still wants an
  * emergency nudge but the per-turn budget is spent — the host uses it to log
  * why the model stops receiving nudges (issue #108 review).
+ * `onNothingToCompress` (optional) fires with a reason when the kernel wants a
+ * nudge but no legal target exists — the host logs it instead of letting the
+ * silence look like a bug (issue #213). The callback fires on EVERY such
+ * pre-step; rate-limiting (e.g. once per user turn) is the host's policy.
  */
 export function buildNudge(
   agent: Agent,
@@ -284,6 +392,7 @@ export function buildNudge(
   lastNudgeTurn: Map<string, number>,
   emergencyNudges: Map<string, { turn: number; count: number }>,
   onEmergencyCapHit?: () => void,
+  onNothingToCompress?: (reason: string) => void,
 ): NudgeOutcome | null {
   const session = agent.session
   const state = env.store.stateFor(session)
@@ -303,6 +412,15 @@ export function buildNudge(
   // comes from the host meter. Lazily: a media-free session never pays for a
   // measurement (meterMediaPriceResolver only measures on first lookup).
   const mediaPriceOf = meterMediaPriceResolver(agent, session)
+  // Target gate (issue #213): a threshold-triggered nudge over a fragmented
+  // surface is an instruction the model cannot execute — it retried "compress
+  // now" against an empty table for many rounds at ~55% occupancy. Skip the
+  // injection and let the host log WHY; do NOT touch the per-turn budgets.
+  const targets = resolveNudgeTargets(nudge, session, kernelRangeViewOf(nudge, turn.state), mediaPriceOf)
+  if (!targets.actionable) {
+    onNothingToCompress?.(targets.reason ?? 'no compressible target')
+    return null
+  }
   // The kernel computed `contextBreakdown` from the FULL log (allLogMessages),
   // so after any compression it reports HISTORICAL totals (a huge `tool` that
   // is really the compressed-away originals). Override it with the visible
@@ -341,6 +459,8 @@ export function buildNudge(
     }
   }
 
+  // The gate already resolved the ranges; reuse them so the per-step surface
+  // walk (tokenizing every node) happens once, not twice.
   const text = buildNudgeText(
     nudge,
     emergency,
@@ -348,6 +468,7 @@ export function buildNudge(
     kernelRangeViewOf(nudge, turn.state),
     env.prompts,
     mediaPriceOf,
+    targets.ranges,
   )
   const message = createUserMessage({
     content: [{ type: 'text', text }],
@@ -382,15 +503,16 @@ export function buildNudgeText(
   kernelView: KernelRangeView,
   prompts: ResolvedPrompts = DEFAULT_RESOLVED,
   mediaPriceOf?: MediaPriceOf,
+  precomputedRanges?: readonly SeqCompressibleRange[],
 ): string {
   // A host override of any nudge slot → template rendering (config.prompts
   // keeps its v0.1.9 contract: custom copy wins). Only the pristine default
   // reference reaches the kernel path.
   if (prompts.nudge !== DEFAULT_RESOLVED.nudge) {
-    return renderNudgeFromTemplates(nudge, emergency, session, kernelView, prompts, mediaPriceOf)
+    return renderNudgeFromTemplates(nudge, emergency, session, kernelView, prompts, mediaPriceOf, precomputedRanges)
   }
   const rendered = renderNudgeText(nudge)
-  return adaptKernelNudgeToSeq(rendered.text, nudge, session, kernelView, prompts, mediaPriceOf)
+  return adaptKernelNudgeToSeq(rendered.text, nudge, session, kernelView, prompts, mediaPriceOf, precomputedRanges)
 }
 
 /**
@@ -414,6 +536,7 @@ function adaptKernelNudgeToSeq(
   kernelView: KernelRangeView,
   prompts: ResolvedPrompts,
   mediaPriceOf?: MediaPriceOf,
+  precomputedRanges?: readonly SeqCompressibleRange[],
 ): string {
   // B6：先摘掉哲学/规则段（它们住在系统提示与工具描述里），再做 seq 适配
   let out = stripNudgeGuidance(text)
@@ -429,7 +552,7 @@ function adaptKernelNudgeToSeq(
   // Replace the ref-ID range table (mNNNNN) with the surface-seq table.
   // A zero-range table leaves the kernel's own "[No specific ranges detected]"
   // notice intact — it is a better prompt than an empty table.
-  const seqTable = rangeTable(session, kernelView, prompts, mediaPriceOf)
+  const seqTable = rangeTable(session, kernelView, prompts, mediaPriceOf, precomputedRanges)
   if (seqTable !== '') out = replaceRangesStr(out, seqTable)
   out = insertContentFormNote(out)
   return out
@@ -483,10 +606,7 @@ function replaceTierTrigger(
   const next = rest.match(/\n\nHOW TO COMPRESS/)
   const end = next !== null ? start + 2 + next.index! : text.length
   const targets = nudge.tierTargetBlocks!
-  const summarySeqs = targets
-    .map((block) => summarySeqOfKernelBlock(session, block.blockId))
-    .filter((seq): seq is number => seq != null)
-    .sort((a, b) => a - b)
+  const summarySeqs = tierSummarySeqs(nudge, session)
   const pending = nudge.tier === 2 ? nudge.breakdown?.pendingT2 : nudge.breakdown?.pendingT3
   const tokens = typeof pending === 'number' ? pending : 0
   const tierValue = nudge.tier === null ? 2 : nudge.tier
@@ -526,6 +646,7 @@ function renderNudgeFromTemplates(
   kernelView: KernelRangeView,
   prompts: ResolvedPrompts,
   mediaPriceOf?: MediaPriceOf,
+  precomputedRanges?: readonly SeqCompressibleRange[],
 ): string {
   // Cap the reported percentage at 100: a broken measurement (e.g. response
   // pressure folded in) must never surface as an absurd "230%" to the model.
@@ -559,10 +680,7 @@ function renderNudgeFromTemplates(
   // Tier line (distillation / condensation suggestion) + tier-specific rules.
   if ((nudge.tier === 2 || nudge.tier === 3) && (nudge.tierTargetBlocks?.length ?? 0) > 0) {
     const targets = nudge.tierTargetBlocks!
-    const summarySeqs = targets
-      .map((block) => summarySeqOfKernelBlock(session, block.blockId))
-      .filter((seq): seq is number => seq != null)
-      .sort((a, b) => a - b)
+    const summarySeqs = tierSummarySeqs(nudge, session)
     const pending = nudge.tier === 2 ? nudge.breakdown?.pendingT2 : nudge.breakdown?.pendingT3
     const tokens = typeof pending === 'number' ? pending : 0
     const tierLine = renderTemplate(prompts.nudge.tier, {
@@ -580,7 +698,7 @@ function renderNudgeFromTemplates(
     parts.push('', tierRules)
   } else {
     // Range table for non-tier nudges (DSH-specific: seq-based, not ref-ID-based).
-    parts.push(rangeTable(session, kernelView, prompts, mediaPriceOf))
+    parts.push(rangeTable(session, kernelView, prompts, mediaPriceOf, precomputedRanges))
   }
 
   // Batch-compress tip (from kernel's nudge-text.ts style). The array-form
