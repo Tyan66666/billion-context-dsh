@@ -53,6 +53,7 @@ import {
   runCompactionTransaction,
   shadowedSeqsOf,
   stripOrphanedSurfaceToolMessages,
+  type CarrierSpanPolicy,
   type KernelRangeView,
 } from './region.ts'
 import { allLogMessages, eventsToCoreMessages, overflowMarkerSummary, surfaceEventsOf, toolCallIdOfResultEvent } from './messages.ts'
@@ -231,9 +232,19 @@ export interface AcpConfig {
    * makes progress (an assistant message lands) or returns to idle, so a
    * request that cannot be repaired cannot retry forever.
    */
-  readonly maxOverflowRetries?: number
-  /**
-   * Escape hatch: disable the runtime-settings integration entirely
+   readonly maxOverflowRetries?: number
+   /**
+    * What a PLAIN compress span does when it crosses a live block's checkpoint
+    * carrier (the visible summary of a still-active block). 'split' (default):
+    * compress the side-spans around each carrier separately with the model's
+    * own summary, keep every carrier visible, and report which seqs stayed —
+    * the span still reclaims everything it legally can. 'reject': the pre-#214
+    * hard reject. Composition-layer ONLY, like maxOverflowRetries — not exposed
+    * through the settings layer. Rationale: docs/carrier-span-split-design.md.
+    */
+   readonly carrierSpans?: CarrierSpanPolicy
+   /**
+    * Escape hatch: disable the runtime-settings integration entirely
    * (composition-layer ONLY — deliberately not exposed through the settings
    * layer itself: a switch that turns off its own plumbing could not be
    * reached if the plumbing broke). Default: enabled.
@@ -251,6 +262,12 @@ const DEFAULT_CONFIG: AcpConfig = {
   // Same default as the host's compaction-basic policy: one owned retry per
   // unrelieved overflow, then the original error is preserved.
   maxOverflowRetries: 1,
+  // Split spans crossing live checkpoint carriers by default (issue #214):
+  // the old hard reject sent models into verbatim-retry loops because
+  // acp_status's ranges listing merges across filtered-out carriers. The
+  // invariant the reject protected (a carrier never leaves the surface) holds
+  // under split too — the carriers stay visible; the sides are what land.
+  carrierSpans: 'split',
   // Nudge thresholds: engine defaults 0.70/0.85 — deliberately below the
   // kernel/billion-context-pi 0.75/0.95. 0.95 leaves no room to act before
   // the API rejects, and the host's compaction-basic line (thresholdRatio
@@ -269,11 +286,16 @@ export function resolveAcpConfig(config: Partial<AcpConfig> = {}): AcpConfig {
   if (!Number.isInteger(maxOverflowRetries) || maxOverflowRetries < 0) {
     throw new Error(`maxOverflowRetries must be a non-negative integer (got ${maxOverflowRetries})`)
   }
-  // Write the validated value BACK: an explicit `maxOverflowRetries: undefined`
-  // in a Partial config survives the `{ ...DEFAULT_CONFIG, ...config }` spread
-  // as `undefined`, and the request-error listener must never read that as
-  // "budget 0" (recovery silently disabled while the config says default).
-  return { ...resolved, maxOverflowRetries }
+  const carrierSpans = resolved.carrierSpans ?? 'split'
+  if (carrierSpans !== 'split' && carrierSpans !== 'reject') {
+    throw new Error(`carrierSpans must be 'split' or 'reject' (got ${String(carrierSpans)})`)
+  }
+  // Write the validated values BACK: an explicit `undefined` for either key in
+  // a Partial config survives the `{ ...DEFAULT_CONFIG, ...config }` spread as
+  // `undefined`, and consumers must never read that as "unset" (the
+  // maxOverflowRetries listener would treat it as budget 0; the compress path
+  // would fall back to its own literal instead of the composition value).
+  return { ...resolved, maxOverflowRetries, carrierSpans }
 }
 
 /**
@@ -617,6 +639,11 @@ export class AcpCompactionEngine extends CompactionEngine {
       get nudgeMaxContextLimitPct() { return engine.readSettingsSource().nudgeMaxContextLimitPct },
       get nudgeEmergencyThresholdPct() { return engine.readSettingsSource().nudgeEmergencyThresholdPct },
       coreOverrides: this.config.coreOverrides,
+      // Composition-layer policy for plain spans crossing live checkpoint
+      // carriers (issue #214) — resolveAcpConfig always writes back a
+      // validated value, so this is defined after resolution; the `?? 'split'`
+      // only guards a hand-built ToolEnvironment outside the engine.
+      carrierSpans: this.config.carrierSpans ?? 'split',
       // Display-only: which named preset produced the thresholds above (if any),
       // so /acp-prune status can name it. The resolved pct values above are what the
       // kernel actually reads — this field never feeds kernelConfigFor.

@@ -253,6 +253,7 @@ DSH 的每个模型请求都派生自其 append-only 会话日志（*surface*）
 | `autoCommand` | `true` | 在 `ctx.commands` 注册 `/acp-prune` 命令 |
 | `autoNudge` | `true` | 当内核建议时向 `agent/pre-step` 注入 nudge（运行时热调：`/acp-prune config`） |
 | `maxOverflowRetries` | `1` | 宿主确认的上下文超窗（`CONTEXT_WINDOW_EXCEEDED`）自动抢救预算：超窗时引擎挑一段**最大且合规**的范围做一次紧急压缩（摘要是引擎自己写的标记，不调模型——请求刚被拒，本就没有模型回合可写摘要；原文都留在日志里，`search_context`/`decompress` 找得回来），然后应答宿主的 `agent/request-error` 让该请求重试。预算按请求计数，模型有进展（落一条 assistant 消息）或 agent 回到 idle 即重置；`0` 关闭这个自动动作（错误原样抛给用户）。这是 ACP 唯一的自动压缩动作——压力侧始终只 nudge、由模型决定（组合行专用，不进 settings 层；原理与取舍见 [docs/overflow-recovery-design.md](docs/overflow-recovery-design.md)） |
+| `carrierSpans` | `'split'` | plain 范围跨越**仍存活压缩块的 checkpoint**（可见的摘要节点）时怎么处理：默认 `split`——按每个 carrier 切开、用模型自己给的摘要分别折叠两侧，carrier 保持可见，并在结果里报告被保留的 seq；`'reject'` 整体硬拒（#214 之前的行为，逃生开关）。默认改为 split 的原因：`acp_status` 的 ranges 视图不在 carrier 处断开，模型照着它取名，硬拒后会原样重试同一个 span。切分用的有界扩展保证再平衡永远长不回 carrier 那一侧——两种策略下 plain 范围都不会折掉存活的 carrier（组合行专用，不进 `/acp-prune config` 面；原理与取舍见 [docs/carrier-span-split-design.md](docs/carrier-span-split-design.md)） |
 | `settingsEnabled` | `true`（未配置即启用） | （可选）整体关闭运行时设置集成（组合行专用，不进 settings 层——开关不能关掉自己；关闭后组合行 `config:` 仍是唯一生效通道） |
 | `prompts` | — | （可选）自定义提示词文案：nudge / 范围表 / system prompt / 工具描述按槽位覆盖（模板 + 命名占位符，构造期校验；见上文「自定义提示词文案」与 [docs/configurable-prompts-design.md](docs/configurable-prompts-design.md)） |
 

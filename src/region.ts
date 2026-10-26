@@ -252,19 +252,37 @@ export interface ResolvedSurfaceRange {
  *
  * Missing edges are NOT an immediate error: the seqs were probably shadowed by
  * an earlier compression (stale nudge table / old compress result). The span
- * is rebuilt from its still-live remainder via recoverStaleRange — a fully
- * shadowed span throws AlreadyCompressedRangeError, a genuinely unknown edge
- * throws the not-in-surface guidance error. The returned range is what a
- * caller should actually shadow.
- */
+  * is rebuilt from its still-live remainder via recoverStaleRange — a fully
+  * shadowed span throws AlreadyCompressedRangeError, a genuinely unknown edge
+  * throws the not-in-surface guidance error. The returned range is what a
+  * caller should actually shadow.
+  */
+export interface ResolveSurfaceRangeOptions {
+  /**
+   * Hard bounds (surface node indices) on the outward-expansion pass only; the
+   * inward pass never moves edges out of the requested span. The carrier-split
+   * path (issue #214) pins these to one side-span's index range so a rebalance
+   * can never grow back across the adjacent checkpoint carrier: a tool pair
+   * cannot straddle a resolved span edge (the edge is a balanced cut) nor a
+   * carrier (checkpoints land at balanced step boundaries), so every legal
+   * enclosing pair lives inside the run — anything wider would fold the
+   * carrier and must fail with guidance instead.
+   */
+  readonly expandBounds?: { readonly minStartIdx: number; readonly maxEndIdx: number }
+}
+
 export function resolveSurfaceRange(
   session: Session,
   start: number,
   end: number,
+  opts?: ResolveSurfaceRangeOptions,
 ): ResolvedSurfaceRange {
   const nodes = session.surface.nodes
   if (start > end) {
-    throw new Error(`billion-context-dsh: reversed range ${start}..${end}`)
+    throw new Error(
+      `billion-context-dsh: reversed range ${start}..${end} — start seq must come before end seq; `
+      + 'swap the two edges, or re-read acp_status for the current surface range',
+    )
   }
   let requestedStartIdx = nodes.indexOf(start as SurfaceSeq)
   let requestedEndIdx = nodes.indexOf(end as SurfaceSeq)
@@ -297,12 +315,25 @@ export function resolveSurfaceRange(
     }
   }
   if (requestedStartIdx > requestedEndIdx) {
-    throw new Error(`billion-context-dsh: reversed range ${start}..${end}`)
+    // The live production shape behind a report like 'reversed range 7773..7951'
+    // (issue #214): compressed checkpoints splice AHEAD of older residual nodes,
+    // so a numerically-ordered span can be out of order on the surface. A bare
+    // error here was a dead end — the model retried from the same stale listing;
+    // name the cause and both exits instead.
+    throw new Error(
+      `billion-context-dsh: reversed range ${start}..${end} — both seqs are live but sit out of order on the `
+      + 'current surface: compressed checkpoints splice ahead of older content, so numeric order no longer '
+      + 'matches surface order. Re-read acp_status (its mN rows are in surface order) and name the span from '
+      + 'there, or compress each side of the spliced checkpoint as a separate content entry',
+    )
   }
   // Belt-and-braces: the surface can be locally out of order after surface
   // replacements, so index order alone does not guarantee value order.
   if (start > end) {
-    throw new Error(`billion-context-dsh: reversed range ${start}..${end}`)
+    throw new Error(
+      `billion-context-dsh: reversed range ${start}..${end} — the recovered remainder is itself out of order `
+      + 'on the current surface; consult acp_status for the current surface range',
+    )
   }
   // A boundary must be BOTH tool-pairing-balanced AND anchorable: the cut must
   // map onto kernel refs that name the shadowed span (bare-`${seq}` id, a
@@ -350,12 +381,17 @@ export function resolveSurfaceRange(
   }
   // Second pass: the inward pass collapsed (a lone tool message) — expand
   // outward from the REQUESTED span to the smallest clean enclosing pair.
+  // expandBounds pins the walk to the caller's index window (carrier-split
+  // side-spans, issue #214); hitting an unclean bound fails below instead of
+  // growing across the boundary.
+  const minStartIdx = opts?.expandBounds?.minStartIdx ?? 0
+  const maxEndIdx = opts?.expandBounds?.maxEndIdx ?? nodes.length - 1
   startIdx = requestedStartIdx
   endIdx = requestedEndIdx
-  while (startIdx > 0 && !cleanBefore(startIdx)) {
+  while (startIdx > minStartIdx && !cleanBefore(startIdx)) {
     startIdx -= 1
   }
-  while (endIdx < nodes.length - 1 && !cleanAfter(endIdx)) {
+  while (endIdx < maxEndIdx && !cleanAfter(endIdx)) {
     endIdx += 1
   }
   // Value order guard: the surface is locally non-monotonic after replacements
@@ -1509,10 +1545,17 @@ export function blockRegistry(session: Session): AcpBlockRegistryEntry[] {
  * longer exists. The compress path therefore rejects such a span (see
  * `liveCarrierRejectionNote` in src/tools.ts).
  *
- * The offered range table never produces one — `compressibleSegmentsOf` flushes
- * on every checkpoint, exactly like the instruction-row barriers — so only a
- * hand-crafted call can reach this probe.
- */
+  * The nudge range table never offers one — `compressibleSegmentsOf` flushes
+  * on every checkpoint, exactly like the instruction-row barriers. But
+  * acp_status's ranges view does: it feeds the kernel a surface with the
+  * checkpoint nodes filtered out (breakdown double-counting guard, rule 9),
+  * and the kernel merges adjacent visible messages — so a row can span across
+  * a carrier, and a model following that row reaches this probe (issue #214).
+  * The compress path then applies the `carrierSpans` policy: split the span
+  * around the carriers by default (`carrierSideSpans`), or reject with
+  * `liveCarrierRejectionNote` (src/tools.ts) when the composition opts into
+  * the pre-#214 behavior.
+  */
 export function liveCheckpointCarriersInSpan(
   session: Session,
   seqs: readonly number[],
@@ -1532,6 +1575,72 @@ export function liveCheckpointCarriersInSpan(
     if (kernelBlockId !== undefined) hits.push({ seq, kernelBlockId })
   }
   return hits.sort((a, b) => a.seq - b.seq)
+}
+
+/**
+ * Policy for a PLAIN compress span that crosses a live block's checkpoint
+ * carrier (issue #214): 'split' compresses the side-spans around each carrier
+ * separately (carriers stay visible) — the default; 'reject' is the pre-#214
+ * hard reject.
+ */
+export type CarrierSpanPolicy = 'split' | 'reject'
+
+/**
+ * Maximal contiguous runs of non-carrier surface seqs inside a shadowed span
+ * (issue #214) — one side-span per carrier gap. `shadowed` is the positional
+ * slice of the current surface between two resolved edges, so adjacency in
+ * this array IS surface adjacency. Runs are returned in surface order with
+ * their first/last SURFACE seqs, still UNRESOLVED: the caller balances each
+ * run through resolveSurfaceRange with expandBounds pinned to the run's index
+ * range, so a rebalance can never grow back across a carrier.
+ */
+export function carrierSideSpans(
+  shadowed: readonly number[],
+  carriers: readonly { seq: number }[],
+): { start: number; end: number }[] {
+  const carrierSeqs = new Set(carriers.map((carrier) => carrier.seq))
+  const spans: { start: number; end: number }[] = []
+  let runStart: number | null = null
+  let runEnd: number | null = null
+  const flush = (): void => {
+    if (runStart !== null && runEnd !== null) {
+      spans.push({ start: runStart, end: runEnd })
+    }
+    runStart = null
+    runEnd = null
+  }
+  for (const seq of shadowed) {
+    if (carrierSeqs.has(seq)) {
+      flush()
+    } else {
+      if (runStart === null) runStart = seq
+      runEnd = seq
+    }
+  }
+  flush()
+  return spans
+}
+
+/**
+ * Surface node index window bounding one carrier-split side-span (issue #214).
+ * Side spans are disjoint runs of LIVE surface seqs, and an earlier side's
+ * transaction only replaces ITS OWN run (its bounded expansion can never cross
+ * a carrier), so when a side is processed both of its edges are still on the
+ * surface — index them directly. Offsetting from the original span start
+ * instead breaks the moment an earlier side's transaction replaces that start
+ * (measured: the left fold moved the base off the surface and the right side
+ * read "no longer on the surface" while its own seqs were all live). Returns
+ * null when an edge is genuinely gone — the caller reports that side as
+ * skipped.
+ */
+export function carrierSideBounds(
+  session: Session,
+  side: { readonly start: number; readonly end: number },
+): { minStartIdx: number; maxEndIdx: number } | null {
+  const minStartIdx = session.surface.nodes.indexOf(side.start as SurfaceSeq)
+  const maxEndIdx = session.surface.nodes.indexOf(side.end as SurfaceSeq)
+  if (minStartIdx < 0 || maxEndIdx < 0 || minStartIdx > maxEndIdx) return null
+  return { minStartIdx, maxEndIdx }
 }
 
 /**

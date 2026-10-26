@@ -192,6 +192,11 @@ test('M5: resolveSurfaceRange rejects missing, reversed, and pair-broken ranges'
     'missing-boundary error should point the model at acp_status',
   )
   assert.throws(() => resolveSurfaceRange(session, 4, 1), /reversed range/)
+  assert.throws(
+    () => resolveSurfaceRange(session, 4, 1),
+    /swap the two edges/,
+    'numeric-inversion error should tell the model how to fix its own call',
+  )
   assert.deepEqual(shadowedSeqsOf(session, 1, 3), [1, 2, 3])
 })
 
@@ -476,6 +481,37 @@ test('M5: a dead zone behind a spliced checkpoint resolves (issue #155)', () => 
   assert.deepEqual(resolveSurfaceRange(session, 6, 7), { start: 5, end: 7 })
   assert.deepEqual(resolveSurfaceRange(session, 6, 6), { start: 5, end: 7 })
   assert.deepEqual(resolveSurfaceRange(session, 5, 7), { start: 5, end: 7 })
+})
+
+test('M5: a surface-inverted span explains the spliced-checkpoint cause (issue #214)', () => {
+  const session = Session.create('nonmono-guidance')
+  appendTurn(session, 1)
+  appendUser(session, longText('q0', 0))                           // seq 1
+  appendMultiToolCall(session, 'plan', ['c1', 'c2'])               // seq 2
+  appendToolResult(session, longText('res', 0), 'c1')              // seq 3
+  appendToolResult(session, longText('res', 1), 'c2')              // seq 4
+  appendUser(session, longText('q1', 1))                           // seq 5
+  // A later compaction replaces node 1 with a summary checkpoint at seq 6.
+  session.append('user/message', createUserMessage({
+    content: [{ type: 'text', text: longText('summary', 0) }],
+    source: { kind: 'user', plugin: 'compact' },
+  }), { surfaceOp: { op: 'replace', startSeq: 1, endSeq: 1 }, sourceEventSeqs: [1] })
+  // nodes: [6, 2, 3, 4, 5] — NON-monotonic: the newer checkpoint seq 6 sits ahead
+  // of the older residual nodes 2..5, so the numerically-ordered span 3..6 is
+  // live-but-inverted on the surface. Pre-#214 this died as a bare 'reversed
+  // range' dead end (the model then retried from the same stale listing); now
+  // the error names the spliced-checkpoint cause and both exits.
+  assert.throws(() => resolveSurfaceRange(session, 3, 6), /reversed range 3\.\.6/)
+  assert.throws(
+    () => resolveSurfaceRange(session, 3, 6),
+    /checkpoints splice ahead of older content/,
+    'surface-inversion error should explain the cause',
+  )
+  assert.throws(
+    () => resolveSurfaceRange(session, 3, 6),
+    /separate content entry/,
+    'surface-inversion error should offer the cut-around exit',
+  )
 })
 
 test('M5: pass-2 expansion must not cross a checkpoint into value-reversed seqs', () => {
