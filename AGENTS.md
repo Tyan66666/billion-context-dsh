@@ -35,6 +35,7 @@ src/
 ├── system-prompt.ts# M4: one-time ACP guidance section
 ├── prompts.ts      # M4: configurable prompt templates + render/validate (config.prompts)
 ├── presets.ts      # named nudge-threshold tiers (config.preset): five levels resolved into the nudge*Pct knobs; explicit value > preset > default
+├── degeneration.ts # issue #212: single-codepoint + stuck-turn degeneration detection — findDegenerateRuns (codepoint-safe maximal run finder, surrogate-pair aware) + structural gate (reasoning present + empty visible body + no tool-call, ≥ foldMinConsecutiveRounds consecutive, optional selfAbortPhrases tighten); mode off/observe/fold (default observe); fold reuses hideSurfaceSeqs per node with a fixed recovery note that never embeds the repeated sample
 ├── config.ts       # kernel config assembly (thresholds + coreOverrides)
 ├── host-tokens.ts  # shadow-price pricing: host-vocabulary mirror (estimateHostContent/estimateHostMessage/hostPriceEvent) + shadowedTokensViaMeter (ctx.tokenMeter.measure preferred, mirror fallback) + `mediaPriceViaMeter` (routed image/file structural surcharge for the range table) — rules 12/19
 ├── window.ts       # auto context-window detection (session projection first, LLM runtime probe fallback, default 128000) + output-reservation probe (defaultMaxTokens, subtracted in windowFor) + routeFor/liveRoute (the session's live request/context route — the ONE route source for the cap and the compression provenance)
