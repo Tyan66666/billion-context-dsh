@@ -7,6 +7,7 @@ import {
   detectDegeneration,
   findDegenerateRuns,
   resolveDegenerationGuard,
+  type DegenerationGuardConfig,
 } from '../src/degeneration.ts'
 import { sessionEventsOf } from '../src/session-events.ts'
 import { hideSurfaceSeqs } from '../src/region.ts'
@@ -77,6 +78,14 @@ test('resolveDegenerationGuard: invalid minRun falls back to the default 200', (
 test('resolveDegenerationGuard: foldMinConsecutiveRounds floors at 2', () => {
   assert.equal(resolveDegenerationGuard({ foldMinConsecutiveRounds: 1 }).foldMinConsecutiveRounds, 2)
   assert.equal(resolveDegenerationGuard({ foldMinConsecutiveRounds: 5 }).foldMinConsecutiveRounds, 5)
+})
+
+test('resolveDegenerationGuard: a mistyped mode degrades to observe, never fold', () => {
+  // The value arrives from YAML at runtime; a one-character typo must not
+  // silently enable automatic surface folding (the consumer treats anything
+  // that is not exactly 'off'/'observe' as fold).
+  const bad = { mode: 'Fold' } as unknown as DegenerationGuardConfig
+  assert.equal(resolveDegenerationGuard(bad).mode, 'observe')
 })
 
 test('detectDegeneration: off returns nothing even for a degenerate tail', () => {
@@ -171,3 +180,4 @@ test('fold path: hideSurfaceSeqs durably removes a degenerate node, one prune pe
   const shadowed = prunes.map((p) => (p.data as { shadowedSeqs: number[] }).shadowedSeqs[0]!)
   assert.deepEqual(shadowed.sort((a, b) => a - b), [...st.seqs].sort((a, b) => a - b))
 })
+

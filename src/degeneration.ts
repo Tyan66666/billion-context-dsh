@@ -82,7 +82,11 @@ export const DEGENERATION_RECOVERY_NOTE =
   '[ACP] your previous turn ended in degenerate generation (repeated output); it was truncated from context. Resume your task from your last valid step.'
 
 export function resolveDegenerationGuard(cfg?: DegenerationGuardConfig): ResolvedDegenerationGuard {
-  const mode = cfg?.mode ?? DEFAULT_MODE
+  // An unknown mode string (a typo like 'Fold') must degrade to the SAFE
+  // default, never to fold: the consumer treats anything that is not exactly
+  // 'off' or 'observe' as fold, so an unvalidated value would silently enable
+  // automatic surface folding from a one-character config mistake.
+  const mode: DegenerationMode = cfg?.mode === 'off' || cfg?.mode === 'fold' ? cfg.mode : DEFAULT_MODE
   let minRun = cfg?.minRun ?? DEFAULT_MIN_RUN
   if (!Number.isInteger(minRun) || minRun < 2) minRun = DEFAULT_MIN_RUN
   if (minRun < MIN_VALID_MIN_RUN) minRun = MIN_VALID_MIN_RUN
