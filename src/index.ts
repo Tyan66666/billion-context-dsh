@@ -984,7 +984,11 @@ export class AcpCompactionEngine extends CompactionEngine {
   private applyDegenerationGuard(session: Session): void {
     const cfg = resolveDegenerationGuard(this.config.degenerationGuard)
     if (cfg.mode === 'off') return
-    const findings = detectDegeneration(sessionEventsOf(session), cfg)
+    // The log keeps every original forever, so detection must be restricted to
+    // nodes still visible on the surface — otherwise an already-folded or
+    // already-compressed node re-fires every step (see detectDegeneration).
+    const liveSeqs = new Set<number>(session.surface.nodes)
+    const findings = detectDegeneration(sessionEventsOf(session), cfg, (seq) => liveSeqs.has(seq))
     if (findings.length === 0) return
     const targets = new Set<number>()
     for (const finding of findings) for (const seq of finding.seqs) targets.add(seq)

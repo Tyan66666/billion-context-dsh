@@ -181,3 +181,50 @@ test('fold path: hideSurfaceSeqs durably removes a degenerate node, one prune pe
   assert.deepEqual(shadowed.sort((a, b) => a - b), [...st.seqs].sort((a, b) => a - b))
 })
 
+test('detectDegeneration: already-shadowed nodes do not re-fire (liveness filter)', () => {
+  const s = makeSession('deg-live')
+  appendTurn(s, 1)
+  appendAssistantRaw(s, [{ type: 'reasoning', text: 'stuck one' }], 1, 1)
+  appendAssistantRaw(s, [{ type: 'reasoning', text: 'stuck two' }], 1, 2)
+  const cfg = resolveDegenerationGuard({ mode: 'fold' })
+  const isLive = () => new Set<number>(s.surface.nodes)
+
+  // Both stuck turns are live: the structural finding fires.
+  const first = detectDegeneration(sessionEventsOf(s), cfg, (seq) => isLive().has(seq))
+  const st = first.find((f) => f.kind === 'structural')
+  assert.ok(st, 'two consecutive live stuck turns must fire')
+
+  // Fold them away exactly as applyDegenerationGuard does: they leave the
+  // surface but remain in the durable log forever.
+  for (const seq of [...st!.seqs].reverse()) hideSurfaceSeqs(s, [seq], DEGENERATION_RECOVERY_NOTE)
+
+  // With the liveness filter (what index.ts passes) the log-resident originals
+  // must not re-fire on the next step...
+  assert.deepEqual(detectDegeneration(sessionEventsOf(s), cfg, (seq) => isLive().has(seq)), [],
+    'shadowed originals must not re-fire from the log')
+  // ...while the unfiltered detector still sees them — proof the filter, not
+  // coincidence, is what suppresses the repeat.
+  assert.ok(detectDegeneration(sessionEventsOf(s), cfg).find((f) => f.kind === 'structural'),
+    'the unfiltered detector still matches the log-resident episode (the trap the filter prevents)')
+})
+
+test('detectDegeneration: a single new stuck turn after a folded episode does not refire', () => {
+  const s = makeSession('deg-retry')
+  appendTurn(s, 1)
+  appendAssistantRaw(s, [{ type: 'reasoning', text: 'stuck a' }], 1, 1)
+  appendAssistantRaw(s, [{ type: 'reasoning', text: 'stuck b' }], 1, 2)
+  const cfg = resolveDegenerationGuard({ mode: 'fold' })
+  const isLive = () => new Set<number>(s.surface.nodes)
+
+  const first = detectDegeneration(sessionEventsOf(s), cfg, (seq) => isLive().has(seq))
+  const st = first.find((f) => f.kind === 'structural')!
+  for (const seq of [...st.seqs].reverse()) hideSurfaceSeqs(s, [seq], DEGENERATION_RECOVERY_NOTE)
+
+  // One more stuck turn lands AFTER the recovery note was delivered. The
+  // shadowed turns break the streak (conservative by design): one live stuck
+  // turn alone must not trigger another fold before the note gets its chance.
+  appendAssistantRaw(s, [{ type: 'reasoning', text: 'stuck c' }], 1, 3)
+  const second = detectDegeneration(sessionEventsOf(s), cfg, (seq) => isLive().has(seq))
+  assert.equal(second.find((f) => f.kind === 'structural'), undefined,
+    'the recovery note must get one full turn to work before the guard acts again')
+})

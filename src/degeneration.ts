@@ -184,10 +184,21 @@ export interface DegenerationFinding {
  * qualify under the resolved config. Pure over the event array (no live
  * session, no mutation) so it is unit-testable in isolation. Returns [] when
  * mode is 'off' or nothing qualifies.
+ *
+ * `isLiveSeq` (optional) restricts detection to nodes still visible on the
+ * current surface. The durable log keeps every original forever, so without it
+ * an already-shadowed node (folded by this guard or absorbed by a compression)
+ * keeps matching inside the lookback window: observe mode would re-log it every
+ * step, fold mode would retry a prune the reader gate rejects with zero writes.
+ * For the structural walk a non-live turn BREAKS the streak rather than being
+ * skipped — deliberately conservative: after one stuck turn was folded away and
+ * the recovery note was delivered, the episode must repeat on LIVE turns before
+ * the guard acts again (the note gets its chance to work first).
  */
 export function detectDegeneration(
   events: readonly SessionEvent[],
   cfg: ResolvedDegenerationGuard,
+  isLiveSeq?: (seq: number) => boolean,
 ): DegenerationFinding[] {
   if (cfg.mode === 'off') return []
 
@@ -213,6 +224,7 @@ export function detectDegeneration(
   for (let idx = n - 1; idx >= startIdx; idx--) {
     const t = turns[idx]!
     if (t.hasToolCalls) continue
+    if (isLiveSeq !== undefined && !isLiveSeq(t.seq)) continue
     const event = bySeq.get(t.seq)!
     const content = eventContent(event)
     const hits = findDegenerateRuns(extractText(content) + '\n' + reasoningText(content), cfg.minRun)
@@ -233,6 +245,7 @@ export function detectDegeneration(
   const structuralSeqs: number[] = []
   for (let idx = n - 1; idx >= startIdx; idx--) {
     const t = turns[idx]!
+    if (isLiveSeq !== undefined && !isLiveSeq(t.seq)) break
     if (!(t.hasReasoning && t.visibleTextEmpty && !t.hasToolCalls)) break
     structuralSeqs.push(t.seq)
     if (structuralSeqs.length >= MAX_FOLD_NODES_PER_STEP) break
