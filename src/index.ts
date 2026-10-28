@@ -59,6 +59,7 @@ import {
 import { allLogMessages, eventsToCoreMessages, overflowMarkerSummary, surfaceEventsOf, toolCallIdOfResultEvent } from './messages.ts'
 import { sessionEventsOf } from './session-events.ts'
 import {
+  assertFoldableAssistantNode,
   DEGENERATION_RECOVERY_NOTE,
   detectDegeneration,
   resolveDegenerationGuard,
@@ -987,15 +988,14 @@ export class AcpCompactionEngine extends CompactionEngine {
     // The log keeps every original forever, so detection must be restricted to
     // nodes still visible on the surface — otherwise an already-folded or
     // already-compressed node re-fires every step (see detectDegeneration).
+    const events = sessionEventsOf(session)
     const liveSeqs = new Set<number>(session.surface.nodes)
-    const findings = detectDegeneration(sessionEventsOf(session), cfg, (seq) => liveSeqs.has(seq))
+    const findings = detectDegeneration(events, cfg, (seq) => liveSeqs.has(seq))
     if (findings.length === 0) return
-    const targets = new Set<number>()
-    for (const finding of findings) for (const seq of finding.seqs) targets.add(seq)
     if (cfg.mode === 'observe') {
       for (const finding of findings) {
         this.ctx.logger.warn(
-          `billion-context-dsh: degenerationGuard[${finding.kind}] — ${finding.detail} (seqs ${[...targets].join(', ')}); set degenerationGuard.mode:'fold' to auto-remove`,
+          `billion-context-dsh: degenerationGuard[${finding.kind}] metric=${finding.metric} seqs=[${[...finding.seqs].join(', ')}] — ${finding.detail} (set degenerationGuard.mode:'fold' to auto-remove)`,
         )
       }
       return
@@ -1004,15 +1004,18 @@ export class AcpCompactionEngine extends CompactionEngine {
     // turns are separated by other surface nodes, so they never form one contiguous
     // span. A failed prune (e.g. the seq already left the surface) must not abort
     // the rest of the episode.
+    const targets = new Set<number>()
+    for (const finding of findings) for (const seq of finding.seqs) targets.add(seq)
     for (const seq of targets) {
       try {
+        assertFoldableAssistantNode(events, seq)
         hideSurfaceSeqs(session, [seq], DEGENERATION_RECOVERY_NOTE)
         this.ctx.logger.info(
           `billion-context-dsh: degenerationGuard folded degenerate assistant turn at seq ${seq}`,
         )
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error)
-        this.ctx.logger.warn(`billion-context-dsh: degenerationGuard could not fold seq ${seq}: ${message}`)
+        this.ctx.logger.warn(`billion-context-dsh: degenerationGuard did not fold seq ${seq}: ${message}`)
       }
     }
   }

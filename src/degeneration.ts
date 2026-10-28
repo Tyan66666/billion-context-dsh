@@ -175,6 +175,13 @@ export interface DegenerationFinding {
   readonly kind: 'run-length' | 'structural'
   /** Surface seqs to fold, oldest-first. Every seq is a no-tool-call assistant node. */
   readonly seqs: readonly number[]
+  /**
+   * Machine-collectable magnitude for observe-mode readers to bucket hits WITHOUT
+   * any sample text: run-length = the longest run count found; structural = the
+   * consecutive-turn streak length (so readers can aggregate per
+   * `foldMinConsecutiveRounds` tier). Counts only, never content (§五 rule).
+   */
+  readonly metric: number
   /** Human-readable summary. Deliberately carries NO sample text (§五 rule). */
   readonly detail: string
 }
@@ -221,6 +228,7 @@ export function detectDegeneration(
   // Only nodes WITHOUT tool calls: folding a call-bearing node would orphan its
   // results and 400 the next request on strict providers.
   const runSeqs: number[] = []
+  let runMaxCount = 0
   for (let idx = n - 1; idx >= startIdx; idx--) {
     const t = turns[idx]!
     if (t.hasToolCalls) continue
@@ -228,12 +236,16 @@ export function detectDegeneration(
     const event = bySeq.get(t.seq)!
     const content = eventContent(event)
     const hits = findDegenerateRuns(extractText(content) + '\n' + reasoningText(content), cfg.minRun)
-    if (hits.length > 0) runSeqs.push(t.seq)
+    if (hits.length > 0) {
+      runSeqs.push(t.seq)
+      for (const hit of hits) if (hit.count > runMaxCount) runMaxCount = hit.count
+    }
   }
   if (runSeqs.length > 0) {
     findings.push({
       kind: 'run-length',
       seqs: runSeqs.reverse(),
+      metric: runMaxCount,
       detail: `${runSeqs.length} recent assistant turn(s) carry a single-codepoint run of ${cfg.minRun}+`,
     })
   }
@@ -263,9 +275,30 @@ export function detectDegeneration(
     findings.push({
       kind: 'structural',
       seqs: structuralSeqs.reverse(),
+      metric: structuralSeqs.length,
       detail: `${structuralSeqs.length} consecutive recent assistant turn(s) carried reasoning with an empty visible body and no tool call`,
     })
   }
 
   return findings
+}
+
+/**
+ * Pre-fold safety gate (issue #212 review): re-verify, immediately before a node
+ * is shadowed, that it is an assistant turn carrying NO tool call. Folding a
+ * call-bearing node orphans its results and 400s the next request on strict
+ * providers — a fatal user-facing failure. This is a second, independent check at
+ * the point of the dangerous write; it does NOT trust the detector having filtered
+ * such nodes upstream (the two can drift on refactor). Throws when the node must
+ * not be folded; callers catch and skip (fail-safe — the session continues, the
+ * node simply stays visible).
+ */
+export function assertFoldableAssistantNode(events: readonly SessionEvent[], seq: number): void {
+  const event = events.find((candidate) => candidate.seq === seq)
+  if (event === undefined || event.type !== 'assistant/message') {
+    throw new Error(`seq ${seq} is not an assistant/message node`)
+  }
+  if (toolCallsOf(eventContent(event)).length > 0) {
+    throw new Error(`seq ${seq} carries tool calls and must not be folded`)
+  }
 }

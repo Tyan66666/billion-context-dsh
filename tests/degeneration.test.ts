@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { Session } from '@deepseek-ai/dsh-session'
 import { createAssistantMessage } from '@deepseek-ai/dsh-llm'
 import {
+  assertFoldableAssistantNode,
   DEGENERATION_RECOVERY_NOTE,
   detectDegeneration,
   findDegenerateRuns,
@@ -227,4 +228,50 @@ test('detectDegeneration: a single new stuck turn after a folded episode does no
   const second = detectDegeneration(sessionEventsOf(s), cfg, (seq) => isLive().has(seq))
   assert.equal(second.find((f) => f.kind === 'structural'), undefined,
     'the recovery note must get one full turn to work before the guard acts again')
+})
+
+test('assertFoldableAssistantNode: passes for a tool-call-free assistant turn', () => {
+  const s = makeSession('foldable-clean')
+  appendTurn(s, 1)
+  appendAssistantRaw(s, [{ type: 'reasoning', text: 'thinking' }], 1, 1)
+  const seq = s.snapshotEvents().find((e) => e.type === 'assistant/message')!.seq
+  assert.doesNotThrow(() => assertFoldableAssistantNode(sessionEventsOf(s), seq))
+})
+
+test('assertFoldableAssistantNode: throws for an assistant turn carrying tool calls', () => {
+  const s = makeSession('foldable-calls')
+  appendTurn(s, 1)
+  appendAssistantRaw(s, [
+    { type: 'reasoning', text: 'thinking' },
+    { type: 'tool-call', id: 'c1', name: 'bash', arguments: '{}' },
+  ], 1, 1)
+  const seq = s.snapshotEvents().find((e) => e.type === 'assistant/message')!.seq
+  assert.throws(() => assertFoldableAssistantNode(sessionEventsOf(s), seq), /tool calls/)
+})
+
+test('assertFoldableAssistantNode: throws for a seq that is not an assistant turn', () => {
+  const s = makeSession('foldable-not-assistant')
+  appendTurn(s, 1)
+  const someSeq = s.snapshotEvents()[0]!.seq
+  assert.throws(() => assertFoldableAssistantNode(sessionEventsOf(s), someSeq), /not an assistant\/message node/)
+  assert.throws(() => assertFoldableAssistantNode(sessionEventsOf(s), 999999), /not an assistant\/message node/)
+})
+
+test('detectDegeneration: run-length finding reports metric as the longest run count', () => {
+  const s = makeSession('metric-runlength')
+  appendTurn(s, 1)
+  appendAssistantRaw(s, [{ type: 'reasoning', text: 'x'.repeat(250) }])
+  const rl = detectDegeneration(sessionEventsOf(s), observe()).find((f) => f.kind === 'run-length')!
+  assert.equal(rl.metric, 250)
+})
+
+test('detectDegeneration: structural finding reports metric as the consecutive streak length', () => {
+  const s = makeSession('metric-structural')
+  appendTurn(s, 1)
+  appendAssistantRaw(s, [{ type: 'reasoning', text: 'a' }], 1, 1)
+  appendAssistantRaw(s, [{ type: 'reasoning', text: 'b' }], 1, 2)
+  appendAssistantRaw(s, [{ type: 'reasoning', text: 'c' }], 1, 3)
+  const st = detectDegeneration(sessionEventsOf(s), observe()).find((f) => f.kind === 'structural')!
+  assert.equal(st.metric, 3)
+  assert.equal(st.seqs.length, 3)
 })
