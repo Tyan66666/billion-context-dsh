@@ -50,12 +50,20 @@ import { DEFAULT_CONTEXT_WINDOW, probeModelWindow, projectedContextWindow, route
 import {
   buildCompressibleSeqRanges,
   deferCompressPairHide,
+  hideSurfaceSeqs,
   runCompactionTransaction,
   shadowedSeqsOf,
   stripOrphanedSurfaceToolMessages,
   type KernelRangeView,
 } from './region.ts'
 import { allLogMessages, eventsToCoreMessages, overflowMarkerSummary, surfaceEventsOf, toolCallIdOfResultEvent } from './messages.ts'
+import { sessionEventsOf } from './session-events.ts'
+import {
+  DEGENERATION_RECOVERY_NOTE,
+  detectDegeneration,
+  resolveDegenerationGuard,
+  type DegenerationGuardConfig,
+} from './degeneration.ts'
 import { shadowedTokensViaMeter } from './host-tokens.ts'
 import { kernelConfigFor } from './config.ts'
 import {
@@ -239,6 +247,15 @@ export interface AcpConfig {
    * reached if the plumbing broke). Default: enabled.
    */
   readonly settingsEnabled?: boolean
+  /**
+   * Degeneration guard — detect (and optionally fold away) model output that has
+   * collapsed into repetitive degenerate generation so the attractor stops riding
+   * along every later prompt. `mode:'observe'` (default) logs detections only;
+   * `'fold'` also durably shadows the qualifying node(s); `'off'` disables.
+   * Composition-layer ONLY, same precedent as `maxOverflowRetries` (deliberately
+   * not exposed through the runtime settings layer). See src/degeneration.ts.
+   */
+  readonly degenerationGuard?: DegenerationGuardConfig
   /** Per-stage prompt template overrides (nudge / range table / system prompt / tool descriptions). See docs/configurable-prompts-design.md. */
   readonly prompts?: AcpPrompts
 }
@@ -720,6 +737,7 @@ export class AcpCompactionEngine extends CompactionEngine {
       // the forms line, writes committed between steps land in our volatile
       // refs with no event we receive — this re-read is what applies them.
       engine.resyncSettings()
+      this.applyDegenerationGuard(payload.agent.session)
       if (!engine.readSettingsSource().autoNudge) return next()
       const decision = await next()
       if (decision.kind === 'reject') return decision
@@ -953,6 +971,47 @@ export class AcpCompactionEngine extends CompactionEngine {
   private applyReservation(window: AcpWindow, cap: number | null): AcpWindow {
     if (cap === null || cap >= window.limit) return window
     return { ...window, rawLimit: window.limit, outputReserved: cap, limit: window.limit - cap }  }
+
+  /**
+   * Degeneration guard — runs at the top of every step, independent of the nudge
+   * gate. Detects degenerate episodes among the recent assistant turns; in
+   * `observe` mode it only logs, in `fold` mode it durably shadows each qualifying
+   * no-tool-call node via `hideSurfaceSeqs` (the same prune path orphan-cleanup
+   * uses), replacing it with a fixed recovery note that never echoes the repeated
+   * sample. Runs before `next()` so a folded node is gone from the outgoing view
+   * before the request is derived.
+   */
+  private applyDegenerationGuard(session: Session): void {
+    const cfg = resolveDegenerationGuard(this.config.degenerationGuard)
+    if (cfg.mode === 'off') return
+    const findings = detectDegeneration(sessionEventsOf(session), cfg)
+    if (findings.length === 0) return
+    const targets = new Set<number>()
+    for (const finding of findings) for (const seq of finding.seqs) targets.add(seq)
+    if (cfg.mode === 'observe') {
+      for (const finding of findings) {
+        this.ctx.logger.warn(
+          `billion-context-dsh: degenerationGuard[${finding.kind}] — ${finding.detail} (seqs ${[...targets].join(', ')}); set degenerationGuard.mode:'fold' to auto-remove`,
+        )
+      }
+      return
+    }
+    // fold mode: shadow each qualifying node individually — consecutive assistant
+    // turns are separated by other surface nodes, so they never form one contiguous
+    // span. A failed prune (e.g. the seq already left the surface) must not abort
+    // the rest of the episode.
+    for (const seq of targets) {
+      try {
+        hideSurfaceSeqs(session, [seq], DEGENERATION_RECOVERY_NOTE)
+        this.ctx.logger.info(
+          `billion-context-dsh: degenerationGuard folded degenerate assistant turn at seq ${seq}`,
+        )
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        this.ctx.logger.warn(`billion-context-dsh: degenerationGuard could not fold seq ${seq}: ${message}`)
+      }
+    }
+  }
 
   /**
    * Best-effort emergency compaction for one provider-confirmed context
